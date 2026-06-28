@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'Crazer.cubeofinterest'
-version = '1.0.2'
+version = '1.0.3'
 
 base {
     archivesName = 'cubechat'
@@ -18,9 +18,14 @@ minecraft {
     mappings channel: 'official', version: '1.20.1'
 
     runs {
-        client {
+        configureEach {
             workingDirectory project.file('run')
 
+            property 'mixin.env.remapRefMap', 'true'
+            property 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
+        }
+
+        client {
             property 'forge.logging.markers', 'REGISTRIES'
             property 'forge.logging.console.level', 'debug'
 
@@ -66,10 +71,20 @@ repositories {
         name = 'MinecraftForge'
         url = 'https://maven.minecraftforge.net/'
     }
+
     maven {
         name = "luckperms"
         url = "https://repo.lucko.me/"
     }
+
+    maven {
+        name = "CurseMaven"
+        url = "https://cursemaven.com"
+        content {
+            includeGroup "curse.maven"
+        }
+    }
+
     mavenCentral()
 }
 
@@ -82,6 +97,10 @@ dependencies {
     minecraft 'net.minecraftforge:forge:1.20.1-47.2.0'
 
     compileOnly 'net.luckperms:api:5.4'
+
+    implementation fg.deobf("curse.maven:architectury-api-419699:5137938")
+    implementation fg.deobf("curse.maven:ftb-library-forge-404465:6807424")
+    implementation fg.deobf("curse.maven:ftb-essentials-410811:6555287")
 
     shade 'net.dv8tion:JDA:5.0.0'
 }
