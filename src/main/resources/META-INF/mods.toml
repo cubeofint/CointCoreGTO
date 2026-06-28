@@ -1,0 +1,34 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="All Rights Reserved"
+
+[[mods]]
+modId="cubechat"
+version="1.0.2"
+displayName="Cube Chat"
+displayURL="https://cubeofinterest.ru/"
+authors="Crazer"
+description='''
+Custom chat formatter and Discord bridge for Cube Of Interest.
+'''
+
+[[dependencies.cubechat]]
+modId="forge"
+mandatory=true
+versionRange="[47,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.cubechat]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.20.2)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.cubechat]]
+modId="luckperms"
+mandatory=false
+versionRange="[5.4,)"
+ordering="AFTER"
+side="SERVER"

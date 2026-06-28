@@ -1,0 +1,144 @@
+plugins {
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+group = 'Crazer.cubeofinterest'
+version = '1.0.2'
+
+base {
+    archivesName = 'cubechat'
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+}
+
+minecraft {
+    mappings channel: 'official', version: '1.20.1'
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+
+            mods {
+                cubechat {
+                    source sourceSets.main
+                }
+            }
+        }
+
+        server {
+            workingDirectory project.file('run-server')
+
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+
+            mods {
+                cubechat {
+                    source sourceSets.main
+                }
+            }
+        }
+
+        data {
+            workingDirectory project.file('run-data')
+
+            args '--mod', 'cubechat',
+                    '--all',
+                    '--output', file('src/generated/resources/'),
+                    '--existing', file('src/main/resources/')
+
+            mods {
+                cubechat {
+                    source sourceSets.main
+                }
+            }
+        }
+    }
+}
+
+repositories {
+    maven {
+        name = 'MinecraftForge'
+        url = 'https://maven.minecraftforge.net/'
+    }
+    maven {
+        name = "luckperms"
+        url = "https://repo.lucko.me/"
+    }
+    mavenCentral()
+}
+
+configurations {
+    shade
+    implementation.extendsFrom(shade)
+}
+
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.20.1-47.2.0'
+
+    compileOnly 'net.luckperms:api:5.4'
+
+    shade 'net.dv8tion:JDA:5.0.0'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+jar {
+    archiveClassifier.set('thin')
+
+    manifest {
+        attributes([
+                'Specification-Title'   : 'CubeChat',
+                'Specification-Vendor'  : 'Cube Of Interest',
+                'Specification-Version' : '1',
+                'Implementation-Title'  : project.name,
+                'Implementation-Version': project.jar.archiveVersion,
+                'Implementation-Vendor' : 'Cube Of Interest'
+        ])
+    }
+}
+
+shadowJar {
+    archiveClassifier.set('')
+    configurations = [project.configurations.shade]
+
+    exclude 'META-INF/*.RSA'
+    exclude 'META-INF/*.SF'
+    exclude 'META-INF/*.DSA'
+    exclude 'META-INF/INDEX.LIST'
+    exclude 'module-info.class'
+
+    // Важно: убираем Java 9/11/17/21 multi-release классы, из-за них была ошибка major version 65
+    exclude 'META-INF/versions/**'
+
+    relocate 'net.dv8tion.jda', 'crazer.cubeofinterest.cubechat.shadow.jda'
+    relocate 'okhttp3', 'crazer.cubeofinterest.cubechat.shadow.okhttp3'
+    relocate 'okio', 'crazer.cubeofinterest.cubechat.shadow.okio'
+    relocate 'kotlin', 'crazer.cubeofinterest.cubechat.shadow.kotlin'
+    relocate 'kotlinx', 'crazer.cubeofinterest.cubechat.shadow.kotlinx'
+    relocate 'org.slf4j', 'crazer.cubeofinterest.cubechat.shadow.slf4j'
+    relocate 'com.neovisionaries', 'crazer.cubeofinterest.cubechat.shadow.neovisionaries'
+    relocate 'com.fasterxml', 'crazer.cubeofinterest.cubechat.shadow.fasterxml'
+    relocate 'gnu.trove', 'crazer.cubeofinterest.cubechat.shadow.trove'
+    relocate 'org.jetbrains', 'crazer.cubeofinterest.cubechat.shadow.jetbrains'
+    relocate 'org.intellij', 'crazer.cubeofinterest.cubechat.shadow.intellij'
+    relocate 'com.sun.jna', 'crazer.cubeofinterest.cubechat.shadow.jna'
+
+    mergeServiceFiles()
+}
+
+reobf {
+    shadowJar {}
+}
+
+tasks.named('build') {
+    dependsOn tasks.named('shadowJar')
+}
