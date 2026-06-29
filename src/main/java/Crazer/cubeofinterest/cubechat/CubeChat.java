@@ -13,6 +13,7 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.commands.arguments.EntityArgument;
+import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -26,6 +27,10 @@ import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.network.NetworkEvent;
+import net.minecraftforge.network.NetworkRegistry;
+import net.minecraftforge.network.PacketDistributor;
+import net.minecraftforge.network.simple.SimpleChannel;
 import net.minecraftforge.fml.ModLoadingContext;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
@@ -37,17 +42,30 @@ import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 @Mod(CubeChat.MODID)
 public class CubeChat {
     public static final String MODID = "cubechat";
+
+    private static final String NETWORK_PROTOCOL_VERSION = "1";
+    private static final SimpleChannel NETWORK_CHANNEL = NetworkRegistry.newSimpleChannel(
+            new ResourceLocation(MODID, "main"),
+            () -> NETWORK_PROTOCOL_VERSION,
+            NETWORK_PROTOCOL_VERSION::equals,
+            NETWORK_PROTOCOL_VERSION::equals
+    );
+    private static boolean NETWORK_REGISTERED = false;
 
     private static final ForgeConfigSpec CONFIG_SPEC;
 
@@ -80,6 +98,9 @@ public class CubeChat {
     private static final Map<UUID, ChatView> CHAT_VIEWS = new HashMap<>();
     private static final Map<UUID, UUID> LAST_PRIVATE = new HashMap<>();
     private static final Map<UUID, Boolean> SHOW_TIME = new HashMap<>();
+    private static final Map<UUID, Deque<ChatHistoryMessage>> CHAT_HISTORY = new ConcurrentHashMap<>();
+    private static final AtomicLong CHAT_HISTORY_COUNTER = new AtomicLong();
+    private static final int MAX_CHAT_HISTORY_PER_PLAYER = 100;
     private static final Map<UUID, MuteData> MUTED_PLAYERS = new ConcurrentHashMap<>();
     private static final Map<UUID, TempBanData> TEMP_BANNED_PLAYERS = new ConcurrentHashMap<>();
     private static final Map<UUID, LastLocationData> LAST_LOCATIONS = new ConcurrentHashMap<>();
@@ -211,8 +232,24 @@ public class CubeChat {
     }
 
     public CubeChat() {
+        registerNetwork();
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC);
         MinecraftForge.EVENT_BUS.register(this);
+    }
+
+
+    private static void registerNetwork() {
+        if (NETWORK_REGISTERED) {
+            return;
+        }
+
+        NETWORK_CHANNEL.messageBuilder(ClearChatPacket.class, 0)
+                .encoder(ClearChatPacket::encode)
+                .decoder(ClearChatPacket::decode)
+                .consumerMainThread(ClearChatPacket::handle)
+                .add();
+
+        NETWORK_REGISTERED = true;
     }
 
     @SubscribeEvent
@@ -274,6 +311,7 @@ public class CubeChat {
 
         saveLastLocation(player);
         saveLastLocations();
+        CHAT_HISTORY.remove(player.getUUID());
     }
 
     @SubscribeEvent
@@ -858,6 +896,7 @@ public class CubeChat {
 
     private static void setChatView(ServerPlayer player, ChatView view) {
         CHAT_VIEWS.put(player.getUUID(), view);
+        replayChatHistory(player, view);
 
         if (view == ChatView.ALL) {
             player.displayClientMessage(Component.literal("§aТеперь вы видите все чаты."), true);
@@ -873,6 +912,59 @@ public class CubeChat {
 
         if (view == ChatView.PRIVATE) {
             player.displayClientMessage(Component.literal("§dТеперь вы видите только личные сообщения."), true);
+        }
+    }
+
+    private static void rememberChatMessage(ServerPlayer target, ChatView view, String formattedMessage) {
+        if (target == null || formattedMessage == null || formattedMessage.isBlank()) {
+            return;
+        }
+
+        Deque<ChatHistoryMessage> history = CHAT_HISTORY.computeIfAbsent(target.getUUID(), uuid -> new ArrayDeque<>());
+
+        synchronized (history) {
+            history.addLast(new ChatHistoryMessage(CHAT_HISTORY_COUNTER.incrementAndGet(), view, formattedMessage));
+
+            while (history.size() > MAX_CHAT_HISTORY_PER_PLAYER) {
+                history.removeFirst();
+            }
+        }
+    }
+
+    private static void sendFilteredChatMessage(ServerPlayer target, ChatView view, String formattedMessage) {
+        rememberChatMessage(target, view, formattedMessage);
+
+        if (canReceive(target, view)) {
+            target.sendSystemMessage(Component.literal(formattedMessage));
+        }
+    }
+
+    private static void replayChatHistory(ServerPlayer player, ChatView view) {
+        clearClientChat(player);
+
+        Deque<ChatHistoryMessage> history = CHAT_HISTORY.get(player.getUUID());
+        if (history == null || history.isEmpty()) {
+            return;
+        }
+
+        ArrayList<ChatHistoryMessage> snapshot;
+        synchronized (history) {
+            snapshot = new ArrayList<>(history);
+        }
+
+        for (ChatHistoryMessage message : snapshot) {
+            if (view != ChatView.ALL && message.view() != view) {
+                continue;
+            }
+
+            player.sendSystemMessage(Component.literal(message.message()));
+        }
+    }
+
+    private static void clearClientChat(ServerPlayer player) {
+        try {
+            NETWORK_CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), new ClearChatPacket());
+        } catch (Throwable ignored) {
         }
     }
 
@@ -905,10 +997,6 @@ public class CubeChat {
         double radiusSquared = radius * radius;
 
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
-            if (!canReceive(target, ChatView.LOCAL)) {
-                continue;
-            }
-
             if (target.level().dimension() != player.level().dimension()) {
                 continue;
             }
@@ -917,7 +1005,7 @@ public class CubeChat {
                 continue;
             }
 
-            target.sendSystemMessage(Component.literal(timePrefix(target) + withoutTime));
+            sendFilteredChatMessage(target, ChatView.LOCAL, timePrefix(target) + withoutTime);
             receivers++;
         }
 
@@ -943,11 +1031,7 @@ public class CubeChat {
         String discordFormatted = stripColor(withoutTime);
 
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
-            if (!canReceive(target, ChatView.GLOBAL)) {
-                continue;
-            }
-
-            target.sendSystemMessage(Component.literal(timePrefix(target) + withoutTime));
+            sendFilteredChatMessage(target, ChatView.GLOBAL, timePrefix(target) + withoutTime);
         }
 
         if (DISCORD_SEND_GLOBAL_CHAT.get()) {
@@ -983,6 +1067,9 @@ public class CubeChat {
                 + senderName
                 + " §7-> Вы: §f"
                 + message;
+
+        rememberChatMessage(sender, ChatView.PRIVATE, toSender);
+        rememberChatMessage(target, ChatView.PRIVATE, toTarget);
 
         sender.sendSystemMessage(Component.literal(toSender));
         target.sendSystemMessage(Component.literal(toTarget));
@@ -1026,11 +1113,7 @@ public class CubeChat {
         }
 
         for (ServerPlayer target : CURRENT_SERVER.getPlayerList().getPlayers()) {
-            if (!canReceive(target, ChatView.GLOBAL)) {
-                continue;
-            }
-
-            target.sendSystemMessage(Component.literal(formatted));
+            sendFilteredChatMessage(target, ChatView.GLOBAL, formatted);
         }
 
         System.out.println("[DiscordChat] " + safeAuthor + ": " + safeMessage);
@@ -2004,6 +2087,30 @@ public class CubeChat {
         }
 
         return "§8[" + ZonedDateTime.now(MOSCOW_ZONE).format(TIME_FORMAT) + " МСК] ";
+    }
+
+    private static final class ClearChatPacket {
+        private ClearChatPacket() {
+        }
+
+        private static void encode(ClearChatPacket packet, FriendlyByteBuf buffer) {
+        }
+
+        private static ClearChatPacket decode(FriendlyByteBuf buffer) {
+            return new ClearChatPacket();
+        }
+
+        private static void handle(ClearChatPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
+            NetworkEvent.Context context = contextSupplier.get();
+            context.enqueueWork(() -> net.minecraftforge.fml.DistExecutor.unsafeRunWhenOn(
+                    net.minecraftforge.api.distmarker.Dist.CLIENT,
+                    () -> CubeChatClient::clearChatMessages
+            ));
+            context.setPacketHandled(true);
+        }
+    }
+
+    private record ChatHistoryMessage(long order, ChatView view, String message) {
     }
 
     private record MuteData(String name, long untilMillis, String reason) {

@@ -128,6 +128,16 @@ public class CubeChatClient {
         }
     }
 
+    public static void clearChatMessages() {
+        Minecraft mc = Minecraft.getInstance();
+
+        if (mc.gui == null) {
+            return;
+        }
+
+        mc.gui.getChat().clearMessages(false);
+    }
+
     private static int drawButton(
             GuiGraphics graphics,
             Minecraft mc,
