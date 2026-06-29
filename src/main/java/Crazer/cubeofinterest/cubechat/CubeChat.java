@@ -26,6 +26,7 @@ import net.minecraftforge.event.ServerChatEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.network.NetworkEvent;
 import net.minecraftforge.network.NetworkRegistry;
@@ -39,6 +40,7 @@ import net.minecraftforge.fml.loading.FMLPaths;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -46,8 +48,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -95,6 +100,17 @@ public class CubeChat {
     public static ForgeConfigSpec.ConfigValue<String> RESERVED_FULL_MESSAGE;
     public static ForgeConfigSpec.ConfigValue<String> RESERVED_NO_PERMISSION_MESSAGE;
 
+    private static final ForgeConfigSpec.BooleanValue RESTART_ENABLED;
+    private static final ForgeConfigSpec.ConfigValue<List<? extends String>> RESTART_TIMES;
+    private static final ForgeConfigSpec.ConfigValue<List<? extends Integer>> RESTART_WARNING_MINUTES;
+    private static final ForgeConfigSpec.IntValue RESTART_COUNTDOWN_SECONDS;
+    private static final ForgeConfigSpec.BooleanValue RESTART_SHOW_TITLE;
+    private static final ForgeConfigSpec.BooleanValue RESTART_SHOW_ACTIONBAR;
+    private static final ForgeConfigSpec.BooleanValue RESTART_SHOW_CHAT;
+    private static final ForgeConfigSpec.BooleanValue RESTART_KICK_PLAYERS;
+    private static final ForgeConfigSpec.IntValue RESTART_KICK_SECONDS_BEFORE_STOP;
+    private static final ForgeConfigSpec.ConfigValue<String> RESTART_KICK_MESSAGE;
+
     private static final Map<UUID, ChatView> CHAT_VIEWS = new HashMap<>();
     private static final Map<UUID, UUID> LAST_PRIVATE = new HashMap<>();
     private static final Map<UUID, Boolean> SHOW_TIME = new HashMap<>();
@@ -105,6 +121,12 @@ public class CubeChat {
     private static final Map<UUID, TempBanData> TEMP_BANNED_PLAYERS = new ConcurrentHashMap<>();
     private static final Map<UUID, LastLocationData> LAST_LOCATIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, ArrayList<WarnData>> WARNED_PLAYERS = new ConcurrentHashMap<>();
+
+    private static long NEXT_RESTART_MILLIS = -1L;
+    private static long LAST_RESTART_CHECK_SECOND = -1L;
+    private static boolean RESTARTING_NOW = false;
+    private static boolean RESTART_PLAYERS_KICKED = false;
+    private static final Set<Integer> SENT_RESTART_WARNINGS = ConcurrentHashMap.newKeySet();
 
     private static MinecraftServer CURRENT_SERVER;
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm");
@@ -228,6 +250,50 @@ public class CubeChat {
 
         builder.pop();
 
+        builder.push("restart");
+
+        RESTART_ENABLED = builder
+                .comment("Enable automatic scheduled restarts. CubeChat stops the server; your host/start script must start it again.")
+                .define("enabled", false);
+
+        RESTART_TIMES = builder
+                .comment("Restart times in Europe/Moscow timezone, HH:mm format. Example: 06:00, 18:00")
+                .defineList("times", List.of("06:00", "18:00"), value -> value instanceof String);
+
+        RESTART_WARNING_MINUTES = builder
+                .comment("Warnings before restart, in minutes.")
+                .defineList("warning_minutes", List.of(30, 15, 10, 5, 3, 2, 1), value -> value instanceof Integer integer && integer >= 1);
+
+        RESTART_COUNTDOWN_SECONDS = builder
+                .comment("Big title countdown in the last N seconds before restart.")
+                .defineInRange("countdown_seconds", 10, 0, 60);
+
+        RESTART_SHOW_TITLE = builder
+                .comment("Show big title on players screens for restart warnings.")
+                .define("show_title", true);
+
+        RESTART_SHOW_ACTIONBAR = builder
+                .comment("Show actionbar restart warnings.")
+                .define("show_actionbar", true);
+
+        RESTART_SHOW_CHAT = builder
+                .comment("Send restart warnings to chat.")
+                .define("show_chat", true);
+
+        RESTART_KICK_PLAYERS = builder
+                .comment("Disconnect players before /stop with restart message.")
+                .define("kick_players", true);
+
+        RESTART_KICK_SECONDS_BEFORE_STOP = builder
+                .comment("How many seconds before /stop players should be kicked. This helps avoid item/inventory loss when players are interacting right before restart.")
+                .defineInRange("kick_seconds_before_stop", 10, 0, 60);
+
+        RESTART_KICK_MESSAGE = builder
+                .comment("Kick message when automatic restart begins.")
+                .define("kick_message", "Сервер перезапускается. Зайдите через пару минут.");
+
+        builder.pop();
+
         CONFIG_SPEC = builder.build();
     }
 
@@ -271,6 +337,8 @@ public class CubeChat {
                 DISCORD_ONLINE_STATUS_CHANNEL_ID.get(),
                 DISCORD_ONLINE_STATUS_UPDATE_SECONDS.get()
         );
+
+        resetRestartSchedule();
     }
 
     @SubscribeEvent
@@ -279,6 +347,11 @@ public class CubeChat {
         saveLastLocations();
         saveWarns();
         CubeDiscordBridge.stop();
+        NEXT_RESTART_MILLIS = -1L;
+        LAST_RESTART_CHECK_SECOND = -1L;
+        RESTARTING_NOW = false;
+        RESTART_PLAYERS_KICKED = false;
+        SENT_RESTART_WARNINGS.clear();
         CURRENT_SERVER = null;
     }
 
@@ -703,6 +776,51 @@ public class CubeChat {
         );
 
         event.getDispatcher().register(
+                Commands.literal("cuberestart")
+                        .requires(source -> source.hasPermission(2))
+                        .then(Commands.literal("status")
+                                .executes(ctx -> {
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal(getRestartStatusText()),
+                                            false
+                                    );
+                                    return 1;
+                                }))
+                        .then(Commands.literal("reload")
+                                .executes(ctx -> {
+                                    resetRestartSchedule();
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal("§aРасписание рестартов CubeChat перезагружено. " + getRestartStatusText()),
+                                            true
+                                    );
+                                    return 1;
+                                }))
+                        .then(Commands.literal("cancel")
+                                .executes(ctx -> {
+                                    NEXT_RESTART_MILLIS = -1L;
+                                    RESTARTING_NOW = false;
+                                    RESTART_PLAYERS_KICKED = false;
+                                    SENT_RESTART_WARNINGS.clear();
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal("§cБлижайший рестарт CubeChat отменён до /cuberestart reload или перезапуска сервера."),
+                                            true
+                                    );
+                                    return 1;
+                                }))
+                        .then(Commands.literal("now")
+                                .then(Commands.argument("seconds", IntegerArgumentType.integer(5, 3600))
+                                        .executes(ctx -> {
+                                            int seconds = IntegerArgumentType.getInteger(ctx, "seconds");
+                                            scheduleManualRestart(seconds);
+                                            ctx.getSource().sendSuccess(
+                                                    () -> Component.literal("§eРучной рестарт запланирован через " + seconds + " сек."),
+                                                    true
+                                            );
+                                            return 1;
+                                        })))
+        );
+
+        event.getDispatcher().register(
                 Commands.literal("g")
                         .then(Commands.argument("message", StringArgumentType.greedyString())
                                 .executes(ctx -> {
@@ -821,6 +939,261 @@ public class CubeChat {
         );
     }
 
+
+    @SubscribeEvent
+    public void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.END) {
+            return;
+        }
+
+        MinecraftServer server = CURRENT_SERVER;
+        if (server == null) {
+            return;
+        }
+
+        long currentSecond = System.currentTimeMillis() / 1000L;
+        if (currentSecond == LAST_RESTART_CHECK_SECOND) {
+            return;
+        }
+        LAST_RESTART_CHECK_SECOND = currentSecond;
+
+        handleRestartTick(server);
+    }
+
+    private static void resetRestartSchedule() {
+        SENT_RESTART_WARNINGS.clear();
+        RESTARTING_NOW = false;
+        RESTART_PLAYERS_KICKED = false;
+        LAST_RESTART_CHECK_SECOND = -1L;
+        NEXT_RESTART_MILLIS = calculateNextRestartMillis();
+
+        if (NEXT_RESTART_MILLIS > 0L) {
+            System.out.println("[CubeChat] Next automatic restart: " + formatDateTime(NEXT_RESTART_MILLIS));
+        } else {
+            System.out.println("[CubeChat] Automatic restarts are disabled or no valid restart times configured.");
+        }
+    }
+
+    private static void scheduleManualRestart(int seconds) {
+        SENT_RESTART_WARNINGS.clear();
+        RESTARTING_NOW = false;
+        RESTART_PLAYERS_KICKED = false;
+        LAST_RESTART_CHECK_SECOND = -1L;
+        NEXT_RESTART_MILLIS = System.currentTimeMillis() + Math.max(5, seconds) * 1000L;
+        broadcastRestartWarning(Math.max(5, seconds), true);
+    }
+
+    private static void handleRestartTick(MinecraftServer server) {
+        if (NEXT_RESTART_MILLIS <= 0L) {
+            if (RESTART_ENABLED.get()) {
+                NEXT_RESTART_MILLIS = calculateNextRestartMillis();
+            }
+            return;
+        }
+
+        long millisLeft = NEXT_RESTART_MILLIS - System.currentTimeMillis();
+        long secondsLeftLong = Math.max(0L, (millisLeft + 999L) / 1000L);
+
+        if (secondsLeftLong <= 0L) {
+            performRestart(server);
+            return;
+        }
+
+        if (secondsLeftLong > Integer.MAX_VALUE) {
+            return;
+        }
+
+        int secondsLeft = (int) secondsLeftLong;
+
+        int kickSecondsBeforeStop = RESTART_KICK_SECONDS_BEFORE_STOP.get();
+        if (RESTART_KICK_PLAYERS.get()
+                && kickSecondsBeforeStop > 0
+                && secondsLeft <= kickSecondsBeforeStop
+                && !RESTART_PLAYERS_KICKED) {
+            kickPlayersBeforeRestart(server);
+        }
+
+        int countdownSeconds = RESTART_COUNTDOWN_SECONDS.get();
+
+        if (countdownSeconds > 0 && secondsLeft <= countdownSeconds) {
+            int key = -secondsLeft;
+            if (SENT_RESTART_WARNINGS.add(key)) {
+                broadcastRestartWarning(secondsLeft, true);
+            }
+            return;
+        }
+
+        for (Integer minutes : RESTART_WARNING_MINUTES.get()) {
+            if (minutes == null || minutes <= 0) {
+                continue;
+            }
+
+            int warningSeconds = minutes * 60;
+            if (secondsLeft <= warningSeconds && secondsLeft > warningSeconds - 3 && SENT_RESTART_WARNINGS.add(warningSeconds)) {
+                broadcastRestartWarning(secondsLeft, true);
+                return;
+            }
+        }
+    }
+
+    private static long calculateNextRestartMillis() {
+        if (!RESTART_ENABLED.get()) {
+            return -1L;
+        }
+
+        ZonedDateTime now = ZonedDateTime.now(MOSCOW_ZONE);
+        ZonedDateTime best = null;
+
+        for (String rawTime : RESTART_TIMES.get()) {
+            if (rawTime == null || rawTime.isBlank()) {
+                continue;
+            }
+
+            try {
+                LocalTime time = LocalTime.parse(rawTime.trim());
+                ZonedDateTime candidate = now.withHour(time.getHour()).withMinute(time.getMinute()).withSecond(0).withNano(0);
+
+                if (!candidate.isAfter(now)) {
+                    candidate = candidate.plusDays(1);
+                }
+
+                if (best == null || candidate.isBefore(best)) {
+                    best = candidate;
+                }
+            } catch (Throwable ignored) {
+                System.out.println("[CubeChat] Invalid restart time in config: " + rawTime + ". Use HH:mm, for example 06:00");
+            }
+        }
+
+        return best == null ? -1L : best.toInstant().toEpochMilli();
+    }
+
+    private static void broadcastRestartWarning(int secondsLeft, boolean important) {
+        MinecraftServer server = CURRENT_SERVER;
+        if (server == null) {
+            return;
+        }
+
+        String timeText = formatRestartTime(secondsLeft);
+        String chatMessage = "§c⚠ Рестарт сервера через §e" + timeText + "§c!";
+        String title = "§c⚠ РЕСТАРТ СЕРВЕРА ⚠";
+        String subtitle = "§eДо рестарта " + timeText;
+
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (RESTART_SHOW_CHAT.get()) {
+                player.sendSystemMessage(Component.literal(chatMessage));
+            }
+
+            if (RESTART_SHOW_ACTIONBAR.get()) {
+                player.displayClientMessage(Component.literal(chatMessage), true);
+            }
+
+            if (RESTART_SHOW_TITLE.get() && important) {
+                player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket(10, 60, 10));
+                player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket(Component.literal(title)));
+                player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket(Component.literal(subtitle)));
+            }
+        }
+
+        System.out.println("[CubeChat] Restart warning: " + stripColor(chatMessage));
+        CubeDiscordBridge.sendToDiscord("⚠ Рестарт сервера через **" + stripColor(timeText) + "**!");
+    }
+
+
+    private static void kickPlayersBeforeRestart(MinecraftServer server) {
+        if (RESTART_PLAYERS_KICKED) {
+            return;
+        }
+
+        RESTART_PLAYERS_KICKED = true;
+
+        System.out.println("[CubeChat] Kicking players before restart and saving the world.");
+
+        try {
+            server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), "save-all flush");
+        } catch (Throwable e) {
+            System.out.println("[CubeChat] Failed to execute save-all flush before kicking players: " + e.getMessage());
+        }
+
+        Component kickMessage = Component.literal(RESTART_KICK_MESSAGE.get());
+        for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
+            try {
+                player.connection.disconnect(kickMessage);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private static void performRestart(MinecraftServer server) {
+        if (RESTARTING_NOW) {
+            return;
+        }
+
+        RESTARTING_NOW = true;
+        NEXT_RESTART_MILLIS = -1L;
+
+        if (RESTART_KICK_PLAYERS.get() && !RESTART_PLAYERS_KICKED) {
+            kickPlayersBeforeRestart(server);
+        }
+
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetTitlesAnimationPacket(5, 80, 10));
+            player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket(Component.literal("§cСЕРВЕР ПЕРЕЗАПУСКАЕТСЯ")));
+            player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket(Component.literal("§7Зайдите через пару минут")));
+            player.sendSystemMessage(Component.literal("§cСервер перезапускается. Зайдите через пару минут."));
+        }
+
+        CubeDiscordBridge.sendToDiscord("🔄 **Сервер уходит на плановый рестарт.**");
+        System.out.println("[CubeChat] Automatic restart started.");
+
+        server.execute(() -> {
+            try {
+                server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), "save-all flush");
+            } catch (Throwable e) {
+                System.out.println("[CubeChat] Failed to execute save-all flush: " + e.getMessage());
+            }
+
+            try {
+                server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), "stop");
+            } catch (Throwable e) {
+                System.out.println("[CubeChat] Failed to execute stop command: " + e.getMessage());
+                try {
+                    server.halt(false);
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+    }
+
+    private static String getRestartStatusText() {
+        if (NEXT_RESTART_MILLIS <= 0L) {
+            return RESTART_ENABLED.get()
+                    ? "§eАвто-рестарт включён, но ближайшее время не рассчитано. Используйте /cuberestart reload."
+                    : "§cАвто-рестарт выключен в конфиге.";
+        }
+
+        long secondsLeft = Math.max(0L, (NEXT_RESTART_MILLIS - System.currentTimeMillis() + 999L) / 1000L);
+        return "§aБлижайший рестарт: §e" + formatDateTime(NEXT_RESTART_MILLIS) + " МСК§7, осталось §e" + formatRestartTime((int) Math.min(Integer.MAX_VALUE, secondsLeft));
+    }
+
+    private static String formatRestartTime(int seconds) {
+        seconds = Math.max(0, seconds);
+
+        if (seconds < 60) {
+            return seconds + " сек.";
+        }
+
+        int minutes = seconds / 60;
+        int restSeconds = seconds % 60;
+
+        if (minutes < 60) {
+            return restSeconds > 0 ? minutes + " мин. " + restSeconds + " сек." : minutes + " мин.";
+        }
+
+        int hours = minutes / 60;
+        int restMinutes = minutes % 60;
+        return restMinutes > 0 ? hours + " ч. " + restMinutes + " мин." : hours + " ч.";
+    }
 
     @SubscribeEvent
     public void onCommand(net.minecraftforge.event.CommandEvent event) {
