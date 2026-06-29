@@ -15,6 +15,12 @@ import net.minecraftforge.fml.common.Mod;
         bus = Mod.EventBusSubscriber.Bus.FORGE
 )
 public class CubeChatClient {
+    public static final int CLIENT_CHAT_LINE_LIMIT = 5000;
+
+    public static int getClientChatLineLimit() {
+        return CLIENT_CHAT_LINE_LIMIT;
+    }
+
     private static final int PANEL_PADDING_X = 6;
     private static final int PANEL_PADDING_Y = 4;
     private static final int BUTTON_GAP = 6;

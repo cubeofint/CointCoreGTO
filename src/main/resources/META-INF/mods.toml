@@ -32,3 +32,6 @@ mandatory=false
 versionRange="[5.4,)"
 ordering="AFTER"
 side="SERVER"
+
+[[mixins]]
+config="cubechat.mixins.json"

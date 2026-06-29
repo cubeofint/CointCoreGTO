@@ -118,7 +118,7 @@ public class CubeChat {
     private static final Map<UUID, Boolean> SHOW_TIME = new HashMap<>();
     private static final Map<UUID, Deque<ChatHistoryMessage>> CHAT_HISTORY = new ConcurrentHashMap<>();
     private static final AtomicLong CHAT_HISTORY_COUNTER = new AtomicLong();
-    private static final int MAX_CHAT_HISTORY_PER_PLAYER = 100;
+    private static final int MAX_CHAT_HISTORY_PER_PLAYER = 5000;
     private static final Map<UUID, MuteData> MUTED_PLAYERS = new ConcurrentHashMap<>();
     private static final Map<UUID, TempBanData> TEMP_BANNED_PLAYERS = new ConcurrentHashMap<>();
     private static final Map<UUID, LastLocationData> LAST_LOCATIONS = new ConcurrentHashMap<>();
@@ -2703,7 +2703,7 @@ public class CubeChat {
 
         int start = Math.max(0, history.size() - 20);
         if (start > 0) {
-            int hidden = start;
+            final int hidden = start;
             source.sendSuccess(() -> Component.literal("§7Показаны последние 20 записей. Старых записей скрыто: " + hidden), false);
         }
 
