@@ -123,6 +123,7 @@ public class CubeChat {
     private static final Map<UUID, TempBanData> TEMP_BANNED_PLAYERS = new ConcurrentHashMap<>();
     private static final Map<UUID, LastLocationData> LAST_LOCATIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, ArrayList<WarnData>> WARNED_PLAYERS = new ConcurrentHashMap<>();
+    private static final Map<UUID, ArrayList<PunishmentHistoryData>> PUNISHMENT_HISTORY = new ConcurrentHashMap<>();
 
     private static long NEXT_RESTART_MILLIS = -1L;
     private static long LAST_RESTART_CHECK_SECOND = -1L;
@@ -330,6 +331,7 @@ public class CubeChat {
         loadTempBans();
         loadLastLocations();
         loadWarns();
+        loadPunishmentHistory();
 
         CubeDiscordBridge.start(
                 CURRENT_SERVER,
@@ -353,6 +355,7 @@ public class CubeChat {
         saveTempBans();
         saveLastLocations();
         saveWarns();
+        savePunishmentHistory();
         CubeDiscordBridge.stop();
         NEXT_RESTART_MILLIS = -1L;
         LAST_RESTART_CHECK_SECOND = -1L;
@@ -470,6 +473,7 @@ public class CubeChat {
                                             }
 
                                             mutePlayer(target, duration, "");
+                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "MUTE", getCommandSourceName(ctx.getSource()), duration, "");
 
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time),
@@ -491,6 +495,7 @@ public class CubeChat {
                                                     }
 
                                                     mutePlayer(target, duration, reason);
+                                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "MUTE", getCommandSourceName(ctx.getSource()), duration, reason);
 
                                                     ctx.getSource().sendSuccess(
                                                             () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time + ". Причина: " + reason),
@@ -518,6 +523,7 @@ public class CubeChat {
                                     }
 
                                     unmutePlayer(target);
+                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "UNMUTE", getCommandSourceName(ctx.getSource()), 0L, "");
 
                                     ctx.getSource().sendSuccess(
                                             () -> Component.literal("Мут снят с игрока " + target.getGameProfile().getName()),
@@ -538,10 +544,14 @@ public class CubeChat {
                                 .executes(ctx -> {
                                     String targetName = StringArgumentType.getString(ctx, "target");
 
+                                    UUID targetUuid = findKnownUuidByName(ctx.getSource().getServer(), targetName);
                                     ctx.getSource().getServer().getCommands().performPrefixedCommand(
                                             ctx.getSource(),
                                             "pardon " + targetName
                                     );
+                                    if (targetUuid != null) {
+                                        recordPunishment(targetUuid, targetName, "UNBAN", getCommandSourceName(ctx.getSource()), 0L, "");
+                                    }
                                     return 1;
                                 })
                         )
@@ -564,6 +574,7 @@ public class CubeChat {
                                             }
 
                                             tempBanPlayer(target, duration, "");
+                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "TEMPBAN", getCommandSourceName(ctx.getSource()), duration, "");
 
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time),
@@ -585,6 +596,7 @@ public class CubeChat {
                                                     }
 
                                                     tempBanPlayer(target, duration, reason);
+                                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "TEMPBAN", getCommandSourceName(ctx.getSource()), duration, reason);
 
                                                     ctx.getSource().sendSuccess(
                                                             () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time + ". Причина: " + reason),
@@ -605,10 +617,15 @@ public class CubeChat {
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
                                     String targetName = StringArgumentType.getString(ctx, "target");
+                                    UUID targetUuid = findKnownUuidByName(ctx.getSource().getServer(), targetName);
 
                                     if (!untempBanPlayerByName(targetName)) {
                                         ctx.getSource().sendFailure(Component.literal("Игрок не находится во временном бане."));
                                         return 0;
+                                    }
+
+                                    if (targetUuid != null) {
+                                        recordPunishment(targetUuid, targetName, "UNTEMPBAN", getCommandSourceName(ctx.getSource()), 0L, "");
                                     }
 
                                     ctx.getSource().sendSuccess(
@@ -629,6 +646,7 @@ public class CubeChat {
                                     ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
 
                                     warnPlayer(target, "");
+                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "WARN", getCommandSourceName(ctx.getSource()), 0L, "");
 
                                     int count = getWarnCount(target.getUUID());
                                     ctx.getSource().sendSuccess(
@@ -644,6 +662,7 @@ public class CubeChat {
                                             String reason = StringArgumentType.getString(ctx, "reason");
 
                                             warnPlayer(target, reason);
+                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "WARN", getCommandSourceName(ctx.getSource()), 0L, reason);
 
                                             int count = getWarnCount(target.getUUID());
                                             ctx.getSource().sendSuccess(
@@ -704,9 +723,15 @@ public class CubeChat {
                                 .executes(ctx -> {
                                     String targetName = StringArgumentType.getString(ctx, "target");
 
+                                    UUID targetUuid = findKnownUuidByName(ctx.getSource().getServer(), targetName);
+
                                     if (!removeLastWarnByName(targetName)) {
                                         ctx.getSource().sendFailure(Component.literal("У игрока нет варнов."));
                                         return 0;
+                                    }
+
+                                    if (targetUuid != null) {
+                                        recordPunishment(targetUuid, targetName, "UNWARN", getCommandSourceName(ctx.getSource()), 0L, "last");
                                     }
 
                                     int count = getWarnCountByName(targetName);
@@ -722,9 +747,15 @@ public class CubeChat {
                                             String targetName = StringArgumentType.getString(ctx, "target");
                                             int number = IntegerArgumentType.getInteger(ctx, "number");
 
+                                            UUID targetUuid = findKnownUuidByName(ctx.getSource().getServer(), targetName);
+
                                             if (!removeWarnByNameAndNumber(targetName, number)) {
                                                 ctx.getSource().sendFailure(Component.literal("У игрока нет варна с номером " + number + "."));
                                                 return 0;
+                                            }
+
+                                            if (targetUuid != null) {
+                                                recordPunishment(targetUuid, targetName, "UNWARN", getCommandSourceName(ctx.getSource()), 0L, "#" + number);
                                             }
 
                                             int count = getWarnCountByName(targetName);
@@ -735,6 +766,332 @@ public class CubeChat {
                                             return 1;
                                         })
                                 )
+                        )
+        );
+
+        event.getDispatcher().register(
+                Commands.literal("history")
+                        .requires(source -> hasCommandPermission(source, "cubechat.history"))
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
+                                .executes(ctx -> {
+                                    String targetName = StringArgumentType.getString(ctx, "target");
+                                    showPunishmentHistory(ctx.getSource(), targetName);
+                                    return 1;
+                                })
+                        )
+        );
+
+        event.getDispatcher().register(
+                Commands.literal("punishhistory")
+                        .requires(source -> hasCommandPermission(source, "cubechat.history"))
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
+                                .executes(ctx -> {
+                                    String targetName = StringArgumentType.getString(ctx, "target");
+                                    showPunishmentHistory(ctx.getSource(), targetName);
+                                    return 1;
+                                })
+                        )
+        );
+
+
+        event.getDispatcher().register(
+                Commands.literal("cmute")
+                        .requires(source -> hasCommandPermission(source, "cubechat.mute"))
+                        .then(Commands.argument("target", EntityArgument.player())
+                                .then(Commands.argument("time", StringArgumentType.word())
+                                        .executes(ctx -> {
+                                            ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
+                                            String time = StringArgumentType.getString(ctx, "time");
+                                            long duration = parsePunishmentTime(time);
+
+                                            if (duration <= 0L) {
+                                                ctx.getSource().sendFailure(Component.literal("Использование: /cmute <ник> <10s/5m/2h/1d> [причина]"));
+                                                return 0;
+                                            }
+
+                                            mutePlayer(target, duration, "");
+                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "MUTE", getCommandSourceName(ctx.getSource()), duration, "");
+
+                                            ctx.getSource().sendSuccess(
+                                                    () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time),
+                                                    true
+                                            );
+                                            target.sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
+                                            return 1;
+                                        })
+                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                                .executes(ctx -> {
+                                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
+                                                    String time = StringArgumentType.getString(ctx, "time");
+                                                    String reason = StringArgumentType.getString(ctx, "reason");
+                                                    long duration = parsePunishmentTime(time);
+
+                                                    if (duration <= 0L) {
+                                                        ctx.getSource().sendFailure(Component.literal("Использование: /cmute <ник> <10s/5m/2h/1d> [причина]"));
+                                                        return 0;
+                                                    }
+
+                                                    mutePlayer(target, duration, reason);
+                                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "MUTE", getCommandSourceName(ctx.getSource()), duration, reason);
+
+                                                    ctx.getSource().sendSuccess(
+                                                            () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time + ". Причина: " + reason),
+                                                            true
+                                                    );
+                                                    target.sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
+                                                    target.sendSystemMessage(Component.literal("§cПричина: §f" + reason));
+                                                    return 1;
+                                                })
+                                        )
+                                )
+                        )
+        );
+
+        event.getDispatcher().register(
+                Commands.literal("cunmute")
+                        .requires(source -> hasCommandPermission(source, "cubechat.mute"))
+                        .then(Commands.argument("target", EntityArgument.player())
+                                .executes(ctx -> {
+                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
+
+                                    if (!MUTED_PLAYERS.containsKey(target.getUUID())) {
+                                        ctx.getSource().sendFailure(Component.literal("Игрок не замучен."));
+                                        return 0;
+                                    }
+
+                                    unmutePlayer(target);
+                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "UNMUTE", getCommandSourceName(ctx.getSource()), 0L, "");
+
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal("Мут снят с игрока " + target.getGameProfile().getName()),
+                                            true
+                                    );
+                                    target.sendSystemMessage(Component.literal("§aС тебя сняли мут"));
+                                    return 1;
+                                })
+                        )
+        );
+
+        event.getDispatcher().register(
+                Commands.literal("ctempban")
+                        .requires(source -> hasCommandPermission(source, "cubechat.tempban"))
+                        .then(Commands.argument("target", EntityArgument.player())
+                                .then(Commands.argument("time", StringArgumentType.word())
+                                        .executes(ctx -> {
+                                            ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
+                                            String time = StringArgumentType.getString(ctx, "time");
+                                            long duration = parsePunishmentTime(time);
+
+                                            if (duration <= 0L) {
+                                                ctx.getSource().sendFailure(Component.literal("Использование: /ctempban <ник> <10s/5m/2h/1d> [причина]"));
+                                                return 0;
+                                            }
+
+                                            tempBanPlayer(target, duration, "");
+                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "TEMPBAN", getCommandSourceName(ctx.getSource()), duration, "");
+
+                                            ctx.getSource().sendSuccess(
+                                                    () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time),
+                                                    true
+                                            );
+                                            disconnectTempBannedPlayer(target);
+                                            return 1;
+                                        })
+                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                                .executes(ctx -> {
+                                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
+                                                    String time = StringArgumentType.getString(ctx, "time");
+                                                    String reason = StringArgumentType.getString(ctx, "reason");
+                                                    long duration = parsePunishmentTime(time);
+
+                                                    if (duration <= 0L) {
+                                                        ctx.getSource().sendFailure(Component.literal("Использование: /ctempban <ник> <10s/5m/2h/1d> [причина]"));
+                                                        return 0;
+                                                    }
+
+                                                    tempBanPlayer(target, duration, reason);
+                                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "TEMPBAN", getCommandSourceName(ctx.getSource()), duration, reason);
+
+                                                    ctx.getSource().sendSuccess(
+                                                            () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time + ". Причина: " + reason),
+                                                            true
+                                                    );
+                                                    disconnectTempBannedPlayer(target);
+                                                    return 1;
+                                                })
+                                        )
+                                )
+                        )
+        );
+
+        event.getDispatcher().register(
+                Commands.literal("cuntempban")
+                        .requires(source -> hasCommandPermission(source, "cubechat.tempban"))
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
+                                .executes(ctx -> {
+                                    String targetName = StringArgumentType.getString(ctx, "target");
+                                    UUID targetUuid = findKnownUuidByName(ctx.getSource().getServer(), targetName);
+
+                                    if (!untempBanPlayerByName(targetName)) {
+                                        ctx.getSource().sendFailure(Component.literal("Игрок не находится во временном бане."));
+                                        return 0;
+                                    }
+
+                                    if (targetUuid != null) {
+                                        recordPunishment(targetUuid, targetName, "UNTEMPBAN", getCommandSourceName(ctx.getSource()), 0L, "");
+                                    }
+
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal("Временный бан снят с игрока " + targetName),
+                                            true
+                                    );
+                                    return 1;
+                                })
+                        )
+        );
+
+        event.getDispatcher().register(
+                Commands.literal("cwarn")
+                        .requires(source -> hasCommandPermission(source, "cubechat.warn"))
+                        .then(Commands.argument("target", EntityArgument.player())
+                                .executes(ctx -> {
+                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
+
+                                    warnPlayer(target, "");
+                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "WARN", getCommandSourceName(ctx.getSource()), 0L, "");
+
+                                    int count = getWarnCount(target.getUUID());
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal("Игрок " + target.getGameProfile().getName() + " получил предупреждение. Всего варнов: " + count),
+                                            true
+                                    );
+                                    target.sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
+                                    return 1;
+                                })
+                                .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                        .executes(ctx -> {
+                                            ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
+                                            String reason = StringArgumentType.getString(ctx, "reason");
+
+                                            warnPlayer(target, reason);
+                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "WARN", getCommandSourceName(ctx.getSource()), 0L, reason);
+
+                                            int count = getWarnCount(target.getUUID());
+                                            ctx.getSource().sendSuccess(
+                                                    () -> Component.literal("Игрок " + target.getGameProfile().getName() + " получил предупреждение. Всего варнов: " + count + ". Причина: " + reason),
+                                                    true
+                                            );
+                                            target.sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
+                                            target.sendSystemMessage(Component.literal("§cПричина: §f" + reason));
+                                            return 1;
+                                        })
+                                )
+                        )
+        );
+
+        event.getDispatcher().register(
+                Commands.literal("cwarns")
+                        .requires(source -> hasCommandPermission(source, "cubechat.warn"))
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
+                                .executes(ctx -> {
+                                    String targetName = StringArgumentType.getString(ctx, "target");
+                                    ArrayList<WarnData> warns = getWarnsByName(targetName);
+
+                                    if (warns == null || warns.isEmpty()) {
+                                        ctx.getSource().sendSuccess(
+                                                () -> Component.literal("У игрока " + targetName + " нет варнов."),
+                                                false
+                                        );
+                                        return 1;
+                                    }
+
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal("У игрока " + targetName + " варнов: " + warns.size()),
+                                            false
+                                    );
+
+                                    for (int i = 0; i < warns.size(); i++) {
+                                        WarnData warn = warns.get(i);
+                                        String reason = warn.reason() == null || warn.reason().isBlank() ? "не указана" : warn.reason();
+                                        int number = i + 1;
+
+                                        ctx.getSource().sendSuccess(
+                                                () -> Component.literal("#" + number + " | " + formatDateTime(warn.createdMillis()) + " | Причина: " + reason),
+                                                false
+                                        );
+                                    }
+
+                                    return 1;
+                                })
+                        )
+        );
+
+        event.getDispatcher().register(
+                Commands.literal("cunwarn")
+                        .requires(source -> hasCommandPermission(source, "cubechat.warn"))
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
+                                .executes(ctx -> {
+                                    String targetName = StringArgumentType.getString(ctx, "target");
+                                    UUID targetUuid = findKnownUuidByName(ctx.getSource().getServer(), targetName);
+
+                                    if (!removeLastWarnByName(targetName)) {
+                                        ctx.getSource().sendFailure(Component.literal("У игрока нет варнов."));
+                                        return 0;
+                                    }
+
+                                    if (targetUuid != null) {
+                                        recordPunishment(targetUuid, targetName, "UNWARN", getCommandSourceName(ctx.getSource()), 0L, "last");
+                                    }
+
+                                    int count = getWarnCountByName(targetName);
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal("Последний варн снят с игрока " + targetName + ". Осталось варнов: " + count),
+                                            true
+                                    );
+                                    return 1;
+                                })
+                                .then(Commands.argument("number", IntegerArgumentType.integer(1))
+                                        .suggests((ctx, builder) -> suggestWarnNumbers(StringArgumentType.getString(ctx, "target"), builder))
+                                        .executes(ctx -> {
+                                            String targetName = StringArgumentType.getString(ctx, "target");
+                                            int number = IntegerArgumentType.getInteger(ctx, "number");
+                                            UUID targetUuid = findKnownUuidByName(ctx.getSource().getServer(), targetName);
+
+                                            if (!removeWarnByNameAndNumber(targetName, number)) {
+                                                ctx.getSource().sendFailure(Component.literal("У игрока нет варна с номером " + number + "."));
+                                                return 0;
+                                            }
+
+                                            if (targetUuid != null) {
+                                                recordPunishment(targetUuid, targetName, "UNWARN", getCommandSourceName(ctx.getSource()), 0L, "#" + number);
+                                            }
+
+                                            int count = getWarnCountByName(targetName);
+                                            ctx.getSource().sendSuccess(
+                                                    () -> Component.literal("Варн #" + number + " снят с игрока " + targetName + ". Осталось варнов: " + count),
+                                                    true
+                                            );
+                                            return 1;
+                                        })
+                                )
+                        )
+        );
+
+        event.getDispatcher().register(
+                Commands.literal("chistory")
+                        .requires(source -> hasCommandPermission(source, "cubechat.history"))
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
+                                .executes(ctx -> {
+                                    String targetName = StringArgumentType.getString(ctx, "target");
+                                    showPunishmentHistory(ctx.getSource(), targetName);
+                                    return 1;
+                                })
                         )
         );
 
@@ -2298,6 +2655,167 @@ public class CubeChat {
         player.sendSystemMessage(Component.literal(fullMessage));
     }
 
+    private static Path punishmentHistoryPath() {
+        return FMLPaths.CONFIGDIR.get().resolve("cubechat-punishment-history.txt");
+    }
+
+    private static void recordPunishment(UUID uuid, String playerName, String type, String moderator, long durationMillis, String reason) {
+        if (uuid == null) {
+            return;
+        }
+
+        PunishmentHistoryData data = new PunishmentHistoryData(
+                playerName == null ? "" : playerName,
+                type == null ? "UNKNOWN" : type,
+                moderator == null || moderator.isBlank() ? "Console" : moderator,
+                System.currentTimeMillis(),
+                Math.max(0L, durationMillis),
+                reason == null ? "" : reason
+        );
+
+        PUNISHMENT_HISTORY.computeIfAbsent(uuid, key -> new ArrayList<>()).add(data);
+        savePunishmentHistory();
+    }
+
+    private static void showPunishmentHistory(CommandSourceStack source, String targetName) {
+        MinecraftServer server = source.getServer();
+        UUID targetUuid = findKnownUuidByName(server, targetName);
+
+        if (targetUuid == null) {
+            source.sendFailure(Component.literal("Игрок не найден в известных данных CubeChat: " + targetName));
+            return;
+        }
+
+        ArrayList<PunishmentHistoryData> history = PUNISHMENT_HISTORY.get(targetUuid);
+        if (history == null || history.isEmpty()) {
+            source.sendSuccess(() -> Component.literal("§aУ игрока " + targetName + " нет истории наказаний."), false);
+            return;
+        }
+
+        String resolvedDisplayName = history.get(history.size() - 1).name();
+        if (resolvedDisplayName == null || resolvedDisplayName.isBlank()) {
+            resolvedDisplayName = targetName;
+        }
+
+        final String displayName = resolvedDisplayName;
+
+        source.sendSuccess(() -> Component.literal("§6История наказаний игрока §e" + displayName + "§6: §f" + history.size()), false);
+
+        int start = Math.max(0, history.size() - 20);
+        if (start > 0) {
+            int hidden = start;
+            source.sendSuccess(() -> Component.literal("§7Показаны последние 20 записей. Старых записей скрыто: " + hidden), false);
+        }
+
+        for (int i = start; i < history.size(); i++) {
+            PunishmentHistoryData data = history.get(i);
+            String type = formatPunishmentType(data.type());
+            String duration = data.durationMillis() > 0L ? " §7на §e" + formatMuteTime(data.durationMillis()) : "";
+            String reason = data.reason() == null || data.reason().isBlank() ? "не указана" : data.reason();
+            int number = i + 1;
+
+            source.sendSuccess(() -> Component.literal(
+                    "§8#" + number
+                            + " §7| §f" + formatDateTime(data.createdMillis())
+                            + " §7| §c" + type
+                            + duration
+                            + " §7| Модератор: §e" + data.moderator()
+                            + " §7| Причина: §f" + reason
+            ), false);
+        }
+    }
+
+    private static String formatPunishmentType(String type) {
+        if (type == null) {
+            return "UNKNOWN";
+        }
+
+        return switch (type.toUpperCase(java.util.Locale.ROOT)) {
+            case "MUTE" -> "Мут";
+            case "UNMUTE" -> "Снятие мута";
+            case "TEMPBAN" -> "Временный бан";
+            case "UNTEMPBAN" -> "Снятие временного бана";
+            case "UNBAN" -> "Разбан";
+            case "WARN" -> "Варн";
+            case "UNWARN" -> "Снятие варна";
+            default -> type;
+        };
+    }
+
+    private static String getCommandSourceName(CommandSourceStack source) {
+        if (source == null) {
+            return "Console";
+        }
+
+        if (source.getEntity() instanceof ServerPlayer player) {
+            return player.getGameProfile().getName();
+        }
+
+        String text = source.getTextName();
+        return text == null || text.isBlank() ? "Console" : text;
+    }
+
+    private static void loadPunishmentHistory() {
+        PUNISHMENT_HISTORY.clear();
+
+        Path path = punishmentHistoryPath();
+        if (!Files.exists(path)) {
+            return;
+        }
+
+        try {
+            for (String line : Files.readAllLines(path, StandardCharsets.UTF_8)) {
+                if (line == null || line.isBlank()) {
+                    continue;
+                }
+
+                String[] parts = line.split("\\t", 7);
+                if (parts.length < 7) {
+                    continue;
+                }
+
+                UUID uuid = UUID.fromString(parts[0]);
+                String name = decodeBase64(parts[1]);
+                String type = decodeBase64(parts[2]);
+                String moderator = decodeBase64(parts[3]);
+                long createdMillis = Long.parseLong(parts[4]);
+                long durationMillis = Long.parseLong(parts[5]);
+                String reason = decodeBase64(parts[6]);
+
+                PUNISHMENT_HISTORY
+                        .computeIfAbsent(uuid, key -> new ArrayList<>())
+                        .add(new PunishmentHistoryData(name, type, moderator, createdMillis, durationMillis, reason));
+            }
+        } catch (Throwable e) {
+            System.out.println("[CubeChat] Failed to load punishment history: " + e.getMessage());
+        }
+    }
+
+    private static void savePunishmentHistory() {
+        Path path = punishmentHistoryPath();
+
+        try {
+            Files.createDirectories(path.getParent());
+            ArrayList<String> lines = new ArrayList<>();
+
+            for (Map.Entry<UUID, ArrayList<PunishmentHistoryData>> entry : PUNISHMENT_HISTORY.entrySet()) {
+                for (PunishmentHistoryData data : entry.getValue()) {
+                    lines.add(entry.getKey()
+                            + "\t" + encodeBase64(data.name())
+                            + "\t" + encodeBase64(data.type())
+                            + "\t" + encodeBase64(data.moderator())
+                            + "\t" + data.createdMillis()
+                            + "\t" + data.durationMillis()
+                            + "\t" + encodeBase64(data.reason()));
+                }
+            }
+
+            Files.write(path, lines, StandardCharsets.UTF_8);
+        } catch (Throwable e) {
+            System.out.println("[CubeChat] Failed to save punishment history: " + e.getMessage());
+        }
+    }
+
     private static long parsePunishmentTime(String input) {
         if (input == null || input.length() < 2) {
             return -1L;
@@ -2570,5 +3088,8 @@ public class CubeChat {
     }
 
     private record WarnData(String name, long createdMillis, String reason) {
+    }
+
+    private record PunishmentHistoryData(String name, String type, String moderator, long createdMillis, long durationMillis, String reason) {
     }
 }
