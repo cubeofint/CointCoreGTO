@@ -84,6 +84,10 @@ public class CubeChat {
     private static final ForgeConfigSpec.BooleanValue SHOW_CHAT_PANEL_ON_JOIN;
     private static final ForgeConfigSpec.BooleanValue HIDE_JOIN_LEAVE_MESSAGES;
 
+    private static final ForgeConfigSpec.BooleanValue ANNOUNCE_MUTES;
+    private static final ForgeConfigSpec.BooleanValue ANNOUNCE_BANS;
+    private static final ForgeConfigSpec.BooleanValue ANNOUNCE_WARNS;
+
     private static final ForgeConfigSpec.BooleanValue DISCORD_ENABLED;
     private static final ForgeConfigSpec.ConfigValue<String> DISCORD_BOT_TOKEN;
     private static final ForgeConfigSpec.ConfigValue<String> DISCORD_WEBHOOK_URL;
@@ -179,6 +183,22 @@ public class CubeChat {
         HIDE_JOIN_LEAVE_MESSAGES = builder
                 .comment("If true, CubeChat hides vanilla player join and leave messages on clients with the mod installed.")
                 .define("hide_join_leave_messages", true);
+
+        builder.pop();
+
+        builder.push("moderation");
+
+        ANNOUNCE_MUTES = builder
+                .comment("If true, mute and unmute messages are announced to all players in chat.")
+                .define("announce_mutes", false);
+
+        ANNOUNCE_BANS = builder
+                .comment("If true, tempban, untempban and unban messages are announced to all players in chat.")
+                .define("announce_bans", false);
+
+        ANNOUNCE_WARNS = builder
+                .comment("If true, warn and unwarn messages are announced to all players in chat.")
+                .define("announce_warns", false);
 
         builder.pop();
 
@@ -321,6 +341,35 @@ public class CubeChat {
             return HIDE_JOIN_LEAVE_MESSAGES.get();
         } catch (Throwable ignored) {
             return true;
+        }
+    }
+
+    private enum PunishmentAnnounceType {
+        MUTE,
+        BAN,
+        WARN
+    }
+
+    private static boolean shouldAnnouncePunishment(PunishmentAnnounceType type) {
+        try {
+            return switch (type) {
+                case MUTE -> ANNOUNCE_MUTES.get();
+                case BAN -> ANNOUNCE_BANS.get();
+                case WARN -> ANNOUNCE_WARNS.get();
+            };
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static void announcePunishment(MinecraftServer server, PunishmentAnnounceType type, String message) {
+        if (server == null || !shouldAnnouncePunishment(type)) {
+            return;
+        }
+
+        Component component = Component.literal(message);
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            player.sendSystemMessage(component);
         }
     }
 
@@ -489,8 +538,9 @@ public class CubeChat {
 
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time),
-                                                    true
+                                                    false
                                             );
+                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил мут на §e" + time + "§f.");
                                             target.sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
                                             return 1;
                                         })
@@ -511,8 +561,9 @@ public class CubeChat {
 
                                                     ctx.getSource().sendSuccess(
                                                             () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time + ". Причина: " + reason),
-                                                            true
+                                                            false
                                                     );
+                                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил мут на §e" + time + "§f. Причина: §7" + reason);
                                                     target.sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
                                                     target.sendSystemMessage(Component.literal("§cПричина: §f" + reason));
                                                     return 1;
@@ -539,8 +590,9 @@ public class CubeChat {
 
                                     ctx.getSource().sendSuccess(
                                             () -> Component.literal("Мут снят с игрока " + target.getGameProfile().getName()),
-                                            true
+                                            false
                                     );
+                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§a[Модерация] §fС игрока §e" + target.getGameProfile().getName() + " §fснят мут.");
                                     target.sendSystemMessage(Component.literal("§aС тебя сняли мут"));
                                     return 1;
                                 })
@@ -564,6 +616,12 @@ public class CubeChat {
                                     if (targetUuid != null) {
                                         recordPunishment(targetUuid, targetName, "UNBAN", getCommandSourceName(ctx.getSource()), 0L, "");
                                     }
+
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal("Бан снят с игрока " + targetName),
+                                            false
+                                    );
+                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§a[Модерация] §fС игрока §e" + targetName + " §fснят бан.");
                                     return 1;
                                 })
                         )
@@ -590,8 +648,9 @@ public class CubeChat {
 
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time),
-                                                    true
+                                                    false
                                             );
+                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил временный бан на §e" + time + "§f.");
                                             disconnectTempBannedPlayer(target);
                                             return 1;
                                         })
@@ -612,8 +671,9 @@ public class CubeChat {
 
                                                     ctx.getSource().sendSuccess(
                                                             () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time + ". Причина: " + reason),
-                                                            true
+                                                            false
                                                     );
+                                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил временный бан на §e" + time + "§f. Причина: §7" + reason);
                                                     disconnectTempBannedPlayer(target);
                                                     return 1;
                                                 })
@@ -642,8 +702,9 @@ public class CubeChat {
 
                                     ctx.getSource().sendSuccess(
                                             () -> Component.literal("Временный бан снят с игрока " + targetName),
-                                            true
+                                            false
                                     );
+                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§a[Модерация] §fС игрока §e" + targetName + " §fснят временный бан.");
                                     return 1;
                                 })
                         )
@@ -663,8 +724,9 @@ public class CubeChat {
                                     int count = getWarnCount(target.getUUID());
                                     ctx.getSource().sendSuccess(
                                             () -> Component.literal("Игрок " + target.getGameProfile().getName() + " получил предупреждение. Всего варнов: " + count),
-                                            true
+                                            false
                                     );
+                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§e[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил предупреждение. Всего варнов: §e" + count + "§f.");
                                     target.sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
                                     return 1;
                                 })
@@ -679,8 +741,9 @@ public class CubeChat {
                                             int count = getWarnCount(target.getUUID());
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("Игрок " + target.getGameProfile().getName() + " получил предупреждение. Всего варнов: " + count + ". Причина: " + reason),
-                                                    true
+                                                    false
                                             );
+                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§e[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил предупреждение. Всего варнов: §e" + count + "§f. Причина: §7" + reason);
                                             target.sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
                                             target.sendSystemMessage(Component.literal("§cПричина: §f" + reason));
                                             return 1;
@@ -749,8 +812,9 @@ public class CubeChat {
                                     int count = getWarnCountByName(targetName);
                                     ctx.getSource().sendSuccess(
                                             () -> Component.literal("Последний варн снят с игрока " + targetName + ". Осталось варнов: " + count),
-                                            true
+                                            false
                                     );
+                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§a[Модерация] §fС игрока §e" + targetName + " §fснят последний варн. Осталось варнов: §e" + count + "§f.");
                                     return 1;
                                 })
                                 .then(Commands.argument("number", IntegerArgumentType.integer(1))
@@ -773,8 +837,9 @@ public class CubeChat {
                                             int count = getWarnCountByName(targetName);
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("Варн #" + number + " снят с игрока " + targetName + ". Осталось варнов: " + count),
-                                                    true
+                                                    false
                                             );
+                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§a[Модерация] §fС игрока §e" + targetName + " §fснят варн #" + number + ". Осталось варнов: §e" + count + "§f.");
                                             return 1;
                                         })
                                 )
@@ -828,8 +893,9 @@ public class CubeChat {
 
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time),
-                                                    true
+                                                    false
                                             );
+                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил мут на §e" + time + "§f.");
                                             target.sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
                                             return 1;
                                         })
@@ -850,8 +916,9 @@ public class CubeChat {
 
                                                     ctx.getSource().sendSuccess(
                                                             () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time + ". Причина: " + reason),
-                                                            true
+                                                            false
                                                     );
+                                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил мут на §e" + time + "§f. Причина: §7" + reason);
                                                     target.sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
                                                     target.sendSystemMessage(Component.literal("§cПричина: §f" + reason));
                                                     return 1;
@@ -878,8 +945,9 @@ public class CubeChat {
 
                                     ctx.getSource().sendSuccess(
                                             () -> Component.literal("Мут снят с игрока " + target.getGameProfile().getName()),
-                                            true
+                                            false
                                     );
+                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§a[Модерация] §fС игрока §e" + target.getGameProfile().getName() + " §fснят мут.");
                                     target.sendSystemMessage(Component.literal("§aС тебя сняли мут"));
                                     return 1;
                                 })
@@ -906,8 +974,9 @@ public class CubeChat {
 
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time),
-                                                    true
+                                                    false
                                             );
+                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил временный бан на §e" + time + "§f.");
                                             disconnectTempBannedPlayer(target);
                                             return 1;
                                         })
@@ -928,8 +997,9 @@ public class CubeChat {
 
                                                     ctx.getSource().sendSuccess(
                                                             () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time + ". Причина: " + reason),
-                                                            true
+                                                            false
                                                     );
+                                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил временный бан на §e" + time + "§f. Причина: §7" + reason);
                                                     disconnectTempBannedPlayer(target);
                                                     return 1;
                                                 })
@@ -958,8 +1028,9 @@ public class CubeChat {
 
                                     ctx.getSource().sendSuccess(
                                             () -> Component.literal("Временный бан снят с игрока " + targetName),
-                                            true
+                                            false
                                     );
+                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§a[Модерация] §fС игрока §e" + targetName + " §fснят временный бан.");
                                     return 1;
                                 })
                         )
@@ -978,8 +1049,9 @@ public class CubeChat {
                                     int count = getWarnCount(target.getUUID());
                                     ctx.getSource().sendSuccess(
                                             () -> Component.literal("Игрок " + target.getGameProfile().getName() + " получил предупреждение. Всего варнов: " + count),
-                                            true
+                                            false
                                     );
+                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§e[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил предупреждение. Всего варнов: §e" + count + "§f.");
                                     target.sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
                                     return 1;
                                 })
@@ -994,8 +1066,9 @@ public class CubeChat {
                                             int count = getWarnCount(target.getUUID());
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("Игрок " + target.getGameProfile().getName() + " получил предупреждение. Всего варнов: " + count + ". Причина: " + reason),
-                                                    true
+                                                    false
                                             );
+                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§e[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил предупреждение. Всего варнов: §e" + count + "§f. Причина: §7" + reason);
                                             target.sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
                                             target.sendSystemMessage(Component.literal("§cПричина: §f" + reason));
                                             return 1;
@@ -1063,8 +1136,9 @@ public class CubeChat {
                                     int count = getWarnCountByName(targetName);
                                     ctx.getSource().sendSuccess(
                                             () -> Component.literal("Последний варн снят с игрока " + targetName + ". Осталось варнов: " + count),
-                                            true
+                                            false
                                     );
+                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§a[Модерация] §fС игрока §e" + targetName + " §fснят последний варн. Осталось варнов: §e" + count + "§f.");
                                     return 1;
                                 })
                                 .then(Commands.argument("number", IntegerArgumentType.integer(1))
@@ -1086,8 +1160,9 @@ public class CubeChat {
                                             int count = getWarnCountByName(targetName);
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("Варн #" + number + " снят с игрока " + targetName + ". Осталось варнов: " + count),
-                                                    true
+                                                    false
                                             );
+                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§a[Модерация] §fС игрока §e" + targetName + " §fснят варн #" + number + ". Осталось варнов: §e" + count + "§f.");
                                             return 1;
                                         })
                                 )
@@ -2370,6 +2445,9 @@ public class CubeChat {
             return builder.buildFuture();
         }
 
+        String remaining = builder.getRemainingLowerCase();
+        Set<String> suggestedHomeNames = new HashSet<>();
+
         try {
             Class<?> dataClass = Class.forName("dev.ftb.mods.ftbessentials.util.FTBEPlayerData");
             GameProfile profile = new GameProfile(targetUuid, targetName);
@@ -2403,7 +2481,7 @@ public class CubeChat {
                 if (namesObj instanceof Iterable<?> names) {
                     for (Object name : names) {
                         if (name != null) {
-                            builder.suggest(String.valueOf(name));
+                            suggestIfMatches(builder, suggestedHomeNames, String.valueOf(name), remaining);
                         }
                     }
                     return builder.buildFuture();
@@ -2417,7 +2495,7 @@ public class CubeChat {
                     try {
                         Object name = entry.getClass().getMethod("name").invoke(entry);
                         if (name != null) {
-                            builder.suggest(String.valueOf(name));
+                            suggestIfMatches(builder, suggestedHomeNames, String.valueOf(name), remaining);
                         }
                     } catch (Throwable ignored) {
                     }
@@ -2430,7 +2508,10 @@ public class CubeChat {
     }
 
     private static CompletableFuture<Suggestions> suggestFtbHomeNames(SuggestionsBuilder builder) {
-        builder.suggest("home");
+        String remaining = builder.getRemainingLowerCase();
+        Set<String> suggestedHomeNames = new HashSet<>();
+
+        suggestIfMatches(builder, suggestedHomeNames, "home", remaining);
 
         if (CURRENT_SERVER == null) {
             return builder.buildFuture();
@@ -2454,7 +2535,7 @@ public class CubeChat {
                 if (namesObj instanceof Iterable<?> names) {
                     for (Object name : names) {
                         if (name != null) {
-                            builder.suggest(String.valueOf(name));
+                            suggestIfMatches(builder, suggestedHomeNames, String.valueOf(name), remaining);
                         }
                     }
                 }
@@ -2466,31 +2547,47 @@ public class CubeChat {
     }
 
     private static CompletableFuture<Suggestions> suggestKnownPlayerNames(SuggestionsBuilder builder) {
+        String remaining = builder.getRemainingLowerCase();
+        Set<String> suggestedNames = new HashSet<>();
+
         if (CURRENT_SERVER != null) {
             for (ServerPlayer player : CURRENT_SERVER.getPlayerList().getPlayers()) {
-                builder.suggest(player.getGameProfile().getName());
+                suggestIfMatches(builder, suggestedNames, player.getGameProfile().getName(), remaining);
             }
         }
 
         for (TempBanData data : TEMP_BANNED_PLAYERS.values()) {
-            if (data.name() != null && !data.name().isBlank()) {
-                builder.suggest(data.name());
-            }
+            suggestIfMatches(builder, suggestedNames, data.name(), remaining);
         }
 
         for (LastLocationData data : LAST_LOCATIONS.values()) {
-            if (data.name() != null && !data.name().isBlank()) {
-                builder.suggest(data.name());
-            }
+            suggestIfMatches(builder, suggestedNames, data.name(), remaining);
         }
 
         for (ArrayList<WarnData> warns : WARNED_PLAYERS.values()) {
-            if (!warns.isEmpty() && warns.get(0).name() != null && !warns.get(0).name().isBlank()) {
-                builder.suggest(warns.get(0).name());
+            if (!warns.isEmpty()) {
+                suggestIfMatches(builder, suggestedNames, warns.get(0).name(), remaining);
             }
         }
 
         return builder.buildFuture();
+    }
+
+    private static void suggestIfMatches(SuggestionsBuilder builder, Set<String> alreadySuggested, String value, String remainingLowerCase) {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+
+        String trimmedValue = value.trim();
+        String loweredValue = trimmedValue.toLowerCase(java.util.Locale.ROOT);
+
+        if (!remainingLowerCase.isBlank() && !loweredValue.startsWith(remainingLowerCase)) {
+            return;
+        }
+
+        if (alreadySuggested.add(loweredValue)) {
+            builder.suggest(trimmedValue);
+        }
     }
 
     private static CompletableFuture<Suggestions> suggestWarnNumbers(String name, SuggestionsBuilder builder) {
