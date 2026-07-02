@@ -1,5 +1,8 @@
 package Crazer.cubeofinterest.cubechat;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 import com.mojang.authlib.GameProfile;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -2352,30 +2355,15 @@ public class CubeChat {
             return null;
         }
 
-        ServerPlayer online = server.getPlayerList().getPlayerByName(name);
-        if (online != null) {
-            return online.getUUID();
-        }
-
-        for (Map.Entry<UUID, LastLocationData> entry : LAST_LOCATIONS.entrySet()) {
-            LastLocationData data = entry.getValue();
-            if (data.name() != null && data.name().equalsIgnoreCase(name)) {
-                return entry.getKey();
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (player.getGameProfile().getName().equalsIgnoreCase(name)) {
+                return player.getUUID();
             }
         }
 
-        for (Map.Entry<UUID, TempBanData> entry : TEMP_BANNED_PLAYERS.entrySet()) {
-            TempBanData data = entry.getValue();
-            if (data.name() != null && data.name().equalsIgnoreCase(name)) {
-                return entry.getKey();
-            }
-        }
-
-        for (Map.Entry<UUID, ArrayList<WarnData>> entry : WARNED_PLAYERS.entrySet()) {
-            ArrayList<WarnData> warns = entry.getValue();
-            if (warns != null && !warns.isEmpty() && warns.get(0).name().equalsIgnoreCase(name)) {
-                return entry.getKey();
-            }
+        UUID cachedUuid = findUuidInUserCache(server, name);
+        if (cachedUuid != null) {
+            return cachedUuid;
         }
 
         try {
@@ -2386,6 +2374,39 @@ public class CubeChat {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    private static UUID findUuidInUserCache(MinecraftServer server, String name) {
+        if (server == null || name == null || name.isBlank()) {
+            return null;
+        }
+
+        try {
+            Path userCachePath = server.getServerDirectory().toPath().resolve("usercache.json");
+
+            if (!Files.exists(userCachePath)) {
+                return null;
+            }
+
+            String json = Files.readString(userCachePath, StandardCharsets.UTF_8);
+            JsonArray array = JsonParser.parseString(json).getAsJsonArray();
+
+            for (JsonElement element : array) {
+                if (!element.isJsonObject()) {
+                    continue;
+                }
+
+                String cachedName = element.getAsJsonObject().get("name").getAsString();
+                String cachedUuid = element.getAsJsonObject().get("uuid").getAsString();
+
+                if (cachedName.equalsIgnoreCase(name)) {
+                    return UUID.fromString(cachedUuid);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        return null;
     }
 
     private static boolean teleportToFtbHome(ServerPlayer admin, String homeName, String targetName) {
@@ -2628,7 +2649,45 @@ public class CubeChat {
             }
         }
 
+        suggestUserCacheNames(CURRENT_SERVER, builder, suggestedNames, remaining);
+
         return builder.buildFuture();
+    }
+
+    private static void suggestUserCacheNames(
+            MinecraftServer server,
+            SuggestionsBuilder builder,
+            Set<String> suggestedNames,
+            String remaining
+    ) {
+        if (server == null) {
+            return;
+        }
+
+        try {
+            Path userCachePath = server.getServerDirectory().toPath().resolve("usercache.json");
+
+            if (!Files.exists(userCachePath)) {
+                return;
+            }
+
+            String json = Files.readString(userCachePath, StandardCharsets.UTF_8);
+            JsonArray array = JsonParser.parseString(json).getAsJsonArray();
+
+            for (JsonElement element : array) {
+                if (!element.isJsonObject()) {
+                    continue;
+                }
+
+                if (!element.getAsJsonObject().has("name")) {
+                    continue;
+                }
+
+                String cachedName = element.getAsJsonObject().get("name").getAsString();
+                suggestIfMatches(builder, suggestedNames, cachedName, remaining);
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     private static void suggestIfMatches(SuggestionsBuilder builder, Set<String> alreadySuggested, String value, String remainingLowerCase) {
