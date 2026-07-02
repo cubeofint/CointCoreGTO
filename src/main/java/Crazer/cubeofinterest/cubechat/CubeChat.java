@@ -4,10 +4,12 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
 import com.mojang.authlib.GameProfile;
+import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
+import com.mojang.brigadier.tree.CommandNode;
 import com.electronwill.nightconfig.core.file.CommentedFileConfig;
 import com.electronwill.nightconfig.core.io.WritingMode;
 import net.luckperms.api.LuckPerms;
@@ -43,6 +45,7 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.loading.FMLPaths;
 
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -499,8 +502,40 @@ public class CubeChat {
         CHAT_HISTORY.remove(player.getUUID());
     }
 
+    private static void removeRootCommand(CommandDispatcher<CommandSourceStack> dispatcher, String commandName) {
+        if (dispatcher == null || commandName == null || commandName.isBlank()) {
+            return;
+        }
+
+        try {
+            CommandNode<CommandSourceStack> root = dispatcher.getRoot();
+            removeCommandNodeChild(root, commandName);
+        } catch (Throwable e) {
+            System.out.println("[CubeChat] Failed to remove vanilla command /" + commandName + ": " + e.getMessage());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void removeCommandNodeChild(CommandNode<CommandSourceStack> node, String childName) throws ReflectiveOperationException {
+        String loweredName = childName.toLowerCase(java.util.Locale.ROOT);
+
+        Field childrenField = CommandNode.class.getDeclaredField("children");
+        childrenField.setAccessible(true);
+        ((Map<String, CommandNode<CommandSourceStack>>) childrenField.get(node)).remove(loweredName);
+
+        Field literalsField = CommandNode.class.getDeclaredField("literals");
+        literalsField.setAccessible(true);
+        ((Map<String, CommandNode<CommandSourceStack>>) literalsField.get(node)).remove(loweredName);
+
+        Field argumentsField = CommandNode.class.getDeclaredField("arguments");
+        argumentsField.setAccessible(true);
+        ((Map<String, CommandNode<CommandSourceStack>>) argumentsField.get(node)).remove(loweredName);
+    }
+
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
+        removeRootCommand(event.getDispatcher(), "me");
+
         event.getDispatcher().register(
                 Commands.literal("cubechat")
                         .requires(source -> hasCommandPermission(source, "cubechat.reload"))
@@ -1721,6 +1756,11 @@ public class CubeChat {
 
         String lower = input.toLowerCase(java.util.Locale.ROOT);
 
+        if (lower.equals("me") || lower.startsWith("me ")) {
+            player.displayClientMessage(Component.literal("§cКоманда /me отключена. Используйте обычный чат."), true);
+            event.setCanceled(true);
+            return;
+        }
 
         if (!lower.equals("tell")
                 && !lower.startsWith("tell ")
