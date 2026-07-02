@@ -1865,7 +1865,7 @@ public class CubeChat {
     }
 
     private static void replayChatHistory(ServerPlayer player, ChatView view) {
-        clearClientChat(player);
+        clearClientChat(player, view == ChatView.ALL);
 
         Deque<ChatHistoryMessage> history = CHAT_HISTORY.get(player.getUUID());
         if (history == null || history.isEmpty()) {
@@ -1886,9 +1886,9 @@ public class CubeChat {
         }
     }
 
-    private static void clearClientChat(ServerPlayer player) {
+    private static void clearClientChat(ServerPlayer player, boolean keepSystemMessages) {
         try {
-            NETWORK_CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), new ClearChatPacket());
+            NETWORK_CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), new ClearChatPacket(keepSystemMessages));
         } catch (Throwable ignored) {
         }
     }
@@ -3320,21 +3320,25 @@ public class CubeChat {
     }
 
     private static final class ClearChatPacket {
-        private ClearChatPacket() {
+        private final boolean keepSystemMessages;
+
+        private ClearChatPacket(boolean keepSystemMessages) {
+            this.keepSystemMessages = keepSystemMessages;
         }
 
         private static void encode(ClearChatPacket packet, FriendlyByteBuf buffer) {
+            buffer.writeBoolean(packet.keepSystemMessages);
         }
 
         private static ClearChatPacket decode(FriendlyByteBuf buffer) {
-            return new ClearChatPacket();
+            return new ClearChatPacket(buffer.readBoolean());
         }
 
         private static void handle(ClearChatPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
             NetworkEvent.Context context = contextSupplier.get();
             context.enqueueWork(() -> net.minecraftforge.fml.DistExecutor.unsafeRunWhenOn(
                     net.minecraftforge.api.distmarker.Dist.CLIENT,
-                    () -> CubeChatClient::clearChatMessages
+                    () -> () -> CubeChatClient.clearChatMessages(packet.keepSystemMessages)
             ));
             context.setPacketHandled(true);
         }

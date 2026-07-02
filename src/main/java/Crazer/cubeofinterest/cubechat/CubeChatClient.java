@@ -1,14 +1,23 @@
 package Crazer.cubeofinterest.cubechat;
 
+import net.minecraft.client.GuiMessage;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.ChatComponent;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.client.event.ScreenEvent;
 import net.minecraftforge.client.event.ClientChatReceivedEvent;
+import net.minecraftforge.client.event.ScreenEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.List;
 
 @Mod.EventBusSubscriber(
         modid = CubeChat.MODID,
@@ -17,6 +26,8 @@ import net.minecraftforge.fml.common.Mod;
 )
 public class CubeChatClient {
     public static final int CLIENT_CHAT_LINE_LIMIT = 5000;
+    private static final int NON_CUBECHAT_HISTORY_LIMIT = 500;
+    private static final Deque<Component> NON_CUBECHAT_HISTORY = new ArrayDeque<>();
 
     public static int getClientChatLineLimit() {
         return CLIENT_CHAT_LINE_LIMIT;
@@ -45,9 +56,13 @@ public class CubeChatClient {
         }
 
         String lower = text.toLowerCase(java.util.Locale.ROOT);
-
         if (CubeChat.shouldHideJoinLeaveMessages() && isVanillaJoinMessage(lower)) {
             event.setCanceled(true);
+            return;
+        }
+
+        if (!isCubeChatText(text)) {
+            rememberNonCubeChatMessage(message);
         }
     }
 
@@ -67,13 +82,11 @@ public class CubeChatClient {
         }
 
         Minecraft mc = Minecraft.getInstance();
-
         if (mc.player == null) {
             return;
         }
 
         GuiGraphics graphics = event.getGuiGraphics();
-
         graphics.pose().pushPose();
         graphics.pose().translate(0, 0, 500);
 
@@ -82,23 +95,19 @@ public class CubeChatClient {
         String globalText = "[G]";
         String privateText = "[PM]";
 
-        int buttonsWidth =
-                mc.font.width(allText)
-                        + BUTTON_GAP
-                        + mc.font.width(localText)
-                        + BUTTON_GAP
-                        + mc.font.width(globalText)
-                        + BUTTON_GAP
-                        + mc.font.width(privateText);
+        int buttonsWidth = mc.font.width(allText)
+                + BUTTON_GAP
+                + mc.font.width(localText)
+                + BUTTON_GAP
+                + mc.font.width(globalText)
+                + BUTTON_GAP
+                + mc.font.width(privateText);
 
         int panelWidth = buttonsWidth + PANEL_PADDING_X * 2;
         int panelHeight = mc.font.lineHeight + PANEL_PADDING_Y * 2;
-
         int chatHeight = mc.gui.getChat().getHeight();
-
         int panelX = CHAT_LEFT;
         int panelY = event.getScreen().height - 40 - chatHeight - 16;
-
         int x = panelX + PANEL_PADDING_X;
         int y = panelY + PANEL_PADDING_Y;
 
@@ -112,13 +121,10 @@ public class CubeChatClient {
 
         x = drawButton(graphics, mc, x, y, allText, 0xFFFFFFFF, allButton);
         x += BUTTON_GAP;
-
         x = drawButton(graphics, mc, x, y, localText, 0xFF55FF55, localButton);
         x += BUTTON_GAP;
-
         x = drawButton(graphics, mc, x, y, globalText, 0xFFFFAA00, globalButton);
         x += BUTTON_GAP;
-
         drawButton(graphics, mc, x, y, privateText, 0xFFFF55FF, privateButton);
 
         graphics.pose().popPose();
@@ -131,7 +137,6 @@ public class CubeChatClient {
         }
 
         Minecraft mc = Minecraft.getInstance();
-
         if (mc.player == null || mc.player.connection == null) {
             return;
         }
@@ -164,13 +169,156 @@ public class CubeChatClient {
     }
 
     public static void clearChatMessages() {
-        Minecraft mc = Minecraft.getInstance();
+        clearChatMessages(true);
+    }
 
+    public static void clearChatMessages(boolean keepSystemMessages) {
+        Minecraft mc = Minecraft.getInstance();
         if (mc.gui == null) {
             return;
         }
 
-        mc.gui.getChat().clearMessages(false);
+        ChatComponent chat = mc.gui.getChat();
+        if (chat == null) {
+            return;
+        }
+        if (!keepSystemMessages) {
+            chat.clearMessages(false);
+            return;
+        }
+        if (clearOnlyCubeChatMessages(chat)) {
+            return;
+        }
+        List<Component> nonCubeMessages = snapshotNonCubeChatMessages();
+        chat.clearMessages(false);
+
+        for (Component component : nonCubeMessages) {
+            if (component != null) {
+                chat.addMessage(component);
+            }
+        }
+    }
+
+    private static void rememberNonCubeChatMessage(Component message) {
+        if (message == null) {
+            return;
+        }
+
+        synchronized (NON_CUBECHAT_HISTORY) {
+            NON_CUBECHAT_HISTORY.addLast(message.copy());
+
+            while (NON_CUBECHAT_HISTORY.size() > NON_CUBECHAT_HISTORY_LIMIT) {
+                NON_CUBECHAT_HISTORY.removeFirst();
+            }
+        }
+    }
+
+    private static List<Component> snapshotNonCubeChatMessages() {
+        synchronized (NON_CUBECHAT_HISTORY) {
+            return new ArrayList<>(NON_CUBECHAT_HISTORY);
+        }
+    }
+
+    private static boolean clearOnlyCubeChatMessages(ChatComponent chat) {
+        try {
+            Field allMessagesField = findField(ChatComponent.class, "allMessages", "f_93761_");
+            if (allMessagesField == null) {
+                return false;
+            }
+            allMessagesField.setAccessible(true);
+
+            Object value = allMessagesField.get(chat);
+            if (!(value instanceof List<?> rawList)) {
+                return false;
+            }
+
+            @SuppressWarnings("unchecked")
+            List<Object> allMessages = (List<Object>) rawList;
+            allMessages.removeIf(CubeChatClient::isCubeChatGuiMessage);
+
+            Method refreshMethod = findMethod(ChatComponent.class, "refreshTrimmedMessages", "m_93796_");
+            if (refreshMethod == null) {
+                return false;
+            }
+            refreshMethod.setAccessible(true);
+            refreshMethod.invoke(chat);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static Field findField(Class<?> type, String... names) {
+        for (String name : names) {
+            try {
+                return type.getDeclaredField(name);
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    private static Method findMethod(Class<?> type, String... names) {
+        for (String name : names) {
+            try {
+                return type.getDeclaredMethod(name);
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return null;
+    }
+
+    private static boolean isCubeChatGuiMessage(Object message) {
+        if (message == null) {
+            return false;
+        }
+
+        try {
+            Component component;
+
+            if (message instanceof GuiMessage guiMessage) {
+                component = guiMessage.content();
+            } else {
+                Object content = message.getClass().getMethod("content").invoke(message);
+                if (!(content instanceof Component reflectedComponent)) {
+                    return false;
+                }
+                component = reflectedComponent;
+            }
+
+            return isCubeChatText(component.getString());
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isCubeChatText(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+
+        String clean = text.replaceAll("§.", "").trim();
+        return clean.contains("[L]")
+                || clean.contains("[G]")
+                || clean.contains("[PM]")
+                || clean.contains("[D]")
+                || clean.startsWith("Теперь вы видите все чаты")
+                || clean.startsWith("Теперь вы видите только локальный чат")
+                || clean.startsWith("Теперь вы видите только глобальный чат")
+                || clean.startsWith("Теперь вы видите только личные сообщения")
+                || clean.startsWith("Время в чате включено")
+                || clean.startsWith("Время в чате выключено")
+                || clean.startsWith("Откройте чат")
+                || clean.startsWith("Рядом никого нет")
+                || clean.startsWith("Нельзя написать самому себе")
+                || clean.startsWith("Некому ответить")
+                || clean.startsWith("Игрок уже не в сети")
+                || clean.startsWith("Введите сообщение после")
+                || clean.startsWith("Ванильные личные сообщения отключены")
+                || clean.startsWith("Личные сообщения отправляются так")
+                || clean.startsWith("Команда /me отключена");
     }
 
     private static int drawButton(
@@ -183,14 +331,11 @@ public class CubeChatClient {
             ButtonArea area
     ) {
         int width = mc.font.width(text);
-
         graphics.drawString(mc.font, Component.literal(text), x, y, color, true);
-
         area.x1 = x;
         area.y1 = y;
         area.x2 = x + width;
         area.y2 = y + mc.font.lineHeight;
-
         return x + width;
     }
 
