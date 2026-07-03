@@ -27,6 +27,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.common.ForgeConfigSpec;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -339,6 +340,7 @@ public class CubeChat {
 
     public CubeChat() {
         registerNetwork();
+        CubeChatItemShare.registerNetwork();
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC);
         MinecraftForge.EVENT_BUS.register(this);
     }
@@ -1857,10 +1859,14 @@ public class CubeChat {
     }
 
     private static void sendFilteredChatMessage(ServerPlayer target, ChatView view, String formattedMessage) {
+        sendFilteredChatMessage(target, view, formattedMessage, Component.literal(formattedMessage));
+    }
+
+    private static void sendFilteredChatMessage(ServerPlayer target, ChatView view, String formattedMessage, Component liveMessage) {
         rememberChatMessage(target, view, formattedMessage);
 
         if (canReceive(target, view)) {
-            target.sendSystemMessage(Component.literal(formattedMessage));
+            target.sendSystemMessage(liveMessage);
         }
     }
 
@@ -1908,12 +1914,13 @@ public class CubeChat {
     }
 
     private static void sendLocalChat(ServerPlayer player, String message) {
-        String withoutTime = color(LOCAL_PREFIX.get())
+        String plainMessage = CubeChatItemPreview.toPlainMessage(player, message);
+        String withoutTimePrefix = color(LOCAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
                 + "§f" + player.getGameProfile().getName()
-                + "§7: §f"
-                + message;
+                + "§7: §f";
+        String withoutTime = withoutTimePrefix + plainMessage;
 
         String discordFormatted = stripColor(withoutTime);
 
@@ -1930,7 +1937,10 @@ public class CubeChat {
                 continue;
             }
 
-            sendFilteredChatMessage(target, ChatView.LOCAL, timePrefix(target) + withoutTime);
+            String fullPrefix = timePrefix(target) + withoutTimePrefix;
+            String fullPlain = fullPrefix + plainMessage;
+            Component liveMessage = CubeChatItemPreview.buildMessage(player, fullPrefix, message);
+            sendFilteredChatMessage(target, ChatView.LOCAL, fullPlain, liveMessage);
             receivers++;
         }
 
@@ -1946,23 +1956,27 @@ public class CubeChat {
     }
 
     private static void sendGlobalChat(ServerPlayer player, String message) {
-        String withoutTime = color(GLOBAL_PREFIX.get())
+        String plainMessage = CubeChatItemPreview.toPlainMessage(player, message);
+        String withoutTimePrefix = color(GLOBAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
                 + "§f" + player.getGameProfile().getName()
-                + "§7: §f"
-                + message;
+                + "§7: §f";
+        String withoutTime = withoutTimePrefix + plainMessage;
 
         String discordFormatted = stripColor(withoutTime);
 
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
-            sendFilteredChatMessage(target, ChatView.GLOBAL, timePrefix(target) + withoutTime);
+            String fullPrefix = timePrefix(target) + withoutTimePrefix;
+            String fullPlain = fullPrefix + plainMessage;
+            Component liveMessage = CubeChatItemPreview.buildMessage(player, fullPrefix, message);
+            sendFilteredChatMessage(target, ChatView.GLOBAL, fullPlain, liveMessage);
         }
 
         if (DISCORD_SEND_GLOBAL_CHAT.get()) {
             CubeDiscordBridge.sendPlayerMessageToDiscord(
                     getDiscordDisplayName(player, GLOBAL_PREFIX.get()),
-                    message,
+                    plainMessage,
                     player.getUUID().toString(),
                     player.getGameProfile().getName()
             );
@@ -1979,35 +1993,136 @@ public class CubeChat {
 
         String senderName = sender.getGameProfile().getName();
         String targetName = target.getGameProfile().getName();
+        String plainMessage = CubeChatItemPreview.toPlainMessage(sender, message);
 
-        String toSender = timePrefix(sender)
+        String senderPrefix = timePrefix(sender)
                 + color(PRIVATE_PREFIX.get())
                 + "§7Вы -> §d"
                 + targetName
-                + "§7: §f"
-                + message;
+                + "§7: §f";
 
-        String toTarget = timePrefix(target)
+        String targetPrefix = timePrefix(target)
                 + color(PRIVATE_PREFIX.get())
                 + "§d"
                 + senderName
-                + " §7-> Вы: §f"
-                + message;
+                + " §7-> Вы: §f";
+
+        String toSender = senderPrefix + plainMessage;
+        String toTarget = targetPrefix + plainMessage;
 
         rememberChatMessage(sender, ChatView.PRIVATE, toSender);
         rememberChatMessage(target, ChatView.PRIVATE, toTarget);
 
-        sender.sendSystemMessage(Component.literal(toSender));
-        target.sendSystemMessage(Component.literal(toTarget));
+        sender.sendSystemMessage(CubeChatItemPreview.buildMessage(sender, senderPrefix, message));
+        target.sendSystemMessage(CubeChatItemPreview.buildMessage(sender, targetPrefix, message));
 
         LAST_PRIVATE.put(sender.getUUID(), target.getUUID());
         LAST_PRIVATE.put(target.getUUID(), sender.getUUID());
 
         if (DISCORD_SEND_PRIVATE_CHAT.get()) {
-            CubeDiscordBridge.sendToDiscordLog("[PM] " + senderName + " -> " + targetName + ": " + message);
+            CubeDiscordBridge.sendToDiscordLog("[PM] " + senderName + " -> " + targetName + ": " + plainMessage);
         }
 
-        System.out.println("[PrivateChat] " + senderName + " -> " + targetName + ": " + message);
+        System.out.println("[PrivateChat] " + senderName + " -> " + targetName + ": " + plainMessage);
+    }
+
+
+    public static void shareItemInCurrentChat(ServerPlayer player, ItemStack stack) {
+        if (player == null || stack == null || stack.isEmpty()) {
+            return;
+        }
+
+        if (isMuted(player)) {
+            sendMutedMessage(player);
+            return;
+        }
+
+        ChatView view = getChatView(player);
+        if (view == ChatView.GLOBAL) {
+            sendGlobalItemShare(player, stack);
+            return;
+        }
+
+        if (view == ChatView.PRIVATE) {
+            player.displayClientMessage(Component.literal("§cПредмет кнопкой можно отправить только в локальный или глобальный чат."), true);
+            return;
+        }
+
+        sendLocalItemShare(player, stack);
+    }
+
+    private static void sendLocalItemShare(ServerPlayer player, ItemStack stack) {
+        String plainItemText = "  " + CubeChatItemPreview.toPlainText(stack);
+        String iconItemText = CubeChatItemPreview.toPlainText(stack);
+        String withoutTimePrefix = color(LOCAL_PREFIX.get())
+                + getLuckPermsPrefix(player)
+                + getStaffTag(player)
+                + "§f" + player.getGameProfile().getName()
+                + "§7: §f";
+        String withoutTime = withoutTimePrefix + plainItemText;
+        String discordFormatted = stripColor(withoutTime);
+
+        int receivers = 0;
+        double radius = LOCAL_RADIUS.get();
+        double radiusSquared = radius * radius;
+
+        for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
+            if (target.level().dimension() != player.level().dimension()) {
+                continue;
+            }
+
+            if (target.distanceToSqr(player) > radiusSquared) {
+                continue;
+            }
+
+            String fullPrefix = timePrefix(target) + withoutTimePrefix;
+            String fullPlain = fullPrefix + plainItemText;
+            Component liveMessage = Component.literal(fullPrefix + "  ").append(CubeChatItemPreview.buildItemComponent(stack));
+            CubeChatItemShare.sendIconHintToPlayer(target, stack, fullPrefix, iconItemText);
+            sendFilteredChatMessage(target, ChatView.LOCAL, fullPlain, liveMessage);
+            receivers++;
+        }
+
+        if (receivers <= 1) {
+            player.displayClientMessage(Component.literal("§7Рядом никого нет. Для глобального чата используйте §e/g §7или выберите §6[G]§7."), true);
+        }
+
+        if (DISCORD_SEND_LOCAL_CHAT.get()) {
+            CubeDiscordBridge.sendToDiscordLog(discordFormatted);
+        }
+
+        System.out.println("[LocalChat] " + stripColor(timePrefix(player) + withoutTime));
+    }
+
+    private static void sendGlobalItemShare(ServerPlayer player, ItemStack stack) {
+        String plainItemText = "  " + CubeChatItemPreview.toPlainText(stack);
+        String iconItemText = CubeChatItemPreview.toPlainText(stack);
+        String withoutTimePrefix = color(GLOBAL_PREFIX.get())
+                + getLuckPermsPrefix(player)
+                + getStaffTag(player)
+                + "§f" + player.getGameProfile().getName()
+                + "§7: §f";
+        String withoutTime = withoutTimePrefix + plainItemText;
+        String discordFormatted = stripColor(withoutTime);
+
+        for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
+            String fullPrefix = timePrefix(target) + withoutTimePrefix;
+            String fullPlain = fullPrefix + plainItemText;
+            Component liveMessage = Component.literal(fullPrefix + "  ").append(CubeChatItemPreview.buildItemComponent(stack));
+            CubeChatItemShare.sendIconHintToPlayer(target, stack, fullPrefix, iconItemText);
+            sendFilteredChatMessage(target, ChatView.GLOBAL, fullPlain, liveMessage);
+        }
+
+        if (DISCORD_SEND_GLOBAL_CHAT.get()) {
+            CubeDiscordBridge.sendPlayerMessageToDiscord(
+                    getDiscordDisplayName(player, GLOBAL_PREFIX.get()),
+                    plainItemText,
+                    player.getUUID().toString(),
+                    player.getGameProfile().getName()
+            );
+        }
+
+        System.out.println("[GlobalChat] " + stripColor(timePrefix(player) + withoutTime));
     }
 
     public static void broadcastDiscordMessage(String author, String message, String replyToMinecraftPlayer) {
