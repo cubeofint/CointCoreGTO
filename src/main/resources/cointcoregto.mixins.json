@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "Crazer.cubeofinterest.cointcoregto.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "cointcoregto.refmap.json",
+  "client": [
+    "CointCoreGTOChatComponentMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

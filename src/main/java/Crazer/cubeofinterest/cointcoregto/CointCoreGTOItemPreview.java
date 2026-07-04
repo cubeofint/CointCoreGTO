@@ -1,4 +1,4 @@
-package Crazer.cubeofinterest.cubechat;
+package Crazer.cubeofinterest.cointcoregto;
 
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
@@ -11,11 +11,11 @@ import net.minecraft.world.item.ItemStack;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public final class CubeChatItemPreview {
+public final class CointCoreGTOItemPreview {
     private static final Pattern ITEM_TOKEN_PATTERN = Pattern.compile("(?i)(\\[item]\\|\\[i]\\|\\[предмет])");
     private static final String EMPTY_HAND_TEXT = "[пустая рука]";
 
-    private CubeChatItemPreview() {
+    private CointCoreGTOItemPreview() {
     }
 
     public static String toPlainMessage(ServerPlayer player, String message) {
@@ -86,10 +86,8 @@ public final class CubeChatItemPreview {
             return Component.literal(EMPTY_HAND_TEXT).withStyle(ChatFormatting.RED);
         }
 
-        MutableComponent itemText = Component.literal("[")
-                .append(stack.getHoverName().copy())
-                .append(stack.getCount() > 1 ? " x" + stack.getCount() : "")
-                .append("]");
+        String fixedText = toPlainText(stack);
+        MutableComponent itemText = Component.literal(fixedText);
 
         return itemText.withStyle(style -> style
                 .withHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_ITEM, new HoverEvent.ItemStackInfo(stack)))

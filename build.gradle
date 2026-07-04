@@ -7,7 +7,7 @@ group = 'Crazer.cubeofinterest'
 version = '1.0.4'
 
 base {
-    archivesName = 'cubechat'
+    archivesName = 'CointCoreGTO'
 }
 
 java {
@@ -30,7 +30,7 @@ minecraft {
             property 'forge.logging.console.level', 'debug'
 
             mods {
-                cubechat {
+                cointcoregto {
                     source sourceSets.main
                 }
             }
@@ -43,7 +43,7 @@ minecraft {
             property 'forge.logging.console.level', 'debug'
 
             mods {
-                cubechat {
+                cointcoregto {
                     source sourceSets.main
                 }
             }
@@ -52,13 +52,13 @@ minecraft {
         data {
             workingDirectory project.file('run-data')
 
-            args '--mod', 'cubechat',
+            args '--mod', 'cointcoregto',
                     '--all',
                     '--output', file('src/generated/resources/'),
                     '--existing', file('src/main/resources/')
 
             mods {
-                cubechat {
+                cointcoregto {
                     source sourceSets.main
                 }
             }
@@ -115,7 +115,7 @@ jar {
 
     manifest {
         attributes([
-                'Specification-Title'   : 'CubeChat',
+                'Specification-Title'   : 'CointCoreGTO',
                 'Specification-Vendor'  : 'Cube Of Interest',
                 'Specification-Version' : '1',
                 'Implementation-Title'  : project.name,
@@ -138,18 +138,18 @@ shadowJar {
     // Важно: убираем Java 9/11/17/21 multi-release классы, из-за них была ошибка major version 65
     exclude 'META-INF/versions/**'
 
-    relocate 'net.dv8tion.jda', 'crazer.cubeofinterest.cubechat.shadow.jda'
-    relocate 'okhttp3', 'crazer.cubeofinterest.cubechat.shadow.okhttp3'
-    relocate 'okio', 'crazer.cubeofinterest.cubechat.shadow.okio'
-    relocate 'kotlin', 'crazer.cubeofinterest.cubechat.shadow.kotlin'
-    relocate 'kotlinx', 'crazer.cubeofinterest.cubechat.shadow.kotlinx'
-    relocate 'org.slf4j', 'crazer.cubeofinterest.cubechat.shadow.slf4j'
-    relocate 'com.neovisionaries', 'crazer.cubeofinterest.cubechat.shadow.neovisionaries'
-    relocate 'com.fasterxml', 'crazer.cubeofinterest.cubechat.shadow.fasterxml'
-    relocate 'gnu.trove', 'crazer.cubeofinterest.cubechat.shadow.trove'
-    relocate 'org.jetbrains', 'crazer.cubeofinterest.cubechat.shadow.jetbrains'
-    relocate 'org.intellij', 'crazer.cubeofinterest.cubechat.shadow.intellij'
-    relocate 'com.sun.jna', 'crazer.cubeofinterest.cubechat.shadow.jna'
+    relocate 'net.dv8tion.jda', 'crazer.cubeofinterest.cointcoregto.shadow.jda'
+    relocate 'okhttp3', 'crazer.cubeofinterest.cointcoregto.shadow.okhttp3'
+    relocate 'okio', 'crazer.cubeofinterest.cointcoregto.shadow.okio'
+    relocate 'kotlin', 'crazer.cubeofinterest.cointcoregto.shadow.kotlin'
+    relocate 'kotlinx', 'crazer.cubeofinterest.cointcoregto.shadow.kotlinx'
+    relocate 'org.slf4j', 'crazer.cubeofinterest.cointcoregto.shadow.slf4j'
+    relocate 'com.neovisionaries', 'crazer.cubeofinterest.cointcoregto.shadow.neovisionaries'
+    relocate 'com.fasterxml', 'crazer.cubeofinterest.cointcoregto.shadow.fasterxml'
+    relocate 'gnu.trove', 'crazer.cubeofinterest.cointcoregto.shadow.trove'
+    relocate 'org.jetbrains', 'crazer.cubeofinterest.cointcoregto.shadow.jetbrains'
+    relocate 'org.intellij', 'crazer.cubeofinterest.cointcoregto.shadow.intellij'
+    relocate 'com.sun.jna', 'crazer.cubeofinterest.cointcoregto.shadow.jna'
 
     mergeServiceFiles()
 }

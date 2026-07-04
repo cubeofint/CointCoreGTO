@@ -1,4 +1,4 @@
-package Crazer.cubeofinterest.cubechat;
+package Crazer.cubeofinterest.cointcoregto;
 
 import net.minecraft.client.GuiMessage;
 import net.minecraft.client.Minecraft;
@@ -20,11 +20,11 @@ import java.util.Deque;
 import java.util.List;
 
 @Mod.EventBusSubscriber(
-        modid = CubeChat.MODID,
+        modid = CointCoreGTO.MODID,
         value = Dist.CLIENT,
         bus = Mod.EventBusSubscriber.Bus.FORGE
 )
-public class CubeChatClient {
+public class CointCoreGTOClient {
     public static final int CLIENT_CHAT_LINE_LIMIT = 5000;
     private static final int NON_CUBECHAT_HISTORY_LIMIT = 500;
     private static final Deque<Component> NON_CUBECHAT_HISTORY = new ArrayDeque<>();
@@ -42,6 +42,7 @@ public class CubeChatClient {
     private static final ButtonArea localButton = new ButtonArea();
     private static final ButtonArea globalButton = new ButtonArea();
     private static final ButtonArea privateButton = new ButtonArea();
+    private static long lastChatButtonClickMillis = 0L;
 
     @SubscribeEvent
     public static void onClientChatReceived(ClientChatReceivedEvent event) {
@@ -56,13 +57,13 @@ public class CubeChatClient {
         }
 
         String lower = text.toLowerCase(java.util.Locale.ROOT);
-        if (CubeChat.shouldHideJoinLeaveMessages() && isVanillaJoinMessage(lower)) {
+        if (CointCoreGTO.shouldHideJoinLeaveMessages() && isVanillaJoinMessage(lower)) {
             event.setCanceled(true);
             return;
         }
 
-        if (!isCubeChatText(text)) {
-            rememberNonCubeChatMessage(message);
+        if (!isCointCoreGTOText(text)) {
+            rememberNonCointCoreGTOMessage(message);
         }
     }
 
@@ -144,25 +145,35 @@ public class CubeChatClient {
         double mouseX = event.getMouseX();
         double mouseY = event.getMouseY();
 
+        long now = System.currentTimeMillis();
+        if (now - lastChatButtonClickMillis < 200L) {
+            event.setCanceled(true);
+            return;
+        }
+
         if (allButton.contains(mouseX, mouseY)) {
+            lastChatButtonClickMillis = now;
             mc.player.connection.sendCommand("chat all");
             event.setCanceled(true);
             return;
         }
 
         if (localButton.contains(mouseX, mouseY)) {
+            lastChatButtonClickMillis = now;
             mc.player.connection.sendCommand("chat local");
             event.setCanceled(true);
             return;
         }
 
         if (globalButton.contains(mouseX, mouseY)) {
+            lastChatButtonClickMillis = now;
             mc.player.connection.sendCommand("chat global");
             event.setCanceled(true);
             return;
         }
 
         if (privateButton.contains(mouseX, mouseY)) {
+            lastChatButtonClickMillis = now;
             mc.player.connection.sendCommand("chat pm");
             event.setCanceled(true);
         }
@@ -173,6 +184,8 @@ public class CubeChatClient {
     }
 
     public static void clearChatMessages(boolean keepSystemMessages) {
+        CointCoreGTOItemIconOverlay.clearIcons();
+
         Minecraft mc = Minecraft.getInstance();
         if (mc.gui == null) {
             return;
@@ -182,14 +195,17 @@ public class CubeChatClient {
         if (chat == null) {
             return;
         }
+
         if (!keepSystemMessages) {
             chat.clearMessages(false);
             return;
         }
-        if (clearOnlyCubeChatMessages(chat)) {
+
+        if (clearOnlyCointCoreGTOMessages(chat)) {
             return;
         }
-        List<Component> nonCubeMessages = snapshotNonCubeChatMessages();
+
+        List<Component> nonCubeMessages = snapshotNonCointCoreGTOMessages();
         chat.clearMessages(false);
 
         for (Component component : nonCubeMessages) {
@@ -199,7 +215,7 @@ public class CubeChatClient {
         }
     }
 
-    private static void rememberNonCubeChatMessage(Component message) {
+    private static void rememberNonCointCoreGTOMessage(Component message) {
         if (message == null) {
             return;
         }
@@ -213,13 +229,13 @@ public class CubeChatClient {
         }
     }
 
-    private static List<Component> snapshotNonCubeChatMessages() {
+    private static List<Component> snapshotNonCointCoreGTOMessages() {
         synchronized (NON_CUBECHAT_HISTORY) {
             return new ArrayList<>(NON_CUBECHAT_HISTORY);
         }
     }
 
-    private static boolean clearOnlyCubeChatMessages(ChatComponent chat) {
+    private static boolean clearOnlyCointCoreGTOMessages(ChatComponent chat) {
         try {
             Field allMessagesField = findField(ChatComponent.class, "allMessages", "f_93761_");
             if (allMessagesField == null) {
@@ -234,7 +250,7 @@ public class CubeChatClient {
 
             @SuppressWarnings("unchecked")
             List<Object> allMessages = (List<Object>) rawList;
-            allMessages.removeIf(CubeChatClient::isCubeChatGuiMessage);
+            allMessages.removeIf(CointCoreGTOClient::isCointCoreGTOGuiMessage);
 
             Method refreshMethod = findMethod(ChatComponent.class, "refreshTrimmedMessages", "m_93796_");
             if (refreshMethod == null) {
@@ -270,7 +286,7 @@ public class CubeChatClient {
         return null;
     }
 
-    private static boolean isCubeChatGuiMessage(Object message) {
+    private static boolean isCointCoreGTOGuiMessage(Object message) {
         if (message == null) {
             return false;
         }
@@ -288,13 +304,13 @@ public class CubeChatClient {
                 component = reflectedComponent;
             }
 
-            return isCubeChatText(component.getString());
+            return isCointCoreGTOText(component.getString());
         } catch (Throwable ignored) {
             return false;
         }
     }
 
-    private static boolean isCubeChatText(String text) {
+    private static boolean isCointCoreGTOText(String text) {
         if (text == null || text.isBlank()) {
             return false;
         }

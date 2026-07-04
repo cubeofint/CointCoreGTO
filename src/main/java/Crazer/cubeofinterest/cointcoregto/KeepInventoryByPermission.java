@@ -1,4 +1,4 @@
-package Crazer.cubeofinterest.cubechat;
+package Crazer.cubeofinterest.cointcoregto;
 
 import net.minecraft.nbt.ListTag;
 import net.minecraft.server.level.ServerPlayer;
@@ -14,9 +14,9 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-@Mod.EventBusSubscriber(modid = CubeChat.MODID)
+@Mod.EventBusSubscriber(modid = CointCoreGTO.MODID)
 public final class KeepInventoryByPermission {
-    private static final String PERMISSION = "cubechat.keepinv";
+    private static final String PERMISSION = "cointcoregto.keepinv";
 
     private static final Map<UUID, ListTag> SAVED_INVENTORIES = new ConcurrentHashMap<>();
     private static final Map<UUID, Integer> SAVED_LEVELS = new ConcurrentHashMap<>();

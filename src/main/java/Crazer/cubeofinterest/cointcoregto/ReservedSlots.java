@@ -1,4 +1,4 @@
-package Crazer.cubeofinterest.cubechat;
+package Crazer.cubeofinterest.cointcoregto;
 
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -9,7 +9,7 @@ import net.minecraftforge.fml.common.Mod;
 
 import java.util.UUID;
 
-@Mod.EventBusSubscriber(modid = CubeChat.MODID)
+@Mod.EventBusSubscriber(modid = CointCoreGTO.MODID)
 public final class ReservedSlots {
     private ReservedSlots() {
     }
@@ -25,14 +25,14 @@ public final class ReservedSlots {
             return;
         }
 
-        int publicSlots = CubeChat.RESERVED_PUBLIC_SLOTS.get();
-        int totalSlots = CubeChat.RESERVED_TOTAL_SLOTS.get();
-        String permission = CubeChat.RESERVED_PERMISSION.get();
+        int publicSlots = CointCoreGTO.RESERVED_PUBLIC_SLOTS.get();
+        int totalSlots = CointCoreGTO.RESERVED_TOTAL_SLOTS.get();
+        String permission = CointCoreGTO.RESERVED_PERMISSION.get();
 
         int online = server.getPlayerList().getPlayerCount();
 
         if (online > totalSlots) {
-            player.connection.disconnect(Component.literal(CubeChat.RESERVED_FULL_MESSAGE.get()));
+            player.connection.disconnect(Component.literal(CointCoreGTO.RESERVED_FULL_MESSAGE.get()));
             return;
         }
 
@@ -41,7 +41,7 @@ public final class ReservedSlots {
         }
 
         if (!hasPermission(player, permission)) {
-            player.connection.disconnect(Component.literal(CubeChat.RESERVED_NO_PERMISSION_MESSAGE.get()));
+            player.connection.disconnect(Component.literal(CointCoreGTO.RESERVED_NO_PERMISSION_MESSAGE.get()));
         }
     }
 

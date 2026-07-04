@@ -1,4 +1,4 @@
-package Crazer.cubeofinterest.cubechat;
+package Crazer.cubeofinterest.cointcoregto;
 
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
@@ -11,10 +11,10 @@ import net.minecraftforge.network.simple.SimpleChannel;
 
 import java.util.function.Supplier;
 
-public final class CubeChatItemShare {
+public final class CointCoreGTOItemShare {
     private static final String NETWORK_PROTOCOL_VERSION = "1";
     private static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
-            new ResourceLocation(CubeChat.MODID, "item_share"),
+            new ResourceLocation(CointCoreGTO.MODID, "item_share"),
             () -> NETWORK_PROTOCOL_VERSION,
             NETWORK_PROTOCOL_VERSION::equals,
             NETWORK_PROTOCOL_VERSION::equals
@@ -22,7 +22,7 @@ public final class CubeChatItemShare {
 
     private static boolean registered = false;
 
-    private CubeChatItemShare() {
+    private CointCoreGTOItemShare() {
     }
 
     public static void registerNetwork() {
@@ -87,7 +87,7 @@ public final class CubeChatItemShare {
                     return;
                 }
 
-                CubeChat.shareItemInCurrentChat(player, packet.stack.copy());
+                CointCoreGTO.shareItemInCurrentChat(player, packet.stack.copy());
             });
             context.setPacketHandled(true);
         }
@@ -118,7 +118,7 @@ public final class CubeChatItemShare {
             NetworkEvent.Context context = contextSupplier.get();
             context.enqueueWork(() -> {
                 if (!packet.stack.isEmpty()) {
-                    CubeChatItemIconOverlay.queueIcon(packet.stack.copy(), packet.prefixText, packet.itemText);
+                    CointCoreGTOItemIconOverlay.queueIcon(packet.stack.copy(), packet.prefixText, packet.itemText);
                 }
             });
             context.setPacketHandled(true);

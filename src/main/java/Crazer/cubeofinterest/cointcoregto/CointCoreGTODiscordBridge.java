@@ -1,4 +1,4 @@
-package Crazer.cubeofinterest.cubechat;
+package Crazer.cubeofinterest.cointcoregto;
 
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.JDABuilder;
@@ -26,7 +26,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-public class CubeDiscordBridge {
+public class CointCoreGTODiscordBridge {
     private static JDA jda;
     private static TextChannel textChannel;
     private static TextChannel logChannel;
@@ -69,17 +69,17 @@ public class CubeDiscordBridge {
         stopOnlineStatusUpdater();
 
         if (!enabled) {
-            System.out.println("[CubeDiscord] Discord bridge is disabled.");
+            System.out.println("[CointDiscord] Discord bridge is disabled.");
             return;
         }
 
         if (token == null || token.isBlank() || token.equalsIgnoreCase("TOKEN_HERE")) {
-            System.out.println("[CubeDiscord] Bot token is empty. Discord bridge disabled.");
+            System.out.println("[CointDiscord] Bot token is empty. Discord bridge disabled.");
             return;
         }
 
         if (channelId == null || channelId.isBlank() || channelId.equalsIgnoreCase("CHANNEL_ID_HERE")) {
-            System.out.println("[CubeDiscord] Channel ID is empty. Discord bridge disabled.");
+            System.out.println("[CointDiscord] Channel ID is empty. Discord bridge disabled.");
             return;
         }
 
@@ -106,16 +106,16 @@ public class CubeDiscordBridge {
                         logChannel = jda.getTextChannelById(logChannelId);
 
                         if (logChannel == null) {
-                            System.out.println("[CubeDiscord] Log channel not found: " + logChannelId);
+                            System.out.println("[CointDiscord] Log channel not found: " + logChannelId);
                         }
                     }
 
                     if (textChannel == null) {
-                        System.out.println("[CubeDiscord] Channel not found: " + channelId);
+                        System.out.println("[CointDiscord] Channel not found: " + channelId);
                         return;
                     }
 
-                    System.out.println("[CubeDiscord] Discord bridge connected.");
+                    System.out.println("[CointDiscord] Discord bridge connected.");
 
                     if (sendServerStatus) {
                         sendToDiscord("**[A] сервер включился!**");
@@ -123,12 +123,12 @@ public class CubeDiscordBridge {
 
                     startOnlineStatusUpdater();
                 } catch (Exception e) {
-                    System.out.println("[CubeDiscord] Failed to start Discord bridge: " + e.getMessage());
+                    System.out.println("[CointDiscord] Failed to start Discord bridge: " + e.getMessage());
                 }
-            }, "CubeDiscord-Init").start();
+            }, "CointDiscord-Init").start();
 
         } catch (Throwable e) {
-            System.out.println("[CubeDiscord] Failed to create JDA: " + e.getMessage());
+            System.out.println("[CointDiscord] Failed to create JDA: " + e.getMessage());
         }
     }
 
@@ -211,7 +211,7 @@ public class CubeDiscordBridge {
                     .setAllowedMentions(java.util.Collections.emptyList())
                     .queue();
         } catch (Throwable e) {
-            System.out.println("[CubeDiscord] Failed to send message: " + e.getMessage());
+            System.out.println("[CointDiscord] Failed to send message: " + e.getMessage());
         }
     }
 
@@ -248,11 +248,11 @@ public class CubeDiscordBridge {
 
             HTTP_CLIENT.sendAsync(request, HttpResponse.BodyHandlers.discarding())
                     .exceptionally(error -> {
-                        System.out.println("[CubeDiscord] Failed to send webhook message: " + error.getMessage());
+                        System.out.println("[CointDiscord] Failed to send webhook message: " + error.getMessage());
                         return null;
                     });
         } catch (Throwable e) {
-            System.out.println("[CubeDiscord] Failed to build webhook request: " + e.getMessage());
+            System.out.println("[CointDiscord] Failed to build webhook request: " + e.getMessage());
         }
     }
 
@@ -281,7 +281,7 @@ public class CubeDiscordBridge {
                     .setAllowedMentions(java.util.Collections.emptyList())
                     .queue();
         } catch (Throwable e) {
-            System.out.println("[CubeDiscord] Failed to send log message: " + e.getMessage());
+            System.out.println("[CointDiscord] Failed to send log message: " + e.getMessage());
         }
     }
 
@@ -327,7 +327,7 @@ public class CubeDiscordBridge {
         String finalMessage = message;
         String finalReplyToMinecraftPlayer = replyToMinecraftPlayer;
 
-        server.execute(() -> CubeChat.broadcastDiscordMessage(author, finalMessage, finalReplyToMinecraftPlayer));
+        server.execute(() -> CointCoreGTO.broadcastDiscordMessage(author, finalMessage, finalReplyToMinecraftPlayer));
     }
 
     private static void startOnlineStatusUpdater() {
@@ -338,13 +338,13 @@ public class CubeDiscordBridge {
         stopOnlineStatusUpdater();
 
         onlineStatusExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "CubeDiscord-OnlineStatus");
+            Thread thread = new Thread(runnable, "CointDiscord-OnlineStatus");
             thread.setDaemon(true);
             return thread;
         });
 
         onlineStatusExecutor.scheduleAtFixedRate(
-                CubeDiscordBridge::updateOnlineStatusMessageNow,
+                CointCoreGTODiscordBridge::updateOnlineStatusMessageNow,
                 5L,
                 onlineStatusUpdateSeconds,
                 TimeUnit.SECONDS
@@ -384,12 +384,12 @@ public class CubeDiscordBridge {
                 message -> message.editMessage(messageText).queue(
                         success -> {},
                         error -> {
-                            System.out.println("[CubeDiscord] Failed to edit online status message: " + error.getMessage());
+                            System.out.println("[CointDiscord] Failed to edit online status message: " + error.getMessage());
                             sendNewOnlineStatusMessage(statusChannel, messageText);
                         }
                 ),
                 error -> {
-                    System.out.println("[CubeDiscord] Online status message not found, creating a new one.");
+                    System.out.println("[CointDiscord] Online status message not found, creating a new one.");
                     sendNewOnlineStatusMessage(statusChannel, messageText);
                 }
         );
@@ -414,10 +414,10 @@ public class CubeDiscordBridge {
         try {
             channel.sendMessage(messageText).queue(message -> {
                 saveOnlineStatusMessageId(message.getId());
-                System.out.println("[CubeDiscord] Created online status message. Pin this message in Discord. ID: " + message.getId());
-            }, error -> System.out.println("[CubeDiscord] Failed to create online status message: " + error.getMessage()));
+                System.out.println("[CointDiscord] Created online status message. Pin this message in Discord. ID: " + message.getId());
+            }, error -> System.out.println("[CointDiscord] Failed to create online status message: " + error.getMessage()));
         } catch (Throwable e) {
-            System.out.println("[CubeDiscord] Failed to send online status message: " + e.getMessage());
+            System.out.println("[CointDiscord] Failed to send online status message: " + e.getMessage());
         }
     }
 
@@ -429,7 +429,7 @@ public class CubeDiscordBridge {
 
         List<ServerPlayer> players = minecraftServer.getPlayerList().getPlayers()
                 .stream()
-                .filter(CubeChat::shouldShowInDiscordOnlineStatus)
+                .filter(CointCoreGTO::shouldShowInDiscordOnlineStatus)
                 .toList();
         int online = players.size();
         int max = minecraftServer.getPlayerList().getMaxPlayers();
@@ -450,7 +450,7 @@ public class CubeDiscordBridge {
 
         int added = 0;
         for (ServerPlayer player : players) {
-            String line = "• " + CubeChat.getDiscordDisplayName(player) + "\n";
+            String line = "• " + CointCoreGTO.getDiscordDisplayName(player) + "\n";
 
             if (builder.length() + line.length() > 1900) {
                 builder.append("• ...и ещё ").append(online - added).append("\n");
@@ -487,7 +487,7 @@ public class CubeDiscordBridge {
             Files.createDirectories(path.getParent());
             Files.writeString(path, messageId == null ? "" : messageId.trim(), StandardCharsets.UTF_8);
         } catch (Throwable e) {
-            System.out.println("[CubeDiscord] Failed to save online status message ID: " + e.getMessage());
+            System.out.println("[CointDiscord] Failed to save online status message ID: " + e.getMessage());
         }
     }
 
@@ -580,7 +580,7 @@ public class CubeDiscordBridge {
                     .replace("%uuid%", encodedUuid)
                     .replace("{uuid}", encodedUuid);
         } catch (Throwable e) {
-            System.out.println("[CubeDiscord] Failed to build avatar URL: " + e.getMessage());
+            System.out.println("[CointDiscord] Failed to build avatar URL: " + e.getMessage());
             return "";
         }
     }

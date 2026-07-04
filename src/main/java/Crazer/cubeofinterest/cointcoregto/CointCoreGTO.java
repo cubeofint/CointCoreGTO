@@ -1,4 +1,4 @@
-package Crazer.cubeofinterest.cubechat;
+package Crazer.cubeofinterest.cointcoregto;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -69,9 +69,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
-@Mod(CubeChat.MODID)
-public class CubeChat {
-    public static final String MODID = "cubechat";
+@Mod(CointCoreGTO.MODID)
+public class CointCoreGTO {
+    public static final String MODID = "cointcoregto";
 
     private static final String NETWORK_PROTOCOL_VERSION = "1";
     private static final SimpleChannel NETWORK_CHANNEL = NetworkRegistry.newSimpleChannel(
@@ -132,7 +132,10 @@ public class CubeChat {
     private static final Map<UUID, Boolean> SHOW_TIME = new HashMap<>();
     private static final Map<UUID, Deque<ChatHistoryMessage>> CHAT_HISTORY = new ConcurrentHashMap<>();
     private static final AtomicLong CHAT_HISTORY_COUNTER = new AtomicLong();
+    private static final Map<UUID, Long> LAST_CHAT_VIEW_SWITCH_MILLIS = new ConcurrentHashMap<>();
+    private static final long CHAT_VIEW_SWITCH_COOLDOWN_MILLIS = 300L;
     private static final int MAX_CHAT_HISTORY_PER_PLAYER = 5000;
+    private static final int MAX_CHAT_HISTORY_REPLAY = 250;
     private static final Map<UUID, MuteData> MUTED_PLAYERS = new ConcurrentHashMap<>();
     private static final Map<UUID, TempBanData> TEMP_BANNED_PLAYERS = new ConcurrentHashMap<>();
     private static final Map<UUID, LastLocationData> LAST_LOCATIONS = new ConcurrentHashMap<>();
@@ -190,7 +193,7 @@ public class CubeChat {
                 .define("show_chat_panel_on_join", true);
 
         HIDE_JOIN_LEAVE_MESSAGES = builder
-                .comment("If true, CubeChat hides vanilla player join and leave messages on clients with the mod installed.")
+                .comment("If true, CointCoreGTO hides vanilla player join and leave messages on clients with the mod installed.")
                 .define("hide_join_leave_messages", true);
 
         builder.pop();
@@ -294,7 +297,7 @@ public class CubeChat {
         builder.push("restart");
 
         RESTART_ENABLED = builder
-                .comment("Enable automatic scheduled restarts. CubeChat stops the server; your host/start script must start it again.")
+                .comment("Enable automatic scheduled restarts. CointCoreGTO stops the server; your host/start script must start it again.")
                 .define("enabled", false);
 
         RESTART_TIMES = builder
@@ -338,10 +341,10 @@ public class CubeChat {
         CONFIG_SPEC = builder.build();
     }
 
-    public CubeChat() {
+    public CointCoreGTO() {
         registerNetwork();
-        CubeChatItemShare.registerNetwork();
-        ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC);
+        CointCoreGTOItemShare.registerNetwork();
+        ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC, "cubechat-common.toml");
         MinecraftForge.EVENT_BUS.register(this);
     }
 
@@ -354,8 +357,8 @@ public class CubeChat {
         }
     }
 
-    private static void reloadCubeChatConfig() {
-        Path configPath = FMLPaths.CONFIGDIR.get().resolve(MODID + "-common.toml");
+    private static void reloadCointCoreGTOConfig() {
+        Path configPath = FMLPaths.CONFIGDIR.get().resolve("cubechat-common.toml");
 
         CommentedFileConfig configData = CommentedFileConfig.builder(configPath)
                 .sync()
@@ -375,7 +378,7 @@ public class CubeChat {
             return;
         }
 
-        CubeDiscordBridge.reload(
+        CointCoreGTODiscordBridge.reload(
                 CURRENT_SERVER,
                 DISCORD_ENABLED.get(),
                 DISCORD_BOT_TOKEN.get(),
@@ -440,7 +443,7 @@ public class CubeChat {
         loadLastLocations();
         loadWarns();
         loadPunishmentHistory();
-        CubeDiscordBridge.start(
+        CointCoreGTODiscordBridge.start(
                 CURRENT_SERVER,
                 DISCORD_ENABLED.get(),
                 DISCORD_BOT_TOKEN.get(),
@@ -463,7 +466,7 @@ public class CubeChat {
         saveLastLocations();
         saveWarns();
         savePunishmentHistory();
-        CubeDiscordBridge.stop();
+        CointCoreGTODiscordBridge.stop();
         NEXT_RESTART_MILLIS = -1L;
         LAST_RESTART_CHECK_SECOND = -1L;
         RESTARTING_NOW = false;
@@ -502,6 +505,7 @@ public class CubeChat {
         saveLastLocation(player);
         saveLastLocations();
         CHAT_HISTORY.remove(player.getUUID());
+        LAST_CHAT_VIEW_SWITCH_MILLIS.remove(player.getUUID());
     }
 
     private static void removeRootCommand(CommandDispatcher<CommandSourceStack> dispatcher, String commandName) {
@@ -513,7 +517,7 @@ public class CubeChat {
             CommandNode<CommandSourceStack> root = dispatcher.getRoot();
             removeCommandNodeChild(root, commandName);
         } catch (Throwable e) {
-            System.out.println("[CubeChat] Failed to remove vanilla command /" + commandName + ": " + e.getMessage());
+            System.out.println("[CointCoreGTO] Failed to remove vanilla command /" + commandName + ": " + e.getMessage());
         }
     }
 
@@ -539,19 +543,39 @@ public class CubeChat {
         removeRootCommand(event.getDispatcher(), "me");
 
         event.getDispatcher().register(
+                Commands.literal("cointcoregto")
+                        .requires(source -> hasCommandPermission(source, "cubechat.reload"))
+                        .then(Commands.literal("reload")
+                                .executes(ctx -> {
+                                    try {
+                                        reloadCointCoreGTOConfig();
+                                        ctx.getSource().sendSuccess(
+                                                () -> Component.literal("§aКонфиг CointCoreGTO перезагружен. Расписание рестартов и Discord bridge обновлены."),
+                                                false
+                                        );
+                                        return 1;
+                                    } catch (Throwable e) {
+                                        ctx.getSource().sendFailure(Component.literal("§cНе удалось перезагрузить конфиг CointCoreGTO: " + e.getMessage()));
+                                        e.printStackTrace();
+                                        return 0;
+                                    }
+                                }))
+        );
+
+        event.getDispatcher().register(
                 Commands.literal("cubechat")
                         .requires(source -> hasCommandPermission(source, "cubechat.reload"))
                         .then(Commands.literal("reload")
                                 .executes(ctx -> {
                                     try {
-                                        reloadCubeChatConfig();
+                                        reloadCointCoreGTOConfig();
                                         ctx.getSource().sendSuccess(
-                                                () -> Component.literal("§aКонфиг CubeChat перезагружен. Расписание рестартов и Discord bridge обновлены."),
+                                                () -> Component.literal("§aКонфиг CointCoreGTO перезагружен. Расписание рестартов и Discord bridge обновлены."),
                                                 false
                                         );
                                         return 1;
                                     } catch (Throwable e) {
-                                        ctx.getSource().sendFailure(Component.literal("§cНе удалось перезагрузить конфиг CubeChat: " + e.getMessage()));
+                                        ctx.getSource().sendFailure(Component.literal("§cНе удалось перезагрузить конфиг CointCoreGTO: " + e.getMessage()));
                                         e.printStackTrace();
                                         return 0;
                                     }
@@ -1337,7 +1361,7 @@ public class CubeChat {
                                 .executes(ctx -> {
                                     resetRestartSchedule();
                                     ctx.getSource().sendSuccess(
-                                            () -> Component.literal("§aРасписание рестартов CubeChat перезагружено. " + getRestartStatusText()),
+                                            () -> Component.literal("§aРасписание рестартов CointCoreGTO перезагружено. " + getRestartStatusText()),
                                             true
                                     );
                                     return 1;
@@ -1350,7 +1374,7 @@ public class CubeChat {
                                     RESTART_PLAYERS_KICKED = false;
                                     SENT_RESTART_WARNINGS.clear();
                                     ctx.getSource().sendSuccess(
-                                            () -> Component.literal("§cБлижайший рестарт CubeChat отменён до /cuberestart reload или перезапуска сервера."),
+                                            () -> Component.literal("§cБлижайший рестарт CointCoreGTO отменён до /cuberestart reload или перезапуска сервера."),
                                             true
                                     );
                                     return 1;
@@ -1517,9 +1541,9 @@ public class CubeChat {
         NEXT_RESTART_MILLIS = calculateNextRestartMillis();
 
         if (NEXT_RESTART_MILLIS > 0L) {
-            System.out.println("[CubeChat] Next automatic restart: " + formatDateTime(NEXT_RESTART_MILLIS));
+            System.out.println("[CointCoreGTO] Next automatic restart: " + formatDateTime(NEXT_RESTART_MILLIS));
         } else {
-            System.out.println("[CubeChat] Automatic restarts are disabled or no valid restart times configured.");
+            System.out.println("[CointCoreGTO] Automatic restarts are disabled or no valid restart times configured.");
         }
     }
 
@@ -1610,7 +1634,7 @@ public class CubeChat {
                     best = candidate;
                 }
             } catch (Throwable ignored) {
-                System.out.println("[CubeChat] Invalid restart time in config: " + rawTime + ". Use HH:mm, for example 06:00");
+                System.out.println("[CointCoreGTO] Invalid restart time in config: " + rawTime + ". Use HH:mm, for example 06:00");
             }
         }
 
@@ -1644,8 +1668,8 @@ public class CubeChat {
             }
         }
 
-        System.out.println("[CubeChat] Restart warning: " + stripColor(chatMessage));
-        CubeDiscordBridge.sendToDiscord("⚠ Рестарт сервера через **" + stripColor(timeText) + "**!");
+        System.out.println("[CointCoreGTO] Restart warning: " + stripColor(chatMessage));
+        CointCoreGTODiscordBridge.sendToDiscord("⚠ Рестарт сервера через **" + stripColor(timeText) + "**!");
     }
 
 
@@ -1656,12 +1680,12 @@ public class CubeChat {
 
         RESTART_PLAYERS_KICKED = true;
 
-        System.out.println("[CubeChat] Kicking players before restart and saving the world.");
+        System.out.println("[CointCoreGTO] Kicking players before restart and saving the world.");
 
         try {
             server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), "save-all flush");
         } catch (Throwable e) {
-            System.out.println("[CubeChat] Failed to execute save-all flush before kicking players: " + e.getMessage());
+            System.out.println("[CointCoreGTO] Failed to execute save-all flush before kicking players: " + e.getMessage());
         }
 
         Component kickMessage = Component.literal(RESTART_KICK_MESSAGE.get());
@@ -1692,20 +1716,20 @@ public class CubeChat {
             player.sendSystemMessage(Component.literal("§cСервер перезапускается. Зайдите через пару минут."));
         }
 
-        CubeDiscordBridge.sendToDiscord("🔄 **Сервер уходит на плановый рестарт.**");
-        System.out.println("[CubeChat] Automatic restart started.");
+        CointCoreGTODiscordBridge.sendToDiscord("🔄 **Сервер уходит на плановый рестарт.**");
+        System.out.println("[CointCoreGTO] Automatic restart started.");
 
         server.execute(() -> {
             try {
                 server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), "save-all flush");
             } catch (Throwable e) {
-                System.out.println("[CubeChat] Failed to execute save-all flush: " + e.getMessage());
+                System.out.println("[CointCoreGTO] Failed to execute save-all flush: " + e.getMessage());
             }
 
             try {
                 server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), "stop");
             } catch (Throwable e) {
-                System.out.println("[CubeChat] Failed to execute stop command: " + e.getMessage());
+                System.out.println("[CointCoreGTO] Failed to execute stop command: " + e.getMessage());
                 try {
                     server.halt(false);
                 } catch (Throwable ignored) {
@@ -1822,7 +1846,25 @@ public class CubeChat {
     }
 
     private static void setChatView(ServerPlayer player, ChatView view) {
-        CHAT_VIEWS.put(player.getUUID(), view);
+        if (player == null || view == null) {
+            return;
+        }
+
+        UUID uuid = player.getUUID();
+        ChatView previousView = CHAT_VIEWS.getOrDefault(uuid, ChatView.ALL);
+        long now = System.currentTimeMillis();
+        long lastSwitch = LAST_CHAT_VIEW_SWITCH_MILLIS.getOrDefault(uuid, 0L);
+
+        if (previousView == view && now - lastSwitch < CHAT_VIEW_SWITCH_COOLDOWN_MILLIS) {
+            return;
+        }
+
+        if (now - lastSwitch < CHAT_VIEW_SWITCH_COOLDOWN_MILLIS) {
+            return;
+        }
+
+        LAST_CHAT_VIEW_SWITCH_MILLIS.put(uuid, now);
+        CHAT_VIEWS.put(uuid, view);
         replayChatHistory(player, view);
 
         if (view == ChatView.ALL) {
@@ -1843,14 +1885,19 @@ public class CubeChat {
     }
 
     private static void rememberChatMessage(ServerPlayer target, ChatView view, String formattedMessage) {
+        rememberChatMessage(target, view, formattedMessage, Component.literal(formattedMessage == null ? "" : formattedMessage));
+    }
+
+    private static void rememberChatMessage(ServerPlayer target, ChatView view, String formattedMessage, Component componentMessage) {
         if (target == null || formattedMessage == null || formattedMessage.isBlank()) {
             return;
         }
 
+        Component storedComponent = componentMessage == null ? Component.literal(formattedMessage) : componentMessage.copy();
         Deque<ChatHistoryMessage> history = CHAT_HISTORY.computeIfAbsent(target.getUUID(), uuid -> new ArrayDeque<>());
 
         synchronized (history) {
-            history.addLast(new ChatHistoryMessage(CHAT_HISTORY_COUNTER.incrementAndGet(), view, formattedMessage));
+            history.addLast(new ChatHistoryMessage(CHAT_HISTORY_COUNTER.incrementAndGet(), view, formattedMessage, storedComponent));
 
             while (history.size() > MAX_CHAT_HISTORY_PER_PLAYER) {
                 history.removeFirst();
@@ -1863,7 +1910,7 @@ public class CubeChat {
     }
 
     private static void sendFilteredChatMessage(ServerPlayer target, ChatView view, String formattedMessage, Component liveMessage) {
-        rememberChatMessage(target, view, formattedMessage);
+        rememberChatMessage(target, view, formattedMessage, liveMessage);
 
         if (canReceive(target, view)) {
             target.sendSystemMessage(liveMessage);
@@ -1871,7 +1918,8 @@ public class CubeChat {
     }
 
     private static void replayChatHistory(ServerPlayer player, ChatView view) {
-        clearClientChat(player, view == ChatView.ALL);
+        // Always preserve non-CointCoreGTO/system messages, including KubeJS cleanup warnings.
+        clearClientChat(player, true);
 
         Deque<ChatHistoryMessage> history = CHAT_HISTORY.get(player.getUUID());
         if (history == null || history.isEmpty()) {
@@ -1883,12 +1931,19 @@ public class CubeChat {
             snapshot = new ArrayList<>(history);
         }
 
+        ArrayList<ChatHistoryMessage> filtered = new ArrayList<>();
         for (ChatHistoryMessage message : snapshot) {
             if (view != ChatView.ALL && message.view() != view) {
                 continue;
             }
+            filtered.add(message);
+        }
 
-            player.sendSystemMessage(Component.literal(message.message()));
+        int startIndex = Math.max(0, filtered.size() - MAX_CHAT_HISTORY_REPLAY);
+        for (int i = startIndex; i < filtered.size(); i++) {
+            ChatHistoryMessage message = filtered.get(i);
+            Component component = message.component() == null ? Component.literal(message.message()) : message.component().copy();
+            player.sendSystemMessage(component);
         }
     }
 
@@ -1914,7 +1969,7 @@ public class CubeChat {
     }
 
     private static void sendLocalChat(ServerPlayer player, String message) {
-        String plainMessage = CubeChatItemPreview.toPlainMessage(player, message);
+        String plainMessage = CointCoreGTOItemPreview.toPlainMessage(player, message);
         String withoutTimePrefix = color(LOCAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
@@ -1939,7 +1994,7 @@ public class CubeChat {
 
             String fullPrefix = timePrefix(target) + withoutTimePrefix;
             String fullPlain = fullPrefix + plainMessage;
-            Component liveMessage = CubeChatItemPreview.buildMessage(player, fullPrefix, message);
+            Component liveMessage = CointCoreGTOItemPreview.buildMessage(player, fullPrefix, message);
             sendFilteredChatMessage(target, ChatView.LOCAL, fullPlain, liveMessage);
             receivers++;
         }
@@ -1949,14 +2004,14 @@ public class CubeChat {
         }
 
         if (DISCORD_SEND_LOCAL_CHAT.get()) {
-            CubeDiscordBridge.sendToDiscordLog(discordFormatted);
+            CointCoreGTODiscordBridge.sendToDiscordLog(discordFormatted);
         }
 
         System.out.println("[LocalChat] " + stripColor(timePrefix(player) + withoutTime));
     }
 
     private static void sendGlobalChat(ServerPlayer player, String message) {
-        String plainMessage = CubeChatItemPreview.toPlainMessage(player, message);
+        String plainMessage = CointCoreGTOItemPreview.toPlainMessage(player, message);
         String withoutTimePrefix = color(GLOBAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
@@ -1969,12 +2024,12 @@ public class CubeChat {
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
             String fullPrefix = timePrefix(target) + withoutTimePrefix;
             String fullPlain = fullPrefix + plainMessage;
-            Component liveMessage = CubeChatItemPreview.buildMessage(player, fullPrefix, message);
+            Component liveMessage = CointCoreGTOItemPreview.buildMessage(player, fullPrefix, message);
             sendFilteredChatMessage(target, ChatView.GLOBAL, fullPlain, liveMessage);
         }
 
         if (DISCORD_SEND_GLOBAL_CHAT.get()) {
-            CubeDiscordBridge.sendPlayerMessageToDiscord(
+            CointCoreGTODiscordBridge.sendPlayerMessageToDiscord(
                     getDiscordDisplayName(player, GLOBAL_PREFIX.get()),
                     plainMessage,
                     player.getUUID().toString(),
@@ -1993,7 +2048,7 @@ public class CubeChat {
 
         String senderName = sender.getGameProfile().getName();
         String targetName = target.getGameProfile().getName();
-        String plainMessage = CubeChatItemPreview.toPlainMessage(sender, message);
+        String plainMessage = CointCoreGTOItemPreview.toPlainMessage(sender, message);
 
         String senderPrefix = timePrefix(sender)
                 + color(PRIVATE_PREFIX.get())
@@ -2010,17 +2065,20 @@ public class CubeChat {
         String toSender = senderPrefix + plainMessage;
         String toTarget = targetPrefix + plainMessage;
 
-        rememberChatMessage(sender, ChatView.PRIVATE, toSender);
-        rememberChatMessage(target, ChatView.PRIVATE, toTarget);
+        Component senderLiveMessage = CointCoreGTOItemPreview.buildMessage(sender, senderPrefix, message);
+        Component targetLiveMessage = CointCoreGTOItemPreview.buildMessage(sender, targetPrefix, message);
 
-        sender.sendSystemMessage(CubeChatItemPreview.buildMessage(sender, senderPrefix, message));
-        target.sendSystemMessage(CubeChatItemPreview.buildMessage(sender, targetPrefix, message));
+        rememberChatMessage(sender, ChatView.PRIVATE, toSender, senderLiveMessage);
+        rememberChatMessage(target, ChatView.PRIVATE, toTarget, targetLiveMessage);
+
+        sender.sendSystemMessage(senderLiveMessage);
+        target.sendSystemMessage(targetLiveMessage);
 
         LAST_PRIVATE.put(sender.getUUID(), target.getUUID());
         LAST_PRIVATE.put(target.getUUID(), sender.getUUID());
 
         if (DISCORD_SEND_PRIVATE_CHAT.get()) {
-            CubeDiscordBridge.sendToDiscordLog("[PM] " + senderName + " -> " + targetName + ": " + plainMessage);
+            CointCoreGTODiscordBridge.sendToDiscordLog("[PM] " + senderName + " -> " + targetName + ": " + plainMessage);
         }
 
         System.out.println("[PrivateChat] " + senderName + " -> " + targetName + ": " + plainMessage);
@@ -2052,8 +2110,8 @@ public class CubeChat {
     }
 
     private static void sendLocalItemShare(ServerPlayer player, ItemStack stack) {
-        String plainItemText = "  " + CubeChatItemPreview.toPlainText(stack);
-        String iconItemText = CubeChatItemPreview.toPlainText(stack);
+        String plainItemText = "    " + CointCoreGTOItemPreview.toPlainText(stack);
+        String iconItemText = CointCoreGTOItemPreview.toPlainText(stack);
         String withoutTimePrefix = color(LOCAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
@@ -2077,8 +2135,8 @@ public class CubeChat {
 
             String fullPrefix = timePrefix(target) + withoutTimePrefix;
             String fullPlain = fullPrefix + plainItemText;
-            Component liveMessage = Component.literal(fullPrefix + "  ").append(CubeChatItemPreview.buildItemComponent(stack));
-            CubeChatItemShare.sendIconHintToPlayer(target, stack, fullPrefix, iconItemText);
+            Component liveMessage = Component.literal(fullPrefix + "    ").append(CointCoreGTOItemPreview.buildItemComponent(stack));
+            CointCoreGTOItemShare.sendIconHintToPlayer(target, stack, fullPrefix, iconItemText);
             sendFilteredChatMessage(target, ChatView.LOCAL, fullPlain, liveMessage);
             receivers++;
         }
@@ -2088,15 +2146,15 @@ public class CubeChat {
         }
 
         if (DISCORD_SEND_LOCAL_CHAT.get()) {
-            CubeDiscordBridge.sendToDiscordLog(discordFormatted);
+            CointCoreGTODiscordBridge.sendToDiscordLog(discordFormatted);
         }
 
         System.out.println("[LocalChat] " + stripColor(timePrefix(player) + withoutTime));
     }
 
     private static void sendGlobalItemShare(ServerPlayer player, ItemStack stack) {
-        String plainItemText = "  " + CubeChatItemPreview.toPlainText(stack);
-        String iconItemText = CubeChatItemPreview.toPlainText(stack);
+        String plainItemText = "    " + CointCoreGTOItemPreview.toPlainText(stack);
+        String iconItemText = CointCoreGTOItemPreview.toPlainText(stack);
         String withoutTimePrefix = color(GLOBAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
@@ -2108,13 +2166,13 @@ public class CubeChat {
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
             String fullPrefix = timePrefix(target) + withoutTimePrefix;
             String fullPlain = fullPrefix + plainItemText;
-            Component liveMessage = Component.literal(fullPrefix + "  ").append(CubeChatItemPreview.buildItemComponent(stack));
-            CubeChatItemShare.sendIconHintToPlayer(target, stack, fullPrefix, iconItemText);
+            Component liveMessage = Component.literal(fullPrefix + "    ").append(CointCoreGTOItemPreview.buildItemComponent(stack));
+            CointCoreGTOItemShare.sendIconHintToPlayer(target, stack, fullPrefix, iconItemText);
             sendFilteredChatMessage(target, ChatView.GLOBAL, fullPlain, liveMessage);
         }
 
         if (DISCORD_SEND_GLOBAL_CHAT.get()) {
-            CubeDiscordBridge.sendPlayerMessageToDiscord(
+            CointCoreGTODiscordBridge.sendPlayerMessageToDiscord(
                     getDiscordDisplayName(player, GLOBAL_PREFIX.get()),
                     plainItemText,
                     player.getUUID().toString(),
@@ -2272,7 +2330,7 @@ public class CubeChat {
                 TEMP_BANNED_PLAYERS.put(uuid, new TempBanData(name, untilMillis, reason));
             }
         } catch (Throwable e) {
-            System.out.println("[CubeChat] Failed to load tempbans: " + e.getMessage());
+            System.out.println("[CointCoreGTO] Failed to load tempbans: " + e.getMessage());
         }
     }
 
@@ -2300,7 +2358,7 @@ public class CubeChat {
 
             Files.write(path, lines, StandardCharsets.UTF_8);
         } catch (Throwable e) {
-            System.out.println("[CubeChat] Failed to save tempbans: " + e.getMessage());
+            System.out.println("[CointCoreGTO] Failed to save tempbans: " + e.getMessage());
         }
     }
 
@@ -2432,7 +2490,7 @@ public class CubeChat {
                 LAST_LOCATIONS.put(uuid, new LastLocationData(name, dimension, x, y, z, yRot, xRot, savedMillis));
             }
         } catch (Throwable e) {
-            System.out.println("[CubeChat] Failed to load last locations: " + e.getMessage());
+            System.out.println("[CointCoreGTO] Failed to load last locations: " + e.getMessage());
         }
     }
 
@@ -2459,7 +2517,7 @@ public class CubeChat {
 
             Files.write(path, lines, StandardCharsets.UTF_8);
         } catch (Throwable e) {
-            System.out.println("[CubeChat] Failed to save last locations: " + e.getMessage());
+            System.out.println("[CointCoreGTO] Failed to save last locations: " + e.getMessage());
         }
     }
 
@@ -2975,7 +3033,7 @@ public class CubeChat {
                         .add(new WarnData(name, createdMillis, reason));
             }
         } catch (Throwable e) {
-            System.out.println("[CubeChat] Failed to load warns: " + e.getMessage());
+            System.out.println("[CointCoreGTO] Failed to load warns: " + e.getMessage());
         }
     }
 
@@ -2998,7 +3056,7 @@ public class CubeChat {
 
             Files.write(path, lines, StandardCharsets.UTF_8);
         } catch (Throwable e) {
-            System.out.println("[CubeChat] Failed to save warns: " + e.getMessage());
+            System.out.println("[CointCoreGTO] Failed to save warns: " + e.getMessage());
         }
     }
 
@@ -3063,7 +3121,7 @@ public class CubeChat {
         UUID targetUuid = findKnownUuidByName(server, targetName);
 
         if (targetUuid == null) {
-            source.sendFailure(Component.literal("Игрок не найден в известных данных CubeChat: " + targetName));
+            source.sendFailure(Component.literal("Игрок не найден в известных данных CointCoreGTO: " + targetName));
             return;
         }
 
@@ -3168,7 +3226,7 @@ public class CubeChat {
                         .add(new PunishmentHistoryData(name, type, moderator, createdMillis, durationMillis, reason));
             }
         } catch (Throwable e) {
-            System.out.println("[CubeChat] Failed to load punishment history: " + e.getMessage());
+            System.out.println("[CointCoreGTO] Failed to load punishment history: " + e.getMessage());
         }
     }
 
@@ -3193,7 +3251,7 @@ public class CubeChat {
 
             Files.write(path, lines, StandardCharsets.UTF_8);
         } catch (Throwable e) {
-            System.out.println("[CubeChat] Failed to save punishment history: " + e.getMessage());
+            System.out.println("[CointCoreGTO] Failed to save punishment history: " + e.getMessage());
         }
     }
 
@@ -3313,6 +3371,8 @@ public class CubeChat {
 
         if (player.getTags().contains("cubechat_hide_online")
                 || player.getTags().contains("cubechat_hidden")
+                || player.getTags().contains("cointcoregto_hide_online")
+                || player.getTags().contains("cointcoregto_hidden")
                 || player.getTags().contains("vanished")
                 || player.getTags().contains("vanish")
                 || player.getTags().contains("hidden")) {
@@ -3453,13 +3513,13 @@ public class CubeChat {
             NetworkEvent.Context context = contextSupplier.get();
             context.enqueueWork(() -> net.minecraftforge.fml.DistExecutor.unsafeRunWhenOn(
                     net.minecraftforge.api.distmarker.Dist.CLIENT,
-                    () -> () -> CubeChatClient.clearChatMessages(packet.keepSystemMessages)
+                    () -> () -> CointCoreGTOClient.clearChatMessages(packet.keepSystemMessages)
             ));
             context.setPacketHandled(true);
         }
     }
 
-    private record ChatHistoryMessage(long order, ChatView view, String message) {
+    private record ChatHistoryMessage(long order, ChatView view, String message, Component component) {
     }
 
     private record MuteData(String name, long untilMillis, String reason) {

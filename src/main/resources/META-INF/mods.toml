@@ -3,30 +3,30 @@ loaderVersion="[47,)"
 license="All Rights Reserved"
 
 [[mods]]
-modId="cubechat"
+modId="cointcoregto"
 version="1.0.4"
-displayName="Cube Chat"
+displayName="CointCoreGTO"
 displayURL="https://cubeofinterest.ru/"
 authors="Crazer"
 description='''
-Custom chat formatter and Discord bridge for Cube Of Interest.
+Core mod for Cube Of Interest: chat channels, Discord bridge, moderation helpers, restart notices, reserved slots and other server utilities.
 '''
 
-[[dependencies.cubechat]]
+[[dependencies.cointcoregto]]
 modId="forge"
 mandatory=true
 versionRange="[47,)"
 ordering="NONE"
 side="BOTH"
 
-[[dependencies.cubechat]]
+[[dependencies.cointcoregto]]
 modId="minecraft"
 mandatory=true
 versionRange="[1.20.1,1.20.2)"
 ordering="NONE"
 side="BOTH"
 
-[[dependencies.cubechat]]
+[[dependencies.cointcoregto]]
 modId="luckperms"
 mandatory=false
 versionRange="[5.4,)"
@@ -34,4 +34,4 @@ ordering="AFTER"
 side="SERVER"
 
 [[mixins]]
-config="cubechat.mixins.json"
+config="cointcoregto.mixins.json"
