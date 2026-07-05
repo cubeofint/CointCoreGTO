@@ -120,7 +120,8 @@ jar {
                 'Specification-Version' : '1',
                 'Implementation-Title'  : project.name,
                 'Implementation-Version': project.jar.archiveVersion,
-                'Implementation-Vendor' : 'Cube Of Interest'
+                'Implementation-Vendor' : 'Cube Of Interest',
+                "MixinConfigs": "cointcoregto.mixins.json"
         ])
     }
 }
@@ -129,13 +130,17 @@ shadowJar {
     archiveClassifier.set('')
     configurations = [project.configurations.shade]
 
+    manifest {
+        attributes([
+                'MixinConfigs': 'cointcoregto.mixins.json'
+        ])
+    }
+
     exclude 'META-INF/*.RSA'
     exclude 'META-INF/*.SF'
     exclude 'META-INF/*.DSA'
     exclude 'META-INF/INDEX.LIST'
     exclude 'module-info.class'
-
-    // Важно: убираем Java 9/11/17/21 multi-release классы, из-за них была ошибка major version 65
     exclude 'META-INF/versions/**'
 
     relocate 'net.dv8tion.jda', 'crazer.cubeofinterest.cointcoregto.shadow.jda'

@@ -1,0 +1,11 @@
+{
+  "mention": {
+    "subtitle": "subtitles.cointcoregto.mention",
+    "sounds": [
+      {
+        "name": "cointcoregto:orb",
+        "stream": false
+      }
+    ]
+  }
+}

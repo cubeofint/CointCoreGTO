@@ -130,6 +130,8 @@ public class CointCoreGTO {
     private static final Map<UUID, ChatView> CHAT_VIEWS = new HashMap<>();
     private static final Map<UUID, UUID> LAST_PRIVATE = new HashMap<>();
     private static final Map<UUID, Boolean> SHOW_TIME = new HashMap<>();
+    private static final Map<UUID, Long> LAST_ITEM_SHARE_MILLIS = new ConcurrentHashMap<>();
+    private static final long ITEM_SHARE_COOLDOWN_MILLIS = 3000L;
     private static final Map<UUID, Deque<ChatHistoryMessage>> CHAT_HISTORY = new ConcurrentHashMap<>();
     private static final AtomicLong CHAT_HISTORY_COUNTER = new AtomicLong();
     private static final Map<UUID, Long> LAST_CHAT_VIEW_SWITCH_MILLIS = new ConcurrentHashMap<>();
@@ -226,7 +228,7 @@ public class CointCoreGTO {
 
         RESERVED_PERMISSION = builder
                 .comment("LuckPerms permission for joining reserved slots.")
-                .define("permission", "cubechat.joinfull");
+                .define("permission", "cointcoregto.joinfull");
 
         RESERVED_FULL_MESSAGE = builder
                 .comment("Kick message when even reserved slots are full.")
@@ -344,6 +346,7 @@ public class CointCoreGTO {
     public CointCoreGTO() {
         registerNetwork();
         CointCoreGTOItemShare.registerNetwork();
+        CointCoreGTOEmoji.registerNetwork();
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC, "cubechat-common.toml");
         MinecraftForge.EVENT_BUS.register(this);
     }
@@ -488,6 +491,7 @@ public class CointCoreGTO {
         }
 
         saveLastLocation(player);
+        CointCoreGTOEmoji.sendEmojiRegistry(player);
 
         CHAT_VIEWS.putIfAbsent(player.getUUID(), ChatView.ALL);
 
@@ -544,7 +548,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("cointcoregto")
-                        .requires(source -> hasCommandPermission(source, "cubechat.reload"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.reload"))
                         .then(Commands.literal("reload")
                                 .executes(ctx -> {
                                     try {
@@ -560,27 +564,22 @@ public class CointCoreGTO {
                                         return 0;
                                     }
                                 }))
-        );
+                        .then(Commands.literal("discordlog")
+                                .requires(source -> source.hasPermission(2))
+                                .then(Commands.argument("message", StringArgumentType.greedyString())
+                                        .executes(ctx -> {
+                                            String message = StringArgumentType.getString(ctx, "message");
 
-        event.getDispatcher().register(
-                Commands.literal("cubechat")
-                        .requires(source -> hasCommandPermission(source, "cubechat.reload"))
-                        .then(Commands.literal("reload")
-                                .executes(ctx -> {
-                                    try {
-                                        reloadCointCoreGTOConfig();
-                                        ctx.getSource().sendSuccess(
-                                                () -> Component.literal("§aКонфиг CointCoreGTO перезагружен. Расписание рестартов и Discord bridge обновлены."),
-                                                false
-                                        );
-                                        return 1;
-                                    } catch (Throwable e) {
-                                        ctx.getSource().sendFailure(Component.literal("§cНе удалось перезагрузить конфиг CointCoreGTO: " + e.getMessage()));
-                                        e.printStackTrace();
-                                        return 0;
-                                    }
-                                }))
+                                            if (message == null || message.isBlank()) {
+                                                return 0;
+                                            }
+
+                                            CointCoreGTODiscordBridge.sendToDiscordLog(stripColor(message));
+                                            return 1;
+                                        })))
         );
+        
+        
 
         event.getDispatcher().register(
                 Commands.literal("chat")
@@ -642,7 +641,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("mute")
-                        .requires(source -> hasCommandPermission(source, "cubechat.mute"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.mute"))
                         .then(Commands.argument("target", EntityArgument.player())
                                 .then(Commands.argument("time", StringArgumentType.word())
                                         .executes(ctx -> {
@@ -697,7 +696,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("unmute")
-                        .requires(source -> hasCommandPermission(source, "cubechat.mute"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.mute"))
                         .then(Commands.argument("target", EntityArgument.player())
                                 .executes(ctx -> {
                                     ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
@@ -724,7 +723,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("unban")
-                        .requires(source -> hasCommandPermission(source, "cubechat.unban"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.unban"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -752,7 +751,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("tempban")
-                        .requires(source -> hasCommandPermission(source, "cubechat.tempban"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.tempban"))
                         .then(Commands.argument("target", EntityArgument.player())
                                 .then(Commands.argument("time", StringArgumentType.word())
                                         .executes(ctx -> {
@@ -806,7 +805,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("untempban")
-                        .requires(source -> hasCommandPermission(source, "cubechat.tempban"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.tempban"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -835,7 +834,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("warn")
-                        .requires(source -> hasCommandPermission(source, "cubechat.warn"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.warn"))
                         .then(Commands.argument("target", EntityArgument.player())
                                 .executes(ctx -> {
                                     ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
@@ -876,7 +875,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("warns")
-                        .requires(source -> hasCommandPermission(source, "cubechat.warn"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.warn"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -914,7 +913,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("unwarn")
-                        .requires(source -> hasCommandPermission(source, "cubechat.warn"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.warn"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -970,7 +969,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("history")
-                        .requires(source -> hasCommandPermission(source, "cubechat.history"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.history"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -983,7 +982,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("punishhistory")
-                        .requires(source -> hasCommandPermission(source, "cubechat.history"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.history"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -997,7 +996,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("cmute")
-                        .requires(source -> hasCommandPermission(source, "cubechat.mute"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.mute"))
                         .then(Commands.argument("target", EntityArgument.player())
                                 .then(Commands.argument("time", StringArgumentType.word())
                                         .executes(ctx -> {
@@ -1052,7 +1051,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("cunmute")
-                        .requires(source -> hasCommandPermission(source, "cubechat.mute"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.mute"))
                         .then(Commands.argument("target", EntityArgument.player())
                                 .executes(ctx -> {
                                     ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
@@ -1078,7 +1077,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("ctempban")
-                        .requires(source -> hasCommandPermission(source, "cubechat.tempban"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.tempban"))
                         .then(Commands.argument("target", EntityArgument.player())
                                 .then(Commands.argument("time", StringArgumentType.word())
                                         .executes(ctx -> {
@@ -1132,7 +1131,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("cuntempban")
-                        .requires(source -> hasCommandPermission(source, "cubechat.tempban"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.tempban"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -1160,7 +1159,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("cwarn")
-                        .requires(source -> hasCommandPermission(source, "cubechat.warn"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.warn"))
                         .then(Commands.argument("target", EntityArgument.player())
                                 .executes(ctx -> {
                                     ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
@@ -1201,7 +1200,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("cwarns")
-                        .requires(source -> hasCommandPermission(source, "cubechat.warn"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.warn"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -1239,7 +1238,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("cunwarn")
-                        .requires(source -> hasCommandPermission(source, "cubechat.warn"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.warn"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -1293,7 +1292,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("chistory")
-                        .requires(source -> hasCommandPermission(source, "cubechat.history"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.history"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -1306,7 +1305,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("tpl")
-                        .requires(source -> hasCommandPermission(source, "cubechat.tpl"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.tpl"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .executes(ctx -> {
@@ -1325,7 +1324,7 @@ public class CointCoreGTO {
 
         event.getDispatcher().register(
                 Commands.literal("homeother")
-                        .requires(source -> hasCommandPermission(source, "cubechat.home.others"))
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.home.others"))
                         .then(Commands.argument("target", StringArgumentType.word())
                                 .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
                                 .then(Commands.argument("home", StringArgumentType.word())
@@ -1357,7 +1356,7 @@ public class CointCoreGTO {
                                     return 1;
                                 }))
                         .then(Commands.literal("reload")
-                                .requires(source -> hasCommandPermission(source, "cubechat.restart"))
+                                .requires(source -> hasCommandPermission(source, "cointcoregto.restart"))
                                 .executes(ctx -> {
                                     resetRestartSchedule();
                                     ctx.getSource().sendSuccess(
@@ -1367,7 +1366,7 @@ public class CointCoreGTO {
                                     return 1;
                                 }))
                         .then(Commands.literal("cancel")
-                                .requires(source -> hasCommandPermission(source, "cubechat.restart"))
+                                .requires(source -> hasCommandPermission(source, "cointcoregto.restart"))
                                 .executes(ctx -> {
                                     NEXT_RESTART_MILLIS = -1L;
                                     RESTARTING_NOW = false;
@@ -1380,7 +1379,7 @@ public class CointCoreGTO {
                                     return 1;
                                 }))
                         .then(Commands.literal("now")
-                                .requires(source -> hasCommandPermission(source, "cubechat.restart"))
+                                .requires(source -> hasCommandPermission(source, "cointcoregto.restart"))
                                 .then(Commands.argument("seconds", IntegerArgumentType.integer(5, 3600))
                                         .executes(ctx -> {
                                             int seconds = IntegerArgumentType.getInteger(ctx, "seconds");
@@ -2084,8 +2083,40 @@ public class CointCoreGTO {
         System.out.println("[PrivateChat] " + senderName + " -> " + targetName + ": " + plainMessage);
     }
 
+    private static boolean checkItemShareCooldown(ServerPlayer player) {
+        if (player == null) {
+            return false;
+        }
+
+        UUID uuid = player.getUUID();
+        long now = System.currentTimeMillis();
+
+        Long lastUse = LAST_ITEM_SHARE_MILLIS.get(uuid);
+        if (lastUse != null) {
+            long elapsed = now - lastUse;
+
+            if (elapsed < ITEM_SHARE_COOLDOWN_MILLIS) {
+                long leftMillis = ITEM_SHARE_COOLDOWN_MILLIS - elapsed;
+                double leftSeconds = Math.ceil(leftMillis / 100.0D) / 10.0D;
+
+                player.displayClientMessage(
+                        Component.literal("§cПодожди " + leftSeconds + " сек. перед следующим пингом предмета."),
+                        true
+                );
+
+                return false;
+            }
+        }
+
+        LAST_ITEM_SHARE_MILLIS.put(uuid, now);
+        return true;
+    }
 
     public static void shareItemInCurrentChat(ServerPlayer player, ItemStack stack) {
+        shareItemInCurrentChat(player, stack, CointCoreGTOItemPreview.toPlainText(stack));
+    }
+
+    public static void shareItemInCurrentChat(ServerPlayer player, ItemStack stack, String clientDisplayName) {
         if (player == null || stack == null || stack.isEmpty()) {
             return;
         }
@@ -2095,9 +2126,15 @@ public class CointCoreGTO {
             return;
         }
 
+        if (!checkItemShareCooldown(player)) {
+            return;
+        }
+
+        String itemText = normalizeSharedItemName(clientDisplayName, stack);
+
         ChatView view = getChatView(player);
         if (view == ChatView.GLOBAL) {
-            sendGlobalItemShare(player, stack);
+            sendGlobalItemShare(player, stack, itemText);
             return;
         }
 
@@ -2106,12 +2143,18 @@ public class CointCoreGTO {
             return;
         }
 
-        sendLocalItemShare(player, stack);
+        sendLocalItemShare(player, stack, itemText);
     }
 
-    private static void sendLocalItemShare(ServerPlayer player, ItemStack stack) {
-        String plainItemText = "    " + CointCoreGTOItemPreview.toPlainText(stack);
-        String iconItemText = CointCoreGTOItemPreview.toPlainText(stack);
+    private static String normalizeSharedItemName(String clientDisplayName, ItemStack stack) {
+        return CointCoreGTOItemPreview.normalizeDisplayText(clientDisplayName, stack);
+    }
+
+    private static void sendLocalItemShare(ServerPlayer player, ItemStack stack, String itemText) {
+        String cleanItemText = normalizeSharedItemName(itemText, stack);
+        String plainItemText = "    " + cleanItemText;
+        String iconItemText = cleanItemText;
+
         String withoutTimePrefix = color(LOCAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
@@ -2135,7 +2178,9 @@ public class CointCoreGTO {
 
             String fullPrefix = timePrefix(target) + withoutTimePrefix;
             String fullPlain = fullPrefix + plainItemText;
-            Component liveMessage = Component.literal(fullPrefix + "    ").append(CointCoreGTOItemPreview.buildItemComponent(stack));
+            Component liveMessage = Component.literal(fullPrefix + "    ")
+                    .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText));
+
             CointCoreGTOItemShare.sendIconHintToPlayer(target, stack, fullPrefix, iconItemText);
             sendFilteredChatMessage(target, ChatView.LOCAL, fullPlain, liveMessage);
             receivers++;
@@ -2152,9 +2197,11 @@ public class CointCoreGTO {
         System.out.println("[LocalChat] " + stripColor(timePrefix(player) + withoutTime));
     }
 
-    private static void sendGlobalItemShare(ServerPlayer player, ItemStack stack) {
-        String plainItemText = "    " + CointCoreGTOItemPreview.toPlainText(stack);
-        String iconItemText = CointCoreGTOItemPreview.toPlainText(stack);
+    private static void sendGlobalItemShare(ServerPlayer player, ItemStack stack, String itemText) {
+        String cleanItemText = normalizeSharedItemName(itemText, stack);
+        String plainItemText = "    " + cleanItemText;
+        String iconItemText = cleanItemText;
+
         String withoutTimePrefix = color(GLOBAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
@@ -2166,7 +2213,9 @@ public class CointCoreGTO {
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
             String fullPrefix = timePrefix(target) + withoutTimePrefix;
             String fullPlain = fullPrefix + plainItemText;
-            Component liveMessage = Component.literal(fullPrefix + "    ").append(CointCoreGTOItemPreview.buildItemComponent(stack));
+            Component liveMessage = Component.literal(fullPrefix + "    ")
+                    .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText));
+
             CointCoreGTOItemShare.sendIconHintToPlayer(target, stack, fullPrefix, iconItemText);
             sendFilteredChatMessage(target, ChatView.GLOBAL, fullPlain, liveMessage);
         }
@@ -2560,7 +2609,7 @@ public class CointCoreGTO {
     }
 
     private static boolean canUseOthersHomeCommand(ServerPlayer player) {
-        return player.hasPermissions(2) || hasPermissionNode(player, "cubechat.home.others");
+        return player.hasPermissions(2) || hasPermissionNode(player, "cointcoregto.home.others");
     }
 
     private static UUID findKnownUuidByName(MinecraftServer server, String name) {
@@ -3369,9 +3418,7 @@ public class CointCoreGTO {
             return false;
         }
 
-        if (player.getTags().contains("cubechat_hide_online")
-                || player.getTags().contains("cubechat_hidden")
-                || player.getTags().contains("cointcoregto_hide_online")
+        if (player.getTags().contains("cointcoregto_hide_online")
                 || player.getTags().contains("cointcoregto_hidden")
                 || player.getTags().contains("vanished")
                 || player.getTags().contains("vanish")
@@ -3379,7 +3426,7 @@ public class CointCoreGTO {
             return false;
         }
 
-        if (hasPermissionNode(player, "cubechat.discord.hideonline")) {
+        if (hasPermissionNode(player, "cointcoregto.discord.hideonline")) {
             return false;
         }
 

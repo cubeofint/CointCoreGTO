@@ -85,7 +85,7 @@ public class CointCoreGTODiscordBridge {
 
         try {
             jda = JDABuilder.createDefault(token)
-                    .enableIntents(GatewayIntent.MESSAGE_CONTENT)
+                    .enableIntents(GatewayIntent.MESSAGE_CONTENT, GatewayIntent.GUILD_EMOJIS_AND_STICKERS)
                     .addEventListeners(new ListenerAdapter() {
                         @Override
                         public void onMessageReceived(@NotNull MessageReceivedEvent event) {
@@ -116,6 +116,8 @@ public class CointCoreGTODiscordBridge {
                     }
 
                     System.out.println("[CointDiscord] Discord bridge connected.");
+                    CointCoreGTOEmoji.refreshFromJda(jda);
+                    CointCoreGTOEmoji.broadcastEmojiRegistry();
 
                     if (sendServerStatus) {
                         sendToDiscord("**[A] сервер включился!**");
@@ -170,24 +172,38 @@ public class CointCoreGTODiscordBridge {
     }
 
     public static void stop() {
-        updateOnlineStatusMessageNow();
         stopOnlineStatusUpdater();
 
-        if (sendServerStatus) {
-            sendToDiscord("**[A] сервер выключился**");
-        }
-
-        if (jda != null) {
-            try {
-                jda.shutdown();
-            } catch (Throwable ignored) {
-            }
-        }
+        JDA oldJda = jda;
+        TextChannel oldTextChannel = textChannel;
 
         jda = null;
         textChannel = null;
         logChannel = null;
         server = null;
+
+        if (sendServerStatus && oldTextChannel != null) {
+            try {
+                oldTextChannel
+                        .sendMessage("**[A] сервер выключился**")
+                        .setAllowedMentions(java.util.Collections.emptyList())
+                        .complete(false);
+            } catch (Throwable ignored) {
+            }
+        }
+
+        if (oldJda != null) {
+            try {
+                oldJda.shutdownNow();
+            } catch (Throwable ignored) {
+                try {
+                    oldJda.shutdown();
+                } catch (Throwable ignoredAgain) {
+                }
+            }
+        }
+
+        CointCoreGTOEmoji.clearServerRegistry();
     }
 
     public static void sendToDiscord(String message) {
@@ -203,7 +219,7 @@ public class CointCoreGTODiscordBridge {
             return;
         }
 
-        String safe = sanitizeMessageForDiscord(message);
+        String safe = sanitizeMessageForDiscord(CointCoreGTOEmoji.minecraftToDiscord(message));
 
         try {
             textChannel
@@ -222,7 +238,7 @@ public class CointCoreGTODiscordBridge {
 
         if (webhookUrl == null || webhookUrl.isBlank()) {
             String fallbackName = username == null || username.isBlank() ? "Minecraft" : username;
-            sendToDiscord("**" + sanitizeMessageForDiscord(fallbackName) + "**: " + sanitizeMessageForDiscord(message));
+            sendToDiscord("**" + sanitizeMessageForDiscord(fallbackName) + "**: " + sanitizeMessageForDiscord(CointCoreGTOEmoji.minecraftToDiscord(message)));
             return;
         }
 
@@ -234,7 +250,7 @@ public class CointCoreGTODiscordBridge {
         String avatarUrl = buildAvatarUrl(uuid, playerName);
         String payload = "{"
                 + "\"username\":\"" + jsonEscape(safeUsername) + "\","
-                + "\"content\":\"" + jsonEscape(sanitizeMessageForDiscord(message)) + "\","
+                + "\"content\":\"" + jsonEscape(sanitizeMessageForDiscord(CointCoreGTOEmoji.minecraftToDiscord(message))) + "\","
                 + "\"allowed_mentions\":{\"parse\":[]}"
                 + (avatarUrl.isBlank() ? "" : ",\"avatar_url\":\"" + jsonEscape(avatarUrl) + "\"")
                 + "}";
@@ -273,7 +289,7 @@ public class CointCoreGTODiscordBridge {
             return;
         }
 
-        String safe = sanitizeMessageForDiscord(message);
+        String safe = sanitizeMessageForDiscord(CointCoreGTOEmoji.minecraftToDiscord(message));
 
         try {
             logChannel
@@ -307,7 +323,7 @@ public class CointCoreGTODiscordBridge {
         String message = event.getMessage().getContentRaw();
 
         message = removeBotMention(event, message);
-        message = removeDiscordEmojis(message);
+        message = CointCoreGTOEmoji.discordToMinecraft(message);
 
         if (message == null || message.isBlank()) {
             return;
@@ -550,7 +566,12 @@ public class CointCoreGTODiscordBridge {
     }
 
     private static String sanitizeMessageForDiscord(String message) {
+        if (message == null) {
+            return "";
+        }
+
         return message
+                .replaceAll("§.", "")
                 .replace("@everyone", "@\u200Beveryone")
                 .replace("@here", "@\u200Bhere");
     }

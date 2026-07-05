@@ -5,7 +5,10 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.ChatComponent;
 import net.minecraft.client.gui.screens.ChatScreen;
+import net.minecraft.client.resources.sounds.SimpleSoundInstance;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.sounds.SoundEvent;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientChatReceivedEvent;
 import net.minecraftforge.client.event.ScreenEvent;
@@ -43,6 +46,11 @@ public class CointCoreGTOClient {
     private static final ButtonArea globalButton = new ButtonArea();
     private static final ButtonArea privateButton = new ButtonArea();
     private static long lastChatButtonClickMillis = 0L;
+    private static final ResourceLocation MENTION_SOUND_ID = new ResourceLocation(CointCoreGTO.MODID, "mention");
+    private static final SoundEvent MENTION_SOUND_EVENT = SoundEvent.createVariableRangeEvent(MENTION_SOUND_ID);
+    private static final long MENTION_SOUND_COOLDOWN_MILLIS = 1500L;
+
+    private static long lastMentionSoundMillis = 0L;
 
     @SubscribeEvent
     public static void onClientChatReceived(ClientChatReceivedEvent event) {
@@ -62,9 +70,116 @@ public class CointCoreGTOClient {
             return;
         }
 
+        playMentionSoundIfNeeded(text);
+
         if (!isCointCoreGTOText(text)) {
             rememberNonCointCoreGTOMessage(message);
         }
+    }
+
+    private static void playMentionSoundIfNeeded(String rawText) {
+        Minecraft minecraft = Minecraft.getInstance();
+
+        if (minecraft == null || minecraft.player == null) {
+            return;
+        }
+
+        if (rawText == null || rawText.isBlank()) {
+            return;
+        }
+
+        String playerName = minecraft.player.getGameProfile().getName();
+        if (playerName == null || playerName.isBlank()) {
+            return;
+        }
+
+        String cleanText = stripMinecraftFormatting(rawText);
+        if (cleanText.isBlank()) {
+            return;
+        }
+
+        if (isProbablyOwnNormalChatMessage(cleanText, playerName)) {
+            return;
+        }
+
+        boolean privateMessage = cleanText.contains("[PM]") || cleanText.contains("[ЛС]") || cleanText.toLowerCase(java.util.Locale.ROOT).contains("private");
+
+        String messageBody = getMessageBodyAfterColon(cleanText);
+        boolean mentionedByName = containsIgnoreCase(messageBody, playerName);
+
+        if (!privateMessage && !mentionedByName) {
+            return;
+        }
+
+        playMentionSound();
+    }
+
+    private static void playMentionSound() {
+        long now = System.currentTimeMillis();
+
+        if (now - lastMentionSoundMillis < MENTION_SOUND_COOLDOWN_MILLIS) {
+            return;
+        }
+
+        lastMentionSoundMillis = now;
+
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.getSoundManager() == null) {
+            return;
+        }
+
+        minecraft.getSoundManager().play(
+                SimpleSoundInstance.forUI(MENTION_SOUND_EVENT, 1.0F, 0.85F)
+        );
+    }
+
+    private static boolean isProbablyOwnNormalChatMessage(String cleanText, String playerName) {
+        if (cleanText == null || playerName == null || playerName.isBlank()) {
+            return false;
+        }
+
+        int colonIndex = cleanText.indexOf(':');
+        if (colonIndex < 0) {
+            return false;
+        }
+
+        String beforeColon = cleanText.substring(0, colonIndex).trim();
+
+        if (beforeColon.contains("->") || beforeColon.contains("→")) {
+            return false;
+        }
+
+        return beforeColon.endsWith(playerName);
+    }
+
+    private static String getMessageBodyAfterColon(String cleanText) {
+        if (cleanText == null || cleanText.isBlank()) {
+            return "";
+        }
+
+        int colonIndex = cleanText.indexOf(':');
+        if (colonIndex < 0 || colonIndex + 1 >= cleanText.length()) {
+            return cleanText;
+        }
+
+        return cleanText.substring(colonIndex + 1).trim();
+    }
+
+    private static boolean containsIgnoreCase(String text, String needle) {
+        if (text == null || needle == null || needle.isBlank()) {
+            return false;
+        }
+
+        return text.toLowerCase(java.util.Locale.ROOT)
+                .contains(needle.toLowerCase(java.util.Locale.ROOT));
+    }
+
+    private static String stripMinecraftFormatting(String text) {
+        if (text == null) {
+            return "";
+        }
+
+        return text.replaceAll("§.", "");
     }
 
     private static boolean isVanillaJoinMessage(String lower) {
