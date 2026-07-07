@@ -1,5 +1,7 @@
 package Crazer.cubeofinterest.cointcoregto;
 
+import Crazer.cubeofinterest.cointcoregto.compat.radio.CointRadioBlocks;
+import Crazer.cubeofinterest.cointcoregto.compat.radio.CointRadioNetwork;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
@@ -36,7 +38,9 @@ import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import net.minecraftforge.network.NetworkEvent;
 import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.PacketDistributor;
@@ -92,6 +96,11 @@ public class CointCoreGTO {
     private static final ForgeConfigSpec.BooleanValue USE_EXCLAMATION_FOR_GLOBAL;
     private static final ForgeConfigSpec.BooleanValue SHOW_CHAT_PANEL_ON_JOIN;
     private static final ForgeConfigSpec.BooleanValue HIDE_JOIN_LEAVE_MESSAGES;
+    public static ForgeConfigSpec.BooleanValue RADIO_ENABLED;
+    public static ForgeConfigSpec.ConfigValue<String> RADIO_DEFAULT_STATION;
+    public static ForgeConfigSpec.ConfigValue<List<? extends String>> RADIO_STATIONS;
+    public static ForgeConfigSpec.ConfigValue<String> RADIO_ON_MESSAGE;
+    public static ForgeConfigSpec.ConfigValue<String> RADIO_OFF_MESSAGE;
 
     private static final ForgeConfigSpec.BooleanValue ANNOUNCE_MUTES;
     private static final ForgeConfigSpec.BooleanValue ANNOUNCE_BANS;
@@ -340,13 +349,52 @@ public class CointCoreGTO {
 
         builder.pop();
 
+        builder.push("radio");
+
+        RADIO_ENABLED = builder
+                .comment("Enable CointCoreGTO radio block.")
+                .define("enabled", true);
+
+        RADIO_DEFAULT_STATION = builder
+                .comment("Default station id from stations list.")
+                .define("default_station", "main");
+
+        RADIO_STATIONS = builder
+                .comment("Radio stations in format: station_id=https://direct-url/file.ogg")
+                .defineList(
+                        "stations",
+                        List.of(
+                                "main=https://upload.wikimedia.org/wikipedia/commons/c/c8/Example.ogg",
+                                "rock=https://upload.wikimedia.org/wikipedia/commons/4/45/ACDC_-_Back_In_Black-sample.ogg"
+                        ),
+                        value -> value instanceof String string
+                                && string.contains("=")
+                                && (string.contains("http://") || string.contains("https://"))
+                );
+
+        RADIO_ON_MESSAGE = builder
+                .comment("Actionbar message when radio starts. Use %station% for station id.")
+                .define("on_message", "§a[CointMusic] Радио включено: §f%station%");
+
+        RADIO_OFF_MESSAGE = builder
+                .comment("Actionbar message when radio stops.")
+                .define("off_message", "§c[CointMusic] Радио выключено.");
+
+        builder.pop();
+
         CONFIG_SPEC = builder.build();
     }
 
     public CointCoreGTO() {
+        IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
+
+        CointRadioBlocks.register(modEventBus);
+
         registerNetwork();
         CointCoreGTOItemShare.registerNetwork();
         CointCoreGTOEmoji.registerNetwork();
+        CointRadioNetwork.register();
+
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC, "cubechat-common.toml");
         MinecraftForge.EVENT_BUS.register(this);
     }

@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "cointcoregto:block/coint_radio"
+    }
+  }
+}

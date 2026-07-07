@@ -20,9 +20,19 @@ public final class CointRadioPlayer {
     private static int sourceId = 0;
     private static int bufferId = 0;
     private static float volume = 1.0f;
+    private static boolean playing = false;
+    private static boolean loading = false;
     private static ByteBuffer currentPcmBuffer;
 
     private CointRadioPlayer() {
+    }
+
+    public static boolean isPlaying() {
+        return playing;
+    }
+
+    public static boolean isLoading() {
+        return loading;
     }
 
     public static void play(String url, Consumer<Component> feedback) {
@@ -43,8 +53,12 @@ public final class CointRadioPlayer {
             send(feedback, "§e[CointMusic] Сейчас поддерживаются только прямые .ogg ссылки.");
             return;
         }
+        if (loading) {
+            send(feedback, "§e[CointMusic] Трек уже загружается, подожди секунду.");
+            return;
+        }
 
-        stop();
+        loading = true;
 
         send(feedback, "§a[CointMusic] Загружаю музыку...");
 
@@ -73,7 +87,10 @@ public final class CointRadioPlayer {
                 }
             } catch (Throwable e) {
                 Minecraft.getInstance().execute(() -> {
-                    send(feedback, "§c[CointMusic] Ошибка загрузки: §f" + e.getMessage());
+                    loading = false;
+                    send(feedback, "§c[CointMusic] Ошибка загрузки трека. Проверь прямую .ogg ссылку или не кликай слишком быстро.");
+                    System.out.println("[CointMusic] Failed to load URL: " + cleanUrl);
+                    System.out.println("[CointMusic] Load error: " + e.getMessage());
                     e.printStackTrace();
                 });
             }
@@ -87,27 +104,34 @@ public final class CointRadioPlayer {
             return;
         }
 
-        minecraft.execute(() -> {
-            try {
-                if (sourceId != 0) {
-                    AL10.alSourceStop(sourceId);
-                    AL10.alDeleteSources(sourceId);
-                    sourceId = 0;
-                }
+        if (minecraft.isSameThread()) {
+            stopNowOnClientThread();
+        } else {
+            minecraft.execute(CointRadioPlayer::stopNowOnClientThread);
+        }
+    }
 
-                if (bufferId != 0) {
-                    AL10.alDeleteBuffers(bufferId);
-                    bufferId = 0;
-                }
+    private static void stopNowOnClientThread() {
+        try {
+            playing = false;
+            loading = false;
 
-                if (currentPcmBuffer != null) {
-                    safeFree(currentPcmBuffer);
-                    currentPcmBuffer = null;
-                }
-            } catch (Throwable e) {
-                System.out.println("[CointMusic] Failed to stop audio: " + e.getMessage());
+            if (sourceId != 0) {
+                AL10.alSourceStop(sourceId);
+                AL10.alSourcei(sourceId, AL10.AL_BUFFER, 0);
+                AL10.alDeleteSources(sourceId);
+                sourceId = 0;
             }
-        });
+
+            if (bufferId != 0) {
+                AL10.alDeleteBuffers(bufferId);
+                bufferId = 0;
+            }
+
+            currentPcmBuffer = null;
+        } catch (Throwable e) {
+            System.out.println("[CointMusic] Failed to stop audio: " + e.getMessage());
+        }
     }
 
     public static void setVolume(float newVolume) {
@@ -129,7 +153,7 @@ public final class CointRadioPlayer {
         clearOpenAlError();
 
         if (sourceId != 0 || bufferId != 0 || currentPcmBuffer != null) {
-            stop();
+            stopNowOnClientThread();
         }
 
         int openAlFormat = getOpenAlFormat(format);
@@ -156,13 +180,12 @@ public final class CointRadioPlayer {
         AL10.alSource3f(sourceId, AL10.AL_POSITION, 0.0f, 0.0f, 0.0f);
         AL10.alSource3f(sourceId, AL10.AL_VELOCITY, 0.0f, 0.0f, 0.0f);
 
-        checkOpenAl("source setup", feedback);
-
         AL10.alSourcePlay(sourceId);
         checkOpenAl("alSourcePlay", feedback);
 
+        playing = true;
+        loading = false;
         int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
-
         send(feedback, "§a[CointMusic] Воспроизведение началось.");
         System.out.println("[CointMusic] Audio started. format=" + format + ", sampleRate=" + sampleRate + ", state=" + state);
     }
