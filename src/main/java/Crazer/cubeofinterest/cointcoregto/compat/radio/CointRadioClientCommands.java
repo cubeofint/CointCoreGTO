@@ -64,6 +64,26 @@ public final class CointRadioClientCommands {
 
                                             return 1;
                                         })))
+                        .then(Commands.literal("clearcache")
+                                .executes(ctx -> {
+                                    CointRadioPlayer.clearCache();
+
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal("§a[CointMusic] Кеш музыки очищен."),
+                                            false
+                                    );
+
+                                    return 1;
+                                }))
+                        .then(Commands.literal("cachestats")
+                                .executes(ctx -> {
+                                    ctx.getSource().sendSuccess(
+                                            () -> Component.literal("§e[CointMusic] Cache: §f" + CointRadioPlayer.getCacheStats()),
+                                            false
+                                    );
+
+                                    return 1;
+                                }))
         );
 
         System.out.println("[CointMusic] Client commands registered");

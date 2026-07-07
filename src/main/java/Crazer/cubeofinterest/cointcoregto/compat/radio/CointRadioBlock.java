@@ -86,6 +86,11 @@ public class CointRadioBlock extends BaseEntityBlock {
             return InteractionResult.SUCCESS;
         }
 
+        if (!CointRadioProtection.canUseRadio(serverPlayer, pos, hand)) {
+            CointRadioProtection.denyWithMessage(serverPlayer);
+            return InteractionResult.SUCCESS;
+        }
+
         if (!CointRadioConfig.isEnabled()) {
             player.displayClientMessage(
                     Component.literal("§c[CointMusic] Радио отключено в конфиге."),
@@ -109,7 +114,9 @@ public class CointRadioBlock extends BaseEntityBlock {
                     serverPlayer,
                     pos,
                     CointRadioConfig.getStationIds(),
-                    radio.getStationId()
+                    radio.getStationId(),
+                    radio.isActive(),
+                    radio.getRadius()
             );
 
             return InteractionResult.SUCCESS;
@@ -130,5 +137,29 @@ public class CointRadioBlock extends BaseEntityBlock {
         }
 
         return InteractionResult.SUCCESS;
+    }
+
+    @Override
+    public void onRemove(
+            BlockState state,
+            Level level,
+            BlockPos pos,
+            BlockState newState,
+            boolean isMoving
+    ) {
+        if (!state.is(newState.getBlock())) {
+            BlockEntity blockEntity = level.getBlockEntity(pos);
+
+            if (blockEntity instanceof CointRadioBlockEntity radio) {
+                radio.stopAllListeners();
+            }
+        }
+
+        super.onRemove(state, level, pos, newState, isMoving);
+    }
+
+    @Override
+    public net.minecraft.network.chat.MutableComponent getName() {
+        return net.minecraft.network.chat.Component.literal("Радио");
     }
 }

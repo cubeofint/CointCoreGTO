@@ -24,10 +24,20 @@ public final class CointRadioBlocks {
             BLOCKS.register("coint_radio", CointRadioBlock::new);
 
     public static final RegistryObject<Item> COINT_RADIO_ITEM =
-            ITEMS.register("coint_radio", () -> new BlockItem(
-                    COINT_RADIO.get(),
-                    new Item.Properties()
-            ));
+            ITEMS.register(
+                    "coint_radio",
+                    () -> new BlockItem(COINT_RADIO.get(), new Item.Properties()) {
+                        @Override
+                        public net.minecraft.network.chat.Component getName(net.minecraft.world.item.ItemStack stack) {
+                            return net.minecraft.network.chat.Component.literal("Радио");
+                        }
+
+                        @Override
+                        public String getDescriptionId(net.minecraft.world.item.ItemStack stack) {
+                            return "Радио";
+                        }
+                    }
+            );
 
     public static final RegistryObject<BlockEntityType<CointRadioBlockEntity>> COINT_RADIO_BLOCK_ENTITY =
             BLOCK_ENTITIES.register(

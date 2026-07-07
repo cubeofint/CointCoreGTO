@@ -258,4 +258,16 @@ public class CointRadioBlockEntity extends BlockEntity {
             }
         }
     }
+
+    @Override
+    public void setRemoved() {
+        stopAllListeners();
+        super.setRemoved();
+    }
+
+    @Override
+    public void onChunkUnloaded() {
+        stopAllListeners();
+        super.onChunkUnloaded();
+    }
 }

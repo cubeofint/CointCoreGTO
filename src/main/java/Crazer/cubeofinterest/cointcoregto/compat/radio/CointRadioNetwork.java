@@ -5,6 +5,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.DistExecutor;
@@ -34,59 +35,13 @@ public final class CointRadioNetwork {
     }
 
     public static void register() {
-        CHANNEL.registerMessage(
-                nextId(),
-                PlayRadioPacket.class,
-                PlayRadioPacket::encode,
-                PlayRadioPacket::decode,
-                PlayRadioPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_CLIENT)
-        );
-
-        CHANNEL.registerMessage(
-                nextId(),
-                StopRadioPacket.class,
-                StopRadioPacket::encode,
-                StopRadioPacket::decode,
-                StopRadioPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_CLIENT)
-        );
-
-        CHANNEL.registerMessage(
-                nextId(),
-                ToggleRadioPacket.class,
-                ToggleRadioPacket::encode,
-                ToggleRadioPacket::decode,
-                ToggleRadioPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_CLIENT)
-        );
-
-        CHANNEL.registerMessage(
-                nextId(),
-                SwitchRadioPacket.class,
-                SwitchRadioPacket::encode,
-                SwitchRadioPacket::decode,
-                SwitchRadioPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_CLIENT)
-        );
-
-        CHANNEL.registerMessage(
-                nextId(),
-                OpenRadioScreenPacket.class,
-                OpenRadioScreenPacket::encode,
-                OpenRadioScreenPacket::decode,
-                OpenRadioScreenPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_CLIENT)
-        );
-
-        CHANNEL.registerMessage(
-                nextId(),
-                SelectStationPacket.class,
-                SelectStationPacket::encode,
-                SelectStationPacket::decode,
-                SelectStationPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_SERVER)
-        );
+        CHANNEL.registerMessage(nextId(), PlayRadioPacket.class, PlayRadioPacket::encode, PlayRadioPacket::decode, PlayRadioPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), StopRadioPacket.class, StopRadioPacket::encode, StopRadioPacket::decode, StopRadioPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), ToggleRadioPacket.class, ToggleRadioPacket::encode, ToggleRadioPacket::decode, ToggleRadioPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), SwitchRadioPacket.class, SwitchRadioPacket::encode, SwitchRadioPacket::decode, SwitchRadioPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), OpenRadioScreenPacket.class, OpenRadioScreenPacket::encode, OpenRadioScreenPacket::decode, OpenRadioScreenPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), SelectStationPacket.class, SelectStationPacket::encode, SelectStationPacket::decode, SelectStationPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(nextId(), ToggleActivePacket.class, ToggleActivePacket::encode, ToggleActivePacket::decode, ToggleActivePacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
     }
 
     public static void sendPlay(ServerPlayer player, String url, String stationId, String radioId) {
@@ -105,10 +60,17 @@ public final class CointRadioNetwork {
         CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), new SwitchRadioPacket(url, stationId, radioId));
     }
 
-    public static void sendOpenScreen(ServerPlayer player, BlockPos pos, List<String> stations, String currentStation) {
+    public static void sendOpenScreen(
+            ServerPlayer player,
+            BlockPos pos,
+            List<String> stations,
+            String currentStation,
+            boolean active,
+            int radius
+    ) {
         CHANNEL.send(
                 PacketDistributor.PLAYER.with(() -> player),
-                new OpenRadioScreenPacket(pos, stations, currentStation)
+                new OpenRadioScreenPacket(pos, stations, currentStation, active, radius)
         );
     }
 
@@ -116,8 +78,37 @@ public final class CointRadioNetwork {
         CHANNEL.sendToServer(new SelectStationPacket(pos, stationId));
     }
 
+    public static void sendToggleActiveToServer(BlockPos pos) {
+        CHANNEL.sendToServer(new ToggleActivePacket(pos));
+    }
+
     private static int nextId() {
         return packetId++;
+    }
+
+    private static boolean isValidRadioAccess(ServerPlayer player, BlockPos pos) {
+        if (player == null) {
+            return false;
+        }
+
+        if (!player.level().isLoaded(pos)) {
+            return false;
+        }
+
+        if (player.distanceToSqr(
+                pos.getX() + 0.5,
+                pos.getY() + 0.5,
+                pos.getZ() + 0.5
+        ) > 64.0D) {
+            return false;
+        }
+
+        if (!CointRadioProtection.canUseRadio(player, pos, InteractionHand.MAIN_HAND)) {
+            CointRadioProtection.denyWithMessage(player);
+            return false;
+        }
+
+        return true;
     }
 
     public record PlayRadioPacket(String url, String stationId, String radioId) {
@@ -128,11 +119,7 @@ public final class CointRadioNetwork {
         }
 
         public static PlayRadioPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
-            return new PlayRadioPacket(
-                    buffer.readUtf(32767),
-                    buffer.readUtf(256),
-                    buffer.readUtf(256)
-            );
+            return new PlayRadioPacket(buffer.readUtf(32767), buffer.readUtf(256), buffer.readUtf(256));
         }
 
         public static void handle(PlayRadioPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
@@ -176,11 +163,7 @@ public final class CointRadioNetwork {
         }
 
         public static ToggleRadioPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
-            return new ToggleRadioPacket(
-                    buffer.readUtf(32767),
-                    buffer.readUtf(256),
-                    buffer.readUtf(256)
-            );
+            return new ToggleRadioPacket(buffer.readUtf(32767), buffer.readUtf(256), buffer.readUtf(256));
         }
 
         public static void handle(ToggleRadioPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
@@ -203,11 +186,7 @@ public final class CointRadioNetwork {
         }
 
         public static SwitchRadioPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
-            return new SwitchRadioPacket(
-                    buffer.readUtf(32767),
-                    buffer.readUtf(256),
-                    buffer.readUtf(256)
-            );
+            return new SwitchRadioPacket(buffer.readUtf(32767), buffer.readUtf(256), buffer.readUtf(256));
         }
 
         public static void handle(SwitchRadioPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
@@ -222,7 +201,13 @@ public final class CointRadioNetwork {
         }
     }
 
-    public record OpenRadioScreenPacket(BlockPos pos, List<String> stations, String currentStation) {
+    public record OpenRadioScreenPacket(
+            BlockPos pos,
+            List<String> stations,
+            String currentStation,
+            boolean active,
+            int radius
+    ) {
         public static void encode(OpenRadioScreenPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
             buffer.writeBlockPos(packet.pos);
             buffer.writeVarInt(packet.stations.size());
@@ -232,6 +217,8 @@ public final class CointRadioNetwork {
             }
 
             buffer.writeUtf(packet.currentStation, 256);
+            buffer.writeBoolean(packet.active);
+            buffer.writeVarInt(packet.radius);
         }
 
         public static OpenRadioScreenPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
@@ -245,8 +232,10 @@ public final class CointRadioNetwork {
             }
 
             String currentStation = buffer.readUtf(256);
+            boolean active = buffer.readBoolean();
+            int radius = buffer.readVarInt();
 
-            return new OpenRadioScreenPacket(pos, stations, currentStation);
+            return new OpenRadioScreenPacket(pos, stations, currentStation, active, radius);
         }
 
         public static void handle(OpenRadioScreenPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
@@ -257,7 +246,9 @@ public final class CointRadioNetwork {
                     () -> () -> CointRadioClientPacketHandler.openScreen(
                             packet.pos,
                             packet.stations,
-                            packet.currentStation
+                            packet.currentStation,
+                            packet.active,
+                            packet.radius
                     )
             ));
 
@@ -272,10 +263,7 @@ public final class CointRadioNetwork {
         }
 
         public static SelectStationPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
-            return new SelectStationPacket(
-                    buffer.readBlockPos(),
-                    buffer.readUtf(256)
-            );
+            return new SelectStationPacket(buffer.readBlockPos(), buffer.readUtf(256));
         }
 
         public static void handle(SelectStationPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
@@ -284,19 +272,7 @@ public final class CointRadioNetwork {
             context.enqueueWork(() -> {
                 ServerPlayer player = context.getSender();
 
-                if (player == null) {
-                    return;
-                }
-
-                if (!player.level().isLoaded(packet.pos)) {
-                    return;
-                }
-
-                if (player.distanceToSqr(
-                        packet.pos.getX() + 0.5,
-                        packet.pos.getY() + 0.5,
-                        packet.pos.getZ() + 0.5
-                ) > 64.0D) {
+                if (!isValidRadioAccess(player, packet.pos)) {
                     return;
                 }
 
@@ -312,6 +288,50 @@ public final class CointRadioNetwork {
                         Component.literal("§e[CointMusic] Станция выбрана: §f" + radio.getStationId()),
                         true
                 );
+            });
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record ToggleActivePacket(BlockPos pos) {
+        public static void encode(ToggleActivePacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeBlockPos(packet.pos);
+        }
+
+        public static ToggleActivePacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new ToggleActivePacket(buffer.readBlockPos());
+        }
+
+        public static void handle(ToggleActivePacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> {
+                ServerPlayer player = context.getSender();
+
+                if (!isValidRadioAccess(player, packet.pos)) {
+                    return;
+                }
+
+                BlockEntity blockEntity = player.level().getBlockEntity(packet.pos);
+
+                if (!(blockEntity instanceof CointRadioBlockEntity radio)) {
+                    return;
+                }
+
+                radio.toggleActive();
+
+                if (radio.isActive()) {
+                    player.displayClientMessage(
+                            Component.literal("§a[CointMusic] Радиоблок включён. Радиус: §f" + CointRadioConfig.getRadius()),
+                            true
+                    );
+                } else {
+                    player.displayClientMessage(
+                            Component.literal("§c[CointMusic] Радиоблок выключен."),
+                            true
+                    );
+                }
             });
 
             context.setPacketHandled(true);

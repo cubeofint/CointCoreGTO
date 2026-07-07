@@ -18,13 +18,7 @@ public final class CointRadioClientPacketHandler {
     public static void play(String url, String stationId, String radioId) {
         currentRadioId = radioId == null ? "" : radioId;
 
-        CointRadioPlayer.play(url, message -> {
-            Minecraft minecraft = Minecraft.getInstance();
-
-            if (minecraft.player != null) {
-                minecraft.player.displayClientMessage(message, false);
-            }
-        });
+        CointRadioPlayer.play(url, null);
 
         sendClientMessage(CointRadioConfig.getOnMessage(stationId), true);
     }
@@ -62,10 +56,20 @@ public final class CointRadioClientPacketHandler {
         play(url, stationId, radioId);
     }
 
-    public static void openScreen(BlockPos pos, List<String> stations, String currentStation) {
+    public static void openScreen(
+            BlockPos pos,
+            List<String> stations,
+            String currentStation,
+            boolean active,
+            int radius
+    ) {
         Minecraft minecraft = Minecraft.getInstance();
 
-        minecraft.setScreen(new CointRadioScreen(pos, stations, currentStation));
+        minecraft.setScreen(new CointRadioScreen(pos, stations, currentStation, active, radius));
+    }
+
+    public static void resetCurrentRadio() {
+        currentRadioId = "";
     }
 
     private static void sendClientMessage(String text, boolean actionBar) {
