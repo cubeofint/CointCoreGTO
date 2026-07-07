@@ -61,11 +61,12 @@ public final class CointRadioClientPacketHandler {
             List<String> stations,
             String currentStation,
             boolean active,
-            int radius
+            int radius,
+            String customUrl
     ) {
         Minecraft minecraft = Minecraft.getInstance();
 
-        minecraft.setScreen(new CointRadioScreen(pos, stations, currentStation, active, radius));
+        minecraft.setScreen(new CointRadioScreen(pos, stations, currentStation, active, radius, customUrl));
     }
 
     public static void resetCurrentRadio() {

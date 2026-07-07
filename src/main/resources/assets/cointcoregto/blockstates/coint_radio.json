@@ -1,10 +1,10 @@
 {
   "variants": {
     "active=false": {
-      "model": "cointcoregto:block/coint_radio"
+      "model": "cointcoregto:block/coint_radio_particle"
     },
     "active=true": {
-      "model": "cointcoregto:block/coint_radio_active"
+      "model": "cointcoregto:block/coint_radio_particle"
     }
   }
 }

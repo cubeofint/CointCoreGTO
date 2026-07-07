@@ -6,11 +6,8 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.ChatComponent;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
-import net.minecraft.client.resources.sounds.SoundInstance;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.ResourceLocation;
-import net.minecraft.sounds.SoundSource;
-import net.minecraft.util.RandomSource;
+import net.minecraft.sounds.SoundEvents;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientChatReceivedEvent;
 import net.minecraftforge.client.event.ScreenEvent;
@@ -50,7 +47,6 @@ public class CointCoreGTOClient {
 
     private static long lastChatButtonClickMillis = 0L;
 
-    private static final ResourceLocation MENTION_SOUND_ID = new ResourceLocation(CointCoreGTO.MODID, "mention");
     private static final long MENTION_SOUND_COOLDOWN_MILLIS = 1500L;
 
     private static long lastMentionSoundMillis = 0L;
@@ -132,22 +128,13 @@ public class CointCoreGTOClient {
         if (minecraft == null || minecraft.getSoundManager() == null) {
             return;
         }
-        minecraft.getSoundManager().play(
-                new SimpleSoundInstance(
-                        MENTION_SOUND_ID,
-                        SoundSource.MASTER,
+        minecraft.execute(() -> minecraft.getSoundManager().play(
+                SimpleSoundInstance.forUI(
+                        SoundEvents.NOTE_BLOCK_PLING.value(),
                         1.0F,
-                        0.85F,
-                        RandomSource.create(),
-                        false,
-                        0,
-                        SoundInstance.Attenuation.NONE,
-                        0.0D,
-                        0.0D,
-                        0.0D,
-                        true
+                        1.0F
                 )
-        );
+        ));
     }
 
     private static boolean isProbablyOwnNormalChatMessage(String cleanText, String playerName) {

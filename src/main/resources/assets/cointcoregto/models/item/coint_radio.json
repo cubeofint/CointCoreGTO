@@ -1,3 +1,6 @@
 {
-  "parent": "cointcoregto:block/coint_radio"
+  "parent": "minecraft:block/cube_all",
+  "textures": {
+    "all": "minecraft:block/note_block"
+  }
 }

@@ -6,6 +6,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.BaseEntityBlock;
 import net.minecraft.world.level.block.Block;
@@ -18,8 +19,11 @@ import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.StateDefinition;
 import net.minecraft.world.level.block.state.properties.BooleanProperty;
+import net.minecraft.world.level.storage.loot.LootParams;
 import net.minecraft.world.phys.BlockHitResult;
 import org.jetbrains.annotations.Nullable;
+
+import java.util.List;
 
 public class CointRadioBlock extends BaseEntityBlock {
     public static final BooleanProperty ACTIVE = BooleanProperty.create("active");
@@ -42,7 +46,23 @@ public class CointRadioBlock extends BaseEntityBlock {
 
     @Override
     public RenderShape getRenderShape(BlockState state) {
-        return RenderShape.MODEL;
+        return RenderShape.INVISIBLE;
+    }
+
+
+
+    @Override
+    public List<ItemStack> getDrops(BlockState state, LootParams.Builder builder) {
+        return List.of(new ItemStack(CointRadioBlocks.COINT_RADIO_ITEM.get()));
+    }
+
+    @Override
+    public ItemStack getCloneItemStack(
+            net.minecraft.world.level.BlockGetter level,
+            BlockPos pos,
+            BlockState state
+    ) {
+        return new ItemStack(CointRadioBlocks.COINT_RADIO_ITEM.get());
     }
 
     @Nullable
@@ -116,7 +136,8 @@ public class CointRadioBlock extends BaseEntityBlock {
                     CointRadioConfig.getStationIds(),
                     radio.getStationId(),
                     radio.isActive(),
-                    radio.getRadius()
+                    radio.getRadius(),
+                    radio.getCustomUrl()
             );
 
             return InteractionResult.SUCCESS;

@@ -230,11 +230,11 @@ public class CointCoreGTO {
 
         RESERVED_PUBLIC_SLOTS = builder
                 .comment("How many slots are available for regular players.")
-                .defineInRange("public_slots", 100, 1, 10000);
+                .defineInRange("public_slots", 50, 1, 10000);
 
         RESERVED_TOTAL_SLOTS = builder
                 .comment("Maximum players including reserved slots. This should be equal to or lower than max-players in server.properties.")
-                .defineInRange("total_slots", 110, 1, 10000);
+                .defineInRange("total_slots", 75, 1, 10000);
 
         RESERVED_PERMISSION = builder
                 .comment("LuckPerms permission for joining reserved slots.")

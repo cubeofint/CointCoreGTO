@@ -3,6 +3,7 @@ package Crazer.cubeofinterest.cointcoregto.compat.radio;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
@@ -19,14 +20,18 @@ public class CointRadioScreen extends Screen {
     private final String currentStation;
     private final boolean active;
     private final int radius;
+    private final String customUrl;
+
     private int volumePercent;
+    private EditBox urlBox;
 
     public CointRadioScreen(
             BlockPos pos,
             List<String> stations,
             String currentStation,
             boolean active,
-            int radius
+            int radius,
+            String customUrl
     ) {
         super(Component.literal("Радио"));
         this.pos = pos;
@@ -34,6 +39,7 @@ public class CointRadioScreen extends Screen {
         this.currentStation = currentStation == null ? "" : currentStation;
         this.active = active;
         this.radius = radius;
+        this.customUrl = customUrl == null ? "" : customUrl;
         this.volumePercent = CointRadioPlayer.getVolumePercent();
     }
 
@@ -43,9 +49,45 @@ public class CointRadioScreen extends Screen {
 
         int buttonWidth = 220;
         int buttonHeight = 20;
-        int spacing = 24;
+        int startY = 78;
 
-        int startY = 70;
+        this.urlBox = new EditBox(
+                this.font,
+                this.width / 2 - buttonWidth / 2,
+                startY,
+                buttonWidth,
+                buttonHeight,
+                Component.literal("URL")
+        );
+
+        this.urlBox.setMaxLength(2048);
+        this.urlBox.setValue(customUrl);
+        this.urlBox.setHint(Component.literal("https://example.com/music.ogg"));
+        this.addRenderableWidget(this.urlBox);
+
+        this.addRenderableWidget(
+                Button.builder(
+                                Component.literal("§aПрименить URL"),
+                                button -> {
+                                    CointRadioNetwork.sendSetCustomUrlToServer(pos, urlBox.getValue());
+                                    this.onClose();
+                                }
+                        )
+                        .bounds(this.width / 2 - buttonWidth / 2, startY + 24, buttonWidth, buttonHeight)
+                        .build()
+        );
+
+        this.addRenderableWidget(
+                Button.builder(
+                                Component.literal("§cОчистить URL"),
+                                button -> {
+                                    CointRadioNetwork.sendClearCustomUrlToServer(pos);
+                                    this.onClose();
+                                }
+                        )
+                        .bounds(this.width / 2 - buttonWidth / 2, startY + 48, buttonWidth, buttonHeight)
+                        .build()
+        );
 
         this.addRenderableWidget(
                 Button.builder(
@@ -55,14 +97,14 @@ public class CointRadioScreen extends Screen {
                                     this.onClose();
                                 }
                         )
-                        .bounds(this.width / 2 - buttonWidth / 2, startY, buttonWidth, buttonHeight)
+                        .bounds(this.width / 2 - buttonWidth / 2, startY + 78, buttonWidth, buttonHeight)
                         .build()
         );
 
         this.addRenderableWidget(
                 new AbstractSliderButton(
                         this.width / 2 - buttonWidth / 2,
-                        startY + 24,
+                        startY + 102,
                         buttonWidth,
                         buttonHeight,
                         Component.literal("§eГромкость: §f" + volumePercent + "%"),
@@ -83,20 +125,22 @@ public class CointRadioScreen extends Screen {
                 }
         );
 
-        int stationStartY = startY + 60;
+        int stationStartY = startY + 136;
 
         for (int i = 0; i < stations.size(); i++) {
             String stationId = stations.get(i);
 
             Component label;
 
-            if (stationId.equalsIgnoreCase(currentStation)) {
+            if (!customUrl.isBlank()) {
+                label = Component.literal("§8" + stationId);
+            } else if (stationId.equalsIgnoreCase(currentStation)) {
                 label = Component.literal("§a▶ " + stationId);
             } else {
                 label = Component.literal("§f" + stationId);
             }
 
-            int y = stationStartY + i * spacing;
+            int y = stationStartY + i * 24;
 
             this.addRenderableWidget(
                     Button.builder(label, button -> {
@@ -110,7 +154,7 @@ public class CointRadioScreen extends Screen {
 
         this.addRenderableWidget(
                 Button.builder(Component.literal("Закрыть"), button -> this.onClose())
-                        .bounds(this.width / 2 - buttonWidth / 2, this.height - 45, buttonWidth, buttonHeight)
+                        .bounds(this.width / 2 - buttonWidth / 2, this.height - 32, buttonWidth, buttonHeight)
                         .build()
         );
     }
@@ -121,17 +165,19 @@ public class CointRadioScreen extends Screen {
 
         graphics.drawCenteredString(
                 this.font,
-                "Выбор станции",
+                "Радио",
                 this.width / 2,
-                15,
+                12,
                 0xFFFFFF
         );
 
+        String stationText = customUrl.isBlank() ? currentStation : "custom URL";
+
         graphics.drawCenteredString(
                 this.font,
-                "Станция: " + currentStation,
+                "Источник: " + stationText,
                 this.width / 2,
-                32,
+                28,
                 0xDDDDDD
         );
 
@@ -139,7 +185,7 @@ public class CointRadioScreen extends Screen {
                 this.font,
                 active ? "Состояние: включено" : "Состояние: выключено",
                 this.width / 2,
-                44,
+                40,
                 active ? 0x55FF55 : 0xFF5555
         );
 
@@ -147,8 +193,16 @@ public class CointRadioScreen extends Screen {
                 this.font,
                 "Радиус: " + radius,
                 this.width / 2,
-                56,
+                52,
                 0xDDDDDD
+        );
+
+        graphics.drawCenteredString(
+                this.font,
+                "Прямая .ogg ссылка:",
+                this.width / 2,
+                66,
+                0xAAAAAA
         );
 
         super.render(graphics, mouseX, mouseY, partialTick);

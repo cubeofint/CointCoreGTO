@@ -42,6 +42,23 @@ public final class CointRadioNetwork {
         CHANNEL.registerMessage(nextId(), OpenRadioScreenPacket.class, OpenRadioScreenPacket::encode, OpenRadioScreenPacket::decode, OpenRadioScreenPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
         CHANNEL.registerMessage(nextId(), SelectStationPacket.class, SelectStationPacket::encode, SelectStationPacket::decode, SelectStationPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
         CHANNEL.registerMessage(nextId(), ToggleActivePacket.class, ToggleActivePacket::encode, ToggleActivePacket::decode, ToggleActivePacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(
+                nextId(),
+                SetCustomUrlPacket.class,
+                SetCustomUrlPacket::encode,
+                SetCustomUrlPacket::decode,
+                SetCustomUrlPacket::handle,
+                Optional.of(NetworkDirection.PLAY_TO_SERVER)
+        );
+
+        CHANNEL.registerMessage(
+                nextId(),
+                ClearCustomUrlPacket.class,
+                ClearCustomUrlPacket::encode,
+                ClearCustomUrlPacket::decode,
+                ClearCustomUrlPacket::handle,
+                Optional.of(NetworkDirection.PLAY_TO_SERVER)
+        );
     }
 
     public static void sendPlay(ServerPlayer player, String url, String stationId, String radioId) {
@@ -66,12 +83,21 @@ public final class CointRadioNetwork {
             List<String> stations,
             String currentStation,
             boolean active,
-            int radius
+            int radius,
+            String customUrl
     ) {
         CHANNEL.send(
                 PacketDistributor.PLAYER.with(() -> player),
-                new OpenRadioScreenPacket(pos, stations, currentStation, active, radius)
+                new OpenRadioScreenPacket(pos, stations, currentStation, active, radius, customUrl)
         );
+    }
+
+    public static void sendSetCustomUrlToServer(BlockPos pos, String customUrl) {
+        CHANNEL.sendToServer(new SetCustomUrlPacket(pos, customUrl == null ? "" : customUrl));
+    }
+
+    public static void sendClearCustomUrlToServer(BlockPos pos) {
+        CHANNEL.sendToServer(new ClearCustomUrlPacket(pos));
     }
 
     public static void sendSelectStationToServer(BlockPos pos, String stationId) {
@@ -84,6 +110,18 @@ public final class CointRadioNetwork {
 
     private static int nextId() {
         return packetId++;
+    }
+
+    private static boolean isAllowedCustomUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+
+        String lowered = url.toLowerCase(java.util.Locale.ROOT);
+
+        return url.length() <= 2048
+                && (lowered.startsWith("http://") || lowered.startsWith("https://"))
+                && lowered.endsWith(".ogg");
     }
 
     private static boolean isValidRadioAccess(ServerPlayer player, BlockPos pos) {
@@ -206,7 +244,8 @@ public final class CointRadioNetwork {
             List<String> stations,
             String currentStation,
             boolean active,
-            int radius
+            int radius,
+            String customUrl
     ) {
         public static void encode(OpenRadioScreenPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
             buffer.writeBlockPos(packet.pos);
@@ -219,6 +258,7 @@ public final class CointRadioNetwork {
             buffer.writeUtf(packet.currentStation, 256);
             buffer.writeBoolean(packet.active);
             buffer.writeVarInt(packet.radius);
+            buffer.writeUtf(packet.customUrl == null ? "" : packet.customUrl, 2048);
         }
 
         public static OpenRadioScreenPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
@@ -234,8 +274,9 @@ public final class CointRadioNetwork {
             String currentStation = buffer.readUtf(256);
             boolean active = buffer.readBoolean();
             int radius = buffer.readVarInt();
+            String customUrl = buffer.readUtf(2048);
 
-            return new OpenRadioScreenPacket(pos, stations, currentStation, active, radius);
+            return new OpenRadioScreenPacket(pos, stations, currentStation, active, radius, customUrl);
         }
 
         public static void handle(OpenRadioScreenPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
@@ -248,7 +289,8 @@ public final class CointRadioNetwork {
                             packet.stations,
                             packet.currentStation,
                             packet.active,
-                            packet.radius
+                            packet.radius,
+                            packet.customUrl
                     )
             ));
 
@@ -332,6 +374,94 @@ public final class CointRadioNetwork {
                             true
                     );
                 }
+            });
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record SetCustomUrlPacket(BlockPos pos, String customUrl) {
+        public static void encode(SetCustomUrlPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeBlockPos(packet.pos);
+            buffer.writeUtf(packet.customUrl == null ? "" : packet.customUrl, 2048);
+        }
+
+        public static SetCustomUrlPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new SetCustomUrlPacket(
+                    buffer.readBlockPos(),
+                    buffer.readUtf(2048)
+            );
+        }
+
+        public static void handle(SetCustomUrlPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> {
+                ServerPlayer player = context.getSender();
+
+                if (!isValidRadioAccess(player, packet.pos)) {
+                    return;
+                }
+
+                BlockEntity blockEntity = player.level().getBlockEntity(packet.pos);
+
+                if (!(blockEntity instanceof CointRadioBlockEntity radio)) {
+                    return;
+                }
+
+                String cleanUrl = packet.customUrl == null ? "" : packet.customUrl.trim();
+
+                if (!isAllowedCustomUrl(cleanUrl)) {
+                    player.displayClientMessage(
+                            Component.literal("§c[CointMusic] Нужна прямая ссылка на .ogg файл."),
+                            true
+                    );
+                    return;
+                }
+
+                radio.setCustomUrl(cleanUrl);
+
+                player.displayClientMessage(
+                        Component.literal("§a[CointMusic] URL радиоблока применён."),
+                        true
+                );
+            });
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record ClearCustomUrlPacket(BlockPos pos) {
+        public static void encode(ClearCustomUrlPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeBlockPos(packet.pos);
+        }
+
+        public static ClearCustomUrlPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new ClearCustomUrlPacket(buffer.readBlockPos());
+        }
+
+        public static void handle(ClearCustomUrlPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> {
+                ServerPlayer player = context.getSender();
+
+                if (!isValidRadioAccess(player, packet.pos)) {
+                    return;
+                }
+
+                BlockEntity blockEntity = player.level().getBlockEntity(packet.pos);
+
+                if (!(blockEntity instanceof CointRadioBlockEntity radio)) {
+                    return;
+                }
+
+                radio.clearCustomUrl();
+
+                player.displayClientMessage(
+                        Component.literal("§e[CointMusic] URL радиоблока очищен. Используется станция: §f" + radio.getStationId()),
+                        true
+                );
             });
 
             context.setPacketHandled(true);

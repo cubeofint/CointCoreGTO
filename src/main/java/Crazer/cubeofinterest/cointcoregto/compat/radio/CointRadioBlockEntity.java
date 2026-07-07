@@ -2,12 +2,15 @@ package Crazer.cubeofinterest.cointcoregto.compat.radio;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.Connection;
+import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.HashSet;
 import java.util.List;
@@ -18,11 +21,54 @@ import java.util.UUID;
 public class CointRadioBlockEntity extends BlockEntity {
     private String stationId = "";
     private boolean active = false;
+    private String customUrl = "";
     private int tickCounter = 0;
     private final Set<UUID> listeners = new HashSet<>();
 
     public CointRadioBlockEntity(BlockPos pos, BlockState state) {
         super(CointRadioBlocks.COINT_RADIO_BLOCK_ENTITY.get(), pos, state);
+    }
+
+    public String getCustomUrl() {
+        return customUrl == null ? "" : customUrl;
+    }
+
+    public boolean hasCustomUrl() {
+        return customUrl != null && !customUrl.isBlank();
+    }
+
+    public void setCustomUrl(String customUrl) {
+        String clean = customUrl == null ? "" : customUrl.trim();
+
+        if (!clean.isBlank() && !isAllowedCustomUrl(clean)) {
+            return;
+        }
+
+        this.customUrl = clean;
+        setChanged();
+        syncToClient();
+
+        if (active) {
+            playToNearbyPlayers();
+        }
+    }
+
+    public void clearCustomUrl() {
+        this.customUrl = "";
+        setChanged();
+        syncToClient();
+
+        if (active) {
+            playToNearbyPlayers();
+        }
+    }
+
+    private static boolean isAllowedCustomUrl(String url) {
+        String lowered = url.toLowerCase(Locale.ROOT);
+
+        return (lowered.startsWith("http://") || lowered.startsWith("https://"))
+                && lowered.endsWith(".ogg")
+                && url.length() <= 2048;
     }
 
     public String getStationId() {
@@ -53,6 +99,7 @@ public class CointRadioBlockEntity extends BlockEntity {
 
         this.stationId = normalized;
         setChanged();
+        syncToClient();
 
         if (active) {
             playToNearbyPlayers();
@@ -60,6 +107,10 @@ public class CointRadioBlockEntity extends BlockEntity {
     }
 
     public String getStationUrl() {
+        if (hasCustomUrl()) {
+            return getCustomUrl();
+        }
+
         String id = getStationId();
         String url = CointRadioConfig.getStationUrl(id);
 
@@ -76,6 +127,7 @@ public class CointRadioBlockEntity extends BlockEntity {
         if (stations.isEmpty()) {
             stationId = CointRadioConfig.getDefaultStation();
             setChanged();
+            syncToClient();
             return stationId;
         }
 
@@ -89,6 +141,7 @@ public class CointRadioBlockEntity extends BlockEntity {
         }
 
         setChanged();
+        syncToClient();
         return stationId;
     }
 
@@ -115,6 +168,8 @@ public class CointRadioBlockEntity extends BlockEntity {
                 );
             }
         }
+
+        syncToClient();
 
         if (!active) {
             stopAllListeners();
@@ -233,6 +288,7 @@ public class CointRadioBlockEntity extends BlockEntity {
         super.saveAdditional(tag);
         tag.putString("StationId", getStationId());
         tag.putBoolean("Active", active);
+        tag.putString("CustomUrl", getCustomUrl());
     }
 
     @Override
@@ -240,6 +296,7 @@ public class CointRadioBlockEntity extends BlockEntity {
         super.load(tag);
         stationId = tag.getString("StationId");
         active = tag.getBoolean("Active");
+        customUrl = tag.getString("CustomUrl");
     }
 
     @Override
@@ -269,5 +326,63 @@ public class CointRadioBlockEntity extends BlockEntity {
     public void onChunkUnloaded() {
         stopAllListeners();
         super.onChunkUnloaded();
+    }
+
+    @Nullable
+    @Override
+    public ClientboundBlockEntityDataPacket getUpdatePacket() {
+        return ClientboundBlockEntityDataPacket.create(this);
+    }
+
+    @Override
+    public CompoundTag getUpdateTag() {
+        CompoundTag tag = super.getUpdateTag();
+
+        tag.putString("StationId", getStationId());
+        tag.putBoolean("Active", active);
+        tag.putString("CustomUrl", getCustomUrl());
+
+        return tag;
+    }
+
+    @Override
+    public void onDataPacket(Connection connection, ClientboundBlockEntityDataPacket packet) {
+        CompoundTag tag = packet.getTag();
+
+        if (tag != null) {
+            handleUpdateTag(tag);
+        }
+    }
+
+    @Override
+    public void handleUpdateTag(CompoundTag tag) {
+        super.handleUpdateTag(tag);
+
+        if (tag.contains("StationId")) {
+            stationId = tag.getString("StationId");
+        }
+
+        if (tag.contains("Active")) {
+            active = tag.getBoolean("Active");
+        }
+
+        if (tag.contains("CustomUrl")) {
+            customUrl = tag.getString("CustomUrl");
+        }
+    }
+
+    private void syncToClient() {
+        if (level == null || level.isClientSide) {
+            return;
+        }
+
+        BlockState state = level.getBlockState(worldPosition);
+
+        level.sendBlockUpdated(
+                worldPosition,
+                state,
+                state,
+                3
+        );
     }
 }
