@@ -381,7 +381,7 @@ public class CointCoreGTO {
             return;
         }
 
-        CointCoreGTODiscordBridge.reload(
+        CointCoreGTODiscordProxy.reload(
                 CURRENT_SERVER,
                 DISCORD_ENABLED.get(),
                 DISCORD_BOT_TOKEN.get(),
@@ -446,7 +446,7 @@ public class CointCoreGTO {
         loadLastLocations();
         loadWarns();
         loadPunishmentHistory();
-        CointCoreGTODiscordBridge.start(
+        CointCoreGTODiscordProxy.start(
                 CURRENT_SERVER,
                 DISCORD_ENABLED.get(),
                 DISCORD_BOT_TOKEN.get(),
@@ -469,7 +469,7 @@ public class CointCoreGTO {
         saveLastLocations();
         saveWarns();
         savePunishmentHistory();
-        CointCoreGTODiscordBridge.stop();
+        CointCoreGTODiscordProxy.stop();
         NEXT_RESTART_MILLIS = -1L;
         LAST_RESTART_CHECK_SECOND = -1L;
         RESTARTING_NOW = false;
@@ -574,12 +574,12 @@ public class CointCoreGTO {
                                                 return 0;
                                             }
 
-                                            CointCoreGTODiscordBridge.sendToDiscordLog(stripColor(message));
+                                            CointCoreGTODiscordProxy.sendToDiscordLog(stripColor(message));
                                             return 1;
                                         })))
         );
-        
-        
+
+
 
         event.getDispatcher().register(
                 Commands.literal("chat")
@@ -1668,7 +1668,7 @@ public class CointCoreGTO {
         }
 
         System.out.println("[CointCoreGTO] Restart warning: " + stripColor(chatMessage));
-        CointCoreGTODiscordBridge.sendToDiscord("⚠ Рестарт сервера через **" + stripColor(timeText) + "**!");
+        CointCoreGTODiscordProxy.sendToDiscord("⚠ Рестарт сервера через **" + stripColor(timeText) + "**!");
     }
 
 
@@ -1715,7 +1715,7 @@ public class CointCoreGTO {
             player.sendSystemMessage(Component.literal("§cСервер перезапускается. Зайдите через пару минут."));
         }
 
-        CointCoreGTODiscordBridge.sendToDiscord("🔄 **Сервер уходит на плановый рестарт.**");
+        CointCoreGTODiscordProxy.sendToDiscord("🔄 **Сервер уходит на плановый рестарт.**");
         System.out.println("[CointCoreGTO] Automatic restart started.");
 
         server.execute(() -> {
@@ -2003,7 +2003,7 @@ public class CointCoreGTO {
         }
 
         if (DISCORD_SEND_LOCAL_CHAT.get()) {
-            CointCoreGTODiscordBridge.sendToDiscordLog(discordFormatted);
+            CointCoreGTODiscordProxy.sendToDiscordLog(discordFormatted);
         }
 
         System.out.println("[LocalChat] " + stripColor(timePrefix(player) + withoutTime));
@@ -2028,7 +2028,7 @@ public class CointCoreGTO {
         }
 
         if (DISCORD_SEND_GLOBAL_CHAT.get()) {
-            CointCoreGTODiscordBridge.sendPlayerMessageToDiscord(
+            CointCoreGTODiscordProxy.sendPlayerMessageToDiscord(
                     getDiscordDisplayName(player, GLOBAL_PREFIX.get()),
                     plainMessage,
                     player.getUUID().toString(),
@@ -2077,7 +2077,7 @@ public class CointCoreGTO {
         LAST_PRIVATE.put(target.getUUID(), sender.getUUID());
 
         if (DISCORD_SEND_PRIVATE_CHAT.get()) {
-            CointCoreGTODiscordBridge.sendToDiscordLog("[PM] " + senderName + " -> " + targetName + ": " + plainMessage);
+            CointCoreGTODiscordProxy.sendToDiscordLog("[PM] " + senderName + " -> " + targetName + ": " + plainMessage);
         }
 
         System.out.println("[PrivateChat] " + senderName + " -> " + targetName + ": " + plainMessage);
@@ -2191,7 +2191,7 @@ public class CointCoreGTO {
         }
 
         if (DISCORD_SEND_LOCAL_CHAT.get()) {
-            CointCoreGTODiscordBridge.sendToDiscordLog(discordFormatted);
+            CointCoreGTODiscordProxy.sendToDiscordLog(discordFormatted);
         }
 
         System.out.println("[LocalChat] " + stripColor(timePrefix(player) + withoutTime));
@@ -2221,7 +2221,7 @@ public class CointCoreGTO {
         }
 
         if (DISCORD_SEND_GLOBAL_CHAT.get()) {
-            CointCoreGTODiscordBridge.sendPlayerMessageToDiscord(
+            CointCoreGTODiscordProxy.sendPlayerMessageToDiscord(
                     getDiscordDisplayName(player, GLOBAL_PREFIX.get()),
                     plainItemText,
                     player.getUUID().toString(),

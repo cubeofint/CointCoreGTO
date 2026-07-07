@@ -1,9 +1,6 @@
 package Crazer.cubeofinterest.cointcoregto;
 
 import com.mojang.blaze3d.platform.NativeImage;
-import net.dv8tion.jda.api.JDA;
-import net.dv8tion.jda.api.entities.Guild;
-import net.dv8tion.jda.api.entities.emoji.RichCustomEmoji;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.ChatComponent;
@@ -76,7 +73,7 @@ public final class CointCoreGTOEmoji {
         registered = true;
     }
 
-    public static void refreshFromJda(JDA jda) {
+    public static void refreshFromJda(Object jda) {
         SERVER_EMOJIS_BY_NAME.clear();
 
         System.out.println("[CointCoreGTOEmoji] refreshFromJda called. jda=" + (jda != null));
@@ -89,44 +86,61 @@ public final class CointCoreGTOEmoji {
         int loaded = 0;
 
         try {
-            List<Guild> guilds = jda.getGuilds();
+            Object guildsObject = jda.getClass().getMethod("getGuilds").invoke(jda);
+
+            if (!(guildsObject instanceof List<?> guilds)) {
+                System.out.println("[CointCoreGTOEmoji] Cannot load Discord emojis: getGuilds did not return List.");
+                return;
+            }
+
             System.out.println("[CointCoreGTOEmoji] guilds=" + guilds.size());
 
-            for (Guild guild : guilds) {
+            for (Object guild : guilds) {
                 if (guild == null) {
                     continue;
                 }
 
-                List<RichCustomEmoji> emojis = guild.getEmojis();
-                System.out.println("[CointCoreGTOEmoji] guild=\"" + guild.getName() + "\" id=" + guild.getId() + " emojis=" + emojis.size());
+                String guildName = getStringByMethod(guild, "getName", "unknown");
+                String guildId = getStringByMethod(guild, "getId", "unknown");
+
+                Object emojisObject = guild.getClass().getMethod("getEmojis").invoke(guild);
+
+                if (!(emojisObject instanceof List<?> emojis)) {
+                    System.out.println("[CointCoreGTOEmoji] guild=\"" + guildName + "\" id=" + guildId + " emojis unavailable.");
+                    continue;
+                }
+
+                System.out.println("[CointCoreGTOEmoji] guild=\"" + guildName + "\" id=" + guildId + " emojis=" + emojis.size());
 
                 int printed = 0;
 
-                for (RichCustomEmoji emoji : emojis) {
+                for (Object emoji : emojis) {
                     if (emoji == null) {
                         continue;
                     }
 
-                    String name = sanitizeEmojiName(emoji.getName());
-                    String id = emoji.getId();
+                    String rawName = getStringByMethod(emoji, "getName", null);
+                    String name = sanitizeEmojiName(rawName);
+                    String id = getStringByMethod(emoji, "getId", null);
+                    boolean animated = getBooleanByMethod(emoji, "isAnimated", false);
 
                     if (name == null || id == null || id.isBlank()) {
-                        System.out.println("[CointCoreGTOEmoji] skipped emoji rawName=\"" + emoji.getName() + "\" id=" + id);
+                        System.out.println("[CointCoreGTOEmoji] skipped emoji rawName=\"" + rawName + "\" id=" + id);
                         continue;
                     }
 
-                    EmojiInfo info = new EmojiInfo(name, id, emoji.isAnimated());
+                    EmojiInfo info = new EmojiInfo(name, id, animated);
                     putServerEmoji(info);
                     loaded++;
 
                     if (printed < 30) {
-                        System.out.println("[CointCoreGTOEmoji] emoji name=\"" + name + "\" id=" + id + " animated=" + emoji.isAnimated());
+                        System.out.println("[CointCoreGTOEmoji] emoji name=\"" + name + "\" id=" + id + " animated=" + animated);
                         printed++;
                     }
                 }
 
                 if (emojis.size() > printed) {
-                    System.out.println("[CointCoreGTOEmoji] guild=\"" + guild.getName() + "\" printed " + printed + "/" + emojis.size() + " emojis.");
+                    System.out.println("[CointCoreGTOEmoji] guild=\"" + guildName + "\" printed " + printed + "/" + emojis.size() + " emojis.");
                 }
             }
         } catch (Throwable e) {
@@ -135,6 +149,37 @@ public final class CointCoreGTOEmoji {
         }
 
         System.out.println("[CointCoreGTOEmoji] Loaded Discord emojis: " + loaded);
+    }
+
+    private static String getStringByMethod(Object target, String methodName, String fallback) {
+        if (target == null || methodName == null || methodName.isBlank()) {
+            return fallback;
+        }
+
+        try {
+            Object result = target.getClass().getMethod(methodName).invoke(target);
+            return result == null ? fallback : String.valueOf(result);
+        } catch (Throwable ignored) {
+            return fallback;
+        }
+    }
+
+    private static boolean getBooleanByMethod(Object target, String methodName, boolean fallback) {
+        if (target == null || methodName == null || methodName.isBlank()) {
+            return fallback;
+        }
+
+        try {
+            Object result = target.getClass().getMethod(methodName).invoke(target);
+
+            if (result instanceof Boolean value) {
+                return value;
+            }
+
+            return fallback;
+        } catch (Throwable ignored) {
+            return fallback;
+        }
     }
 
     public static void clearServerRegistry() {
