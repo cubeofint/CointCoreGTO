@@ -69,22 +69,9 @@ public class CointRadioBlockEntity extends BlockEntity {
         }
 
         String lowered = url.toLowerCase(Locale.ROOT);
-        String cleanPath = lowered;
-
-        int queryIndex = cleanPath.indexOf('?');
-        if (queryIndex >= 0) {
-            cleanPath = cleanPath.substring(0, queryIndex);
-        }
 
         return url.length() <= 2048
-                && (lowered.startsWith("http://") || lowered.startsWith("https://"))
-                && (
-                cleanPath.endsWith(".ogg")
-                        || cleanPath.endsWith(".mp3")
-                        || cleanPath.endsWith(".m3u")
-                        || cleanPath.endsWith(".m3u8")
-                        || cleanPath.endsWith(".pls")
-        );
+                && (lowered.startsWith("http://") || lowered.startsWith("https://"));
     }
 
     public String getStationId() {

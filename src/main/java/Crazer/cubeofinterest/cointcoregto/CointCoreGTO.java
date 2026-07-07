@@ -362,20 +362,52 @@ public class CointCoreGTO {
 
         RADIO_DEFAULT_STATION = builder
                 .comment("Default station id from stations list.")
-                .define("default_station", "main");
+                .define("default_station", "dorognoe");
 
-        RADIO_STATIONS = builder
-                .comment("Radio stations in format: station_id=https://direct-url/file.ogg")
-                .defineList(
-                        "stations",
-                        List.of(
-                                "main=https://upload.wikimedia.org/wikipedia/commons/c/c8/Example.ogg",
-                                "rock=https://upload.wikimedia.org/wikipedia/commons/4/45/ACDC_-_Back_In_Black-sample.ogg"
-                        ),
-                        value -> value instanceof String string
-                                && string.contains("=")
-                                && (string.contains("http://") || string.contains("https://"))
-                );
+        RADIO_STATIONS = builder.defineList(
+                "stations",
+                List.of(
+                        "dorognoe|Дорожное радио|http://dorognoe.hostingradio.ru:8000/dorognoe",
+                        "groove|SomaFM Groove Salad|https://ice1.somafm.com/groovesalad-128-mp3",
+                        "drone|SomaFM Drone Zone|https://ice1.somafm.com/dronezone-128-mp3",
+                        "testmp3|Тест MP3|https://samplelib.com/lib/preview/mp3/sample-3s.mp3",
+                        "testogg|Тест OGG|https://upload.wikimedia.org/wikipedia/commons/c/c8/Example.ogg"
+                ),
+                value -> {
+                    if (!(value instanceof String string)) {
+                        return false;
+                    }
+
+                    String trimmed = string.trim();
+
+                    if (trimmed.isBlank()) {
+                        return false;
+                    }
+
+                    // Старый формат:
+                    // id=https://url
+                    if (trimmed.contains("=")) {
+                        String[] parts = trimmed.split("=", 2);
+
+                        return parts.length == 2
+                                && !parts[0].trim().isBlank()
+                                && isValidRadioUrl(parts[1].trim());
+                    }
+
+                    // Новый формат:
+                    // id|Название|https://url
+                    if (trimmed.contains("|")) {
+                        String[] parts = trimmed.split("\\|", 3);
+
+                        return parts.length == 3
+                                && !parts[0].trim().isBlank()
+                                && !parts[1].trim().isBlank()
+                                && isValidRadioUrl(parts[2].trim());
+                    }
+
+                    return false;
+                }
+        );
 
         RADIO_ON_MESSAGE = builder
                 .comment("Actionbar message when radio starts. Use %station% for station id.")
@@ -3617,6 +3649,16 @@ public class CointCoreGTO {
             ));
             context.setPacketHandled(true);
         }
+    }
+
+    private static boolean isValidRadioUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+
+        String lowered = url.toLowerCase(java.util.Locale.ROOT);
+
+        return lowered.startsWith("http://") || lowered.startsWith("https://");
     }
 
     private record ChatHistoryMessage(long order, ChatView view, String message, Component component) {

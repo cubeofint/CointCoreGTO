@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 public final class CointRadioPlayer {
@@ -45,6 +46,9 @@ public final class CointRadioPlayer {
 
     private static final Map<String, byte[]> AUDIO_CACHE = new LinkedHashMap<>(16, 0.75f, true);
     private static int currentCacheSizeBytes = 0;
+    private static volatile boolean streaming = false;
+    private static CompletableFuture<?> streamingFuture;
+    private static final List<Integer> STREAM_BUFFERS = new ArrayList<>();
 
     private CointRadioPlayer() {
     }
@@ -72,14 +76,6 @@ public final class CointRadioPlayer {
             send(feedback, "§c[CointMusic] Нужна http/https ссылка.");
             return;
         }
-
-        String cleanPath = stripQuery(lowerUrl);
-
-        if (!isSupportedAudioOrPlaylistUrl(cleanPath)) {
-            send(feedback, "§e[CointMusic] Сейчас поддерживаются .ogg/.mp3 и плейлисты .m3u/.pls.");
-            return;
-        }
-
         if (loading) {
             send(feedback, "§e[CointMusic] Трек уже загружается, подожди секунду.");
             return;
@@ -96,6 +92,12 @@ public final class CointRadioPlayer {
         CompletableFuture.runAsync(() -> {
             try {
                 String resolvedUrl = resolvePlaylistIfNeeded(cleanUrl);
+
+                if (shouldUseStreaming(resolvedUrl)) {
+                    startMp3Stream(resolvedUrl, feedback);
+                    return;
+                }
+
                 byte[] audioBytes = getOrDownloadAudio(resolvedUrl);
                 DecodedAudio decodedAudio = decodeAudio(resolvedUrl, audioBytes);
 
@@ -235,6 +237,32 @@ public final class CointRadioPlayer {
         return result;
     }
 
+    private static boolean shouldUseStreaming(String url) {
+        String cleanPath = stripQuery(url.toLowerCase(Locale.ROOT));
+
+        if (cleanPath.endsWith(".ogg")) {
+            return false;
+        }
+
+        if (cleanPath.endsWith(".mp3")) {
+            return false;
+        }
+
+        if (cleanPath.endsWith(".m3u")) {
+            return false;
+        }
+
+        if (cleanPath.endsWith(".m3u8")) {
+            return false;
+        }
+
+        if (cleanPath.endsWith(".pls")) {
+            return false;
+        }
+
+        return true;
+    }
+
     private static boolean isMp3Url(String url) {
         if (url == null) {
             return false;
@@ -307,6 +335,200 @@ public final class CointRadioPlayer {
             );
 
             return new DecodedAudio(pcmBuffer, format);
+        }
+    }
+
+    private static void startMp3Stream(String streamUrl, Consumer<Component> feedback) {
+        Minecraft minecraft = Minecraft.getInstance();
+
+        if (minecraft == null) {
+            loading = false;
+            return;
+        }
+
+        minecraft.execute(() -> {
+            stopNowOnClientThread();
+
+            streaming = true;
+
+            clearOpenAlError();
+
+            sourceId = AL10.alGenSources();
+            checkOpenAl("stream alGenSources", feedback);
+
+            AL10.alSourcef(sourceId, AL10.AL_GAIN, volume);
+            AL10.alSourcef(sourceId, AL10.AL_PITCH, 1.0f);
+            AL10.alSourcei(sourceId, AL10.AL_SOURCE_RELATIVE, AL10.AL_TRUE);
+            AL10.alSource3f(sourceId, AL10.AL_POSITION, 0.0f, 0.0f, 0.0f);
+            AL10.alSource3f(sourceId, AL10.AL_VELOCITY, 0.0f, 0.0f, 0.0f);
+
+            playing = true;
+            loading = false;
+
+            send(feedback, "§a[CointMusic] Онлайн-радио запущено.");
+
+            streamingFuture = CompletableFuture.runAsync(() -> runMp3StreamLoop(streamUrl, feedback));
+        });
+    }
+
+    private static void runMp3StreamLoop(String streamUrl, Consumer<Component> feedback) {
+        try {
+            URLConnection connection = new URL(streamUrl).openConnection();
+            connection.setConnectTimeout(10_000);
+            connection.setReadTimeout(30_000);
+            connection.setRequestProperty("User-Agent", "CointCoreGTO-MusicPlayer/1.0");
+            connection.setRequestProperty("Icy-MetaData", "0");
+
+            try (InputStream rawInput = new BufferedInputStream(connection.getInputStream())) {
+                Bitstream bitstream = new Bitstream(rawInput);
+                Decoder decoder = new Decoder();
+
+                int sampleRate = 44100;
+                int channels = 2;
+
+                while (streaming) {
+                    ByteArrayOutputStream pcmOutput = new ByteArrayOutputStream();
+                    int frames = 0;
+
+                    while (streaming && frames < 24) {
+                        Header header = bitstream.readFrame();
+
+                        if (header == null) {
+                            break;
+                        }
+
+                        SampleBuffer output = (SampleBuffer) decoder.decodeFrame(header, bitstream);
+
+                        sampleRate = output.getSampleFrequency();
+                        channels = output.getChannelCount();
+
+                        short[] samples = output.getBuffer();
+                        int length = output.getBufferLength();
+
+                        for (int i = 0; i < length; i++) {
+                            short sample = samples[i];
+
+                            pcmOutput.write(sample & 0xFF);
+                            pcmOutput.write((sample >> 8) & 0xFF);
+                        }
+
+                        bitstream.closeFrame();
+                        frames++;
+                    }
+
+                    byte[] pcmBytes = pcmOutput.toByteArray();
+
+                    if (pcmBytes.length <= 0) {
+                        break;
+                    }
+
+                    queueStreamChunk(pcmBytes, sampleRate, channels, feedback);
+                    waitForStreamQueueRoom();
+                }
+            }
+        } catch (Throwable e) {
+            Minecraft minecraft = Minecraft.getInstance();
+
+            if (minecraft != null) {
+                minecraft.execute(() -> {
+                    if (streaming) {
+                        loading = false;
+                        playing = false;
+                        send(feedback, "§c[CointMusic] Онлайн-радио остановилось: §f" + e.getMessage());
+                        System.out.println("[CointMusic] Stream error: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                });
+            }
+        }
+    }
+
+    private static void queueStreamChunk(byte[] pcmBytes, int sampleRate, int channels, Consumer<Component> feedback) {
+        Minecraft minecraft = Minecraft.getInstance();
+
+        if (minecraft == null || pcmBytes.length <= 0) {
+            return;
+        }
+
+        ByteBuffer pcmBuffer = MemoryUtil.memAlloc(pcmBytes.length);
+        pcmBuffer.put(pcmBytes);
+        pcmBuffer.flip();
+
+        minecraft.execute(() -> {
+            try {
+                if (!streaming || sourceId == 0) {
+                    safeFree(pcmBuffer);
+                    return;
+                }
+
+                cleanupProcessedStreamBuffers();
+
+                int openAlFormat = channels == 1 ? AL10.AL_FORMAT_MONO16 : AL10.AL_FORMAT_STEREO16;
+
+                int newBuffer = AL10.alGenBuffers();
+                checkOpenAl("stream alGenBuffers", feedback);
+
+                AL10.alBufferData(newBuffer, openAlFormat, pcmBuffer, sampleRate);
+                checkOpenAl("stream alBufferData", feedback);
+
+                AL10.alSourceQueueBuffers(sourceId, newBuffer);
+                checkOpenAl("stream alSourceQueueBuffers", feedback);
+
+                STREAM_BUFFERS.add(newBuffer);
+
+                int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
+
+                if (state != AL10.AL_PLAYING) {
+                    AL10.alSourcePlay(sourceId);
+                    checkOpenAl("stream alSourcePlay", feedback);
+                }
+
+                safeFree(pcmBuffer);
+            } catch (Throwable e) {
+                safeFree(pcmBuffer);
+                System.out.println("[CointMusic] Failed to queue stream chunk: " + e.getMessage());
+                e.printStackTrace();
+            }
+        });
+    }
+
+    private static void cleanupProcessedStreamBuffers() {
+        if (sourceId == 0) {
+            return;
+        }
+
+        int processed = AL10.alGetSourcei(sourceId, AL10.AL_BUFFERS_PROCESSED);
+
+        while (processed > 0 && !STREAM_BUFFERS.isEmpty()) {
+            int buffer = AL10.alSourceUnqueueBuffers(sourceId);
+            AL10.alDeleteBuffers(buffer);
+            STREAM_BUFFERS.remove(Integer.valueOf(buffer));
+            processed--;
+        }
+    }
+
+    private static void waitForStreamQueueRoom() {
+        AtomicInteger queued = new AtomicInteger(0);
+        Minecraft minecraft = Minecraft.getInstance();
+
+        if (minecraft == null) {
+            return;
+        }
+
+        minecraft.execute(() -> queued.set(STREAM_BUFFERS.size()));
+
+        while (streaming && queued.get() > 8) {
+            try {
+                Thread.sleep(50L);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+
+            minecraft.execute(() -> {
+                cleanupProcessedStreamBuffers();
+                queued.set(STREAM_BUFFERS.size());
+            });
         }
     }
 
@@ -426,9 +648,13 @@ public final class CointRadioPlayer {
         try {
             playing = false;
             loading = false;
+            streaming = false;
 
             if (sourceId != 0) {
                 AL10.alSourceStop(sourceId);
+
+                cleanupProcessedStreamBuffers();
+
                 AL10.alSourcei(sourceId, AL10.AL_BUFFER, 0);
                 AL10.alDeleteSources(sourceId);
                 sourceId = 0;
@@ -438,6 +664,14 @@ public final class CointRadioPlayer {
                 AL10.alDeleteBuffers(bufferId);
                 bufferId = 0;
             }
+
+            for (Integer streamBuffer : new ArrayList<>(STREAM_BUFFERS)) {
+                if (streamBuffer != null && streamBuffer != 0) {
+                    AL10.alDeleteBuffers(streamBuffer);
+                }
+            }
+
+            STREAM_BUFFERS.clear();
 
             currentPcmBuffer = null;
         } catch (Throwable e) {
