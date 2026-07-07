@@ -2,5 +2,6 @@
   "key.categories.cointcoregto": "CointCoreGTO",
   "key.cointcoregto.share_item_to_chat": "Показать предмет в чат",
   "subtitles.cointcoregto.mention": "Упоминание в чате",
-  "block.cointcoregto.coint_radio": "Радио"
+  "block.cointcoregto.coint_radio": "Радио",
+  "config.jade.plugin_cointcoregto.radio_station": "Станция радио"
 }

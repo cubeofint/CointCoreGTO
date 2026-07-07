@@ -101,6 +101,7 @@ public class CointCoreGTO {
     public static ForgeConfigSpec.ConfigValue<List<? extends String>> RADIO_STATIONS;
     public static ForgeConfigSpec.ConfigValue<String> RADIO_ON_MESSAGE;
     public static ForgeConfigSpec.ConfigValue<String> RADIO_OFF_MESSAGE;
+    public static ForgeConfigSpec.IntValue RADIO_RADIUS;
 
     private static final ForgeConfigSpec.BooleanValue ANNOUNCE_MUTES;
     private static final ForgeConfigSpec.BooleanValue ANNOUNCE_BANS;
@@ -354,6 +355,10 @@ public class CointCoreGTO {
         RADIO_ENABLED = builder
                 .comment("Enable CointCoreGTO radio block.")
                 .define("enabled", true);
+
+        RADIO_RADIUS = builder
+                .comment("Radio block radius in blocks.")
+                .defineInRange("radius", 24, 1, 128);
 
         RADIO_DEFAULT_STATION = builder
                 .comment("Default station id from stations list.")

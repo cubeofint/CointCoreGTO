@@ -1,0 +1,12 @@
+{
+  "parent": "minecraft:block/cube",
+  "textures": {
+    "down": "minecraft:block/jukebox_side",
+    "up": "minecraft:block/jukebox_top",
+    "north": "minecraft:block/jukebox_side",
+    "south": "minecraft:block/jukebox_side",
+    "west": "minecraft:block/jukebox_side",
+    "east": "minecraft:block/jukebox_side",
+    "particle": "minecraft:block/jukebox_side"
+  }
+}

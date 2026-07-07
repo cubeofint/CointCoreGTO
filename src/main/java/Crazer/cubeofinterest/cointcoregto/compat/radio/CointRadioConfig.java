@@ -18,6 +18,14 @@ public final class CointRadioConfig {
         }
     }
 
+    public static int getRadius() {
+        try {
+            return CointCoreGTO.RADIO_RADIUS.get();
+        } catch (Throwable ignored) {
+            return 24;
+        }
+    }
+
     public static String getDefaultStation() {
         try {
             String station = CointCoreGTO.RADIO_DEFAULT_STATION.get();

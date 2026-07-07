@@ -1,7 +1,10 @@
 {
   "variants": {
-    "": {
+    "active=false": {
       "model": "cointcoregto:block/coint_radio"
+    },
+    "active=true": {
+      "model": "cointcoregto:block/coint_radio_active"
     }
   }
 }

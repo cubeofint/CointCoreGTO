@@ -8,20 +8,36 @@ import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.BaseEntityBlock;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntityTicker;
+import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.StateDefinition;
+import net.minecraft.world.level.block.state.properties.BooleanProperty;
 import net.minecraft.world.phys.BlockHitResult;
 import org.jetbrains.annotations.Nullable;
 
 public class CointRadioBlock extends BaseEntityBlock {
+    public static final BooleanProperty ACTIVE = BooleanProperty.create("active");
+
     public CointRadioBlock() {
         super(BlockBehaviour.Properties.of()
                 .strength(2.0f, 6.0f)
                 .sound(SoundType.METAL)
         );
+
+        this.registerDefaultState(this.stateDefinition.any()
+                .setValue(ACTIVE, false)
+        );
+    }
+
+    @Override
+    protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {
+        builder.add(ACTIVE);
     }
 
     @Override
@@ -33,6 +49,24 @@ public class CointRadioBlock extends BaseEntityBlock {
     @Override
     public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
         return new CointRadioBlockEntity(pos, state);
+    }
+
+    @Nullable
+    @Override
+    public <T extends BlockEntity> BlockEntityTicker<T> getTicker(
+            Level level,
+            BlockState state,
+            BlockEntityType<T> type
+    ) {
+        if (level.isClientSide) {
+            return null;
+        }
+
+        return createTickerHelper(
+                type,
+                CointRadioBlocks.COINT_RADIO_BLOCK_ENTITY.get(),
+                CointRadioBlockEntity::serverTick
+        );
     }
 
     @Override
@@ -71,29 +105,30 @@ public class CointRadioBlock extends BaseEntityBlock {
         }
 
         if (player.isShiftKeyDown()) {
-            String stationId = radio.nextStation();
-            String url = radio.getStationUrl();
-
-            CointRadioNetwork.sendSwitch(serverPlayer, url, stationId);
+            CointRadioNetwork.sendOpenScreen(
+                    serverPlayer,
+                    pos,
+                    CointRadioConfig.getStationIds(),
+                    radio.getStationId()
+            );
 
             return InteractionResult.SUCCESS;
         }
 
-        String stationId = radio.getStationId();
-        String url = radio.getStationUrl();
+        radio.toggleActive();
 
-        CointRadioNetwork.sendToggle(serverPlayer, url, stationId);
+        if (radio.isActive()) {
+            player.displayClientMessage(
+                    Component.literal("§a[CointMusic] Радиоблок включён. Радиус: §f" + CointRadioConfig.getRadius()),
+                    true
+            );
+        } else {
+            player.displayClientMessage(
+                    Component.literal("§c[CointMusic] Радиоблок выключен."),
+                    true
+            );
+        }
 
         return InteractionResult.SUCCESS;
-    }
-
-    @Override
-    public boolean hasAnalogOutputSignal(BlockState state) {
-        return false;
-    }
-
-    @Override
-    public int getAnalogOutputSignal(BlockState state, Level level, BlockPos pos) {
-        return 0;
     }
 }
