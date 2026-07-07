@@ -1,6 +1,10 @@
 package Crazer.cubeofinterest.cointcoregto.compat.radio;
 
 import com.mojang.blaze3d.audio.OggAudioStream;
+import javazoom.jl.decoder.Bitstream;
+import javazoom.jl.decoder.Decoder;
+import javazoom.jl.decoder.Header;
+import javazoom.jl.decoder.SampleBuffer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import org.lwjgl.openal.AL10;
@@ -14,10 +18,13 @@ import java.io.InputStream;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -31,12 +38,12 @@ public final class CointRadioPlayer {
     private static boolean loading = false;
     private static boolean volumeLoaded = false;
     private static ByteBuffer currentPcmBuffer;
+
     private static final int MAX_TRACK_SIZE_BYTES = 25 * 1024 * 1024;
-    private static final int MAX_CACHE_SIZE_BYTES = 100 * 1024 * 1024;
+    private static final int MAX_CACHE_SIZE_BYTES = 300 * 1024 * 1024;
     private static final int MAX_CACHED_TRACKS = 10;
 
-
-    private static final Map<String, byte[]> OGG_CACHE = new LinkedHashMap<>(16, 0.75f, true);
+    private static final Map<String, byte[]> AUDIO_CACHE = new LinkedHashMap<>(16, 0.75f, true);
     private static int currentCacheSizeBytes = 0;
 
     private CointRadioPlayer() {
@@ -52,6 +59,7 @@ public final class CointRadioPlayer {
 
     public static void play(String url, Consumer<Component> feedback) {
         loadSavedVolume();
+
         if (url == null || url.isBlank()) {
             send(feedback, "§c[CointMusic] Пустая ссылка.");
             return;
@@ -65,10 +73,13 @@ public final class CointRadioPlayer {
             return;
         }
 
-        if (!lowerUrl.contains(".ogg")) {
-            send(feedback, "§e[CointMusic] Сейчас поддерживаются только прямые .ogg ссылки.");
+        String cleanPath = stripQuery(lowerUrl);
+
+        if (!isSupportedAudioOrPlaylistUrl(cleanPath)) {
+            send(feedback, "§e[CointMusic] Сейчас поддерживаются .ogg/.mp3 и плейлисты .m3u/.pls.");
             return;
         }
+
         if (loading) {
             send(feedback, "§e[CointMusic] Трек уже загружается, подожди секунду.");
             return;
@@ -84,29 +95,24 @@ public final class CointRadioPlayer {
 
         CompletableFuture.runAsync(() -> {
             try {
-                byte[] oggBytes = getOrDownloadOgg(cleanUrl);
+                String resolvedUrl = resolvePlaylistIfNeeded(cleanUrl);
+                byte[] audioBytes = getOrDownloadAudio(resolvedUrl);
+                DecodedAudio decodedAudio = decodeAudio(resolvedUrl, audioBytes);
 
-                try (InputStream raw = new BufferedInputStream(new ByteArrayInputStream(oggBytes));
-                     OggAudioStream oggStream = new OggAudioStream(raw)) {
-
-                    ByteBuffer pcmBuffer = oggStream.readAll();
-                    AudioFormat format = oggStream.getFormat();
-
-                    Minecraft.getInstance().execute(() -> {
-                        try {
-                            startDecodedAudio(pcmBuffer, format, feedback);
-                        } catch (Throwable e) {
-                            loading = false;
-                            safeFree(pcmBuffer);
-                            send(feedback, "§c[CointMusic] Не удалось запустить звук: §f" + e.getMessage());
-                            e.printStackTrace();
-                        }
-                    });
-                }
+                Minecraft.getInstance().execute(() -> {
+                    try {
+                        startDecodedAudio(decodedAudio.pcmBuffer(), decodedAudio.format(), feedback);
+                    } catch (Throwable e) {
+                        loading = false;
+                        safeFree(decodedAudio.pcmBuffer());
+                        send(feedback, "§c[CointMusic] Не удалось запустить звук: §f" + e.getMessage());
+                        e.printStackTrace();
+                    }
+                });
             } catch (Throwable e) {
                 Minecraft.getInstance().execute(() -> {
                     loading = false;
-                    send(feedback, "§c[CointMusic] Ошибка загрузки трека. Проверь прямую .ogg ссылку или не кликай слишком быстро.");
+                    send(feedback, "§c[CointMusic] Ошибка загрузки трека. Проверь прямую .ogg/.mp3 ссылку или не кликай слишком быстро.");
                     System.out.println("[CointMusic] Failed to load URL: " + cleanUrl);
                     System.out.println("[CointMusic] Load error: " + e.getMessage());
                     e.printStackTrace();
@@ -116,18 +122,199 @@ public final class CointRadioPlayer {
     }
 
     private static boolean isCached(String cleanUrl) {
-        synchronized (OGG_CACHE) {
-            byte[] cached = OGG_CACHE.get(cleanUrl);
+        synchronized (AUDIO_CACHE) {
+            byte[] cached = AUDIO_CACHE.get(cleanUrl);
             return cached != null && cached.length > 0;
         }
     }
 
-    private static byte[] getOrDownloadOgg(String cleanUrl) throws Exception {
-        synchronized (OGG_CACHE) {
-            byte[] cached = OGG_CACHE.get(cleanUrl);
+    private record DecodedAudio(ByteBuffer pcmBuffer, AudioFormat format) {
+    }
+
+    private static DecodedAudio decodeAudio(String cleanUrl, byte[] audioBytes) throws Exception {
+        if (isMp3Url(cleanUrl)) {
+            return decodeMp3(audioBytes);
+        }
+
+        return decodeOgg(audioBytes);
+    }
+
+    private static String stripQuery(String url) {
+        if (url == null) {
+            return "";
+        }
+
+        int queryIndex = url.indexOf('?');
+        if (queryIndex >= 0) {
+            return url.substring(0, queryIndex);
+        }
+
+        return url;
+    }
+
+    private static boolean isSupportedAudioOrPlaylistUrl(String cleanPath) {
+        if (cleanPath == null || cleanPath.isBlank()) {
+            return false;
+        }
+
+        return cleanPath.endsWith(".ogg")
+                || cleanPath.endsWith(".mp3")
+                || cleanPath.endsWith(".m3u")
+                || cleanPath.endsWith(".m3u8")
+                || cleanPath.endsWith(".pls");
+    }
+
+    private static boolean isPlaylistUrl(String url) {
+        String cleanPath = stripQuery(url.toLowerCase(Locale.ROOT));
+
+        return cleanPath.endsWith(".m3u")
+                || cleanPath.endsWith(".m3u8")
+                || cleanPath.endsWith(".pls");
+    }
+
+    private static String resolvePlaylistIfNeeded(String cleanUrl) throws Exception {
+        if (!isPlaylistUrl(cleanUrl)) {
+            return cleanUrl;
+        }
+
+        byte[] playlistBytes = getOrDownloadAudio(cleanUrl);
+        String playlistText = decodePlaylistText(playlistBytes);
+
+        List<String> urls = extractUrlsFromPlaylist(playlistText);
+
+        if (urls.isEmpty()) {
+            throw new IllegalStateException("Playlist does not contain playable URLs");
+        }
+
+        return urls.get(0).trim();
+    }
+
+    private static String decodePlaylistText(byte[] bytes) {
+        String utf8 = new String(bytes, StandardCharsets.UTF_8);
+
+        if (utf8.contains("\uFFFD")) {
+            return new String(bytes, Charset.forName("windows-1251"));
+        }
+
+        return utf8;
+    }
+
+    private static List<String> extractUrlsFromPlaylist(String playlistText) {
+        List<String> result = new ArrayList<>();
+
+        if (playlistText == null || playlistText.isBlank()) {
+            return result;
+        }
+
+        String[] lines = playlistText.replace("\r", "").split("\n");
+
+        for (String rawLine : lines) {
+            String line = rawLine.trim();
+
+            if (line.isBlank()) {
+                continue;
+            }
+
+            if (line.startsWith("#")) {
+                continue;
+            }
+
+            if (line.toLowerCase(Locale.ROOT).startsWith("file")) {
+                int equals = line.indexOf('=');
+
+                if (equals >= 0 && equals < line.length() - 1) {
+                    line = line.substring(equals + 1).trim();
+                }
+            }
+
+            if (line.startsWith("http://") || line.startsWith("https://")) {
+                result.add(line);
+            }
+        }
+
+        return result;
+    }
+
+    private static boolean isMp3Url(String url) {
+        if (url == null) {
+            return false;
+        }
+
+        String lowered = stripQuery(url.toLowerCase(Locale.ROOT));
+
+        return lowered.endsWith(".mp3");
+    }
+
+    private static DecodedAudio decodeOgg(byte[] audioBytes) throws Exception {
+        try (InputStream raw = new BufferedInputStream(new ByteArrayInputStream(audioBytes));
+             OggAudioStream oggStream = new OggAudioStream(raw)) {
+
+            ByteBuffer pcmBuffer = oggStream.readAll();
+            AudioFormat format = oggStream.getFormat();
+
+            return new DecodedAudio(pcmBuffer, format);
+        }
+    }
+
+    private static DecodedAudio decodeMp3(byte[] audioBytes) throws Exception {
+        try (ByteArrayInputStream input = new ByteArrayInputStream(audioBytes)) {
+            Bitstream bitstream = new Bitstream(input);
+            Decoder decoder = new Decoder();
+            ByteArrayOutputStream pcmOutput = new ByteArrayOutputStream();
+
+            int sampleRate = 44100;
+            int channels = 2;
+
+            Header header;
+
+            while ((header = bitstream.readFrame()) != null) {
+                SampleBuffer output = (SampleBuffer) decoder.decodeFrame(header, bitstream);
+
+                sampleRate = output.getSampleFrequency();
+                channels = output.getChannelCount();
+
+                short[] samples = output.getBuffer();
+                int length = output.getBufferLength();
+
+                for (int i = 0; i < length; i++) {
+                    short sample = samples[i];
+
+                    pcmOutput.write(sample & 0xFF);
+                    pcmOutput.write((sample >> 8) & 0xFF);
+                }
+
+                bitstream.closeFrame();
+            }
+
+            byte[] pcmBytes = pcmOutput.toByteArray();
+
+            if (pcmBytes.length <= 0) {
+                throw new IllegalStateException("Decoded MP3 is empty");
+            }
+
+            ByteBuffer pcmBuffer = MemoryUtil.memAlloc(pcmBytes.length);
+            pcmBuffer.put(pcmBytes);
+            pcmBuffer.flip();
+
+            AudioFormat format = new AudioFormat(
+                    AudioFormat.Encoding.PCM_SIGNED,
+                    sampleRate,
+                    16,
+                    channels,
+                    channels * 2,
+                    sampleRate,
+                    false
+            );
+
+            return new DecodedAudio(pcmBuffer, format);
+        }
+    }
+
+    private static byte[] getOrDownloadAudio(String cleanUrl) throws Exception {
+        synchronized (AUDIO_CACHE) {
+            byte[] cached = AUDIO_CACHE.get(cleanUrl);
 
             if (cached != null && cached.length > 0) {
-                System.out.println("[CointMusic] Loaded from cache: " + cleanUrl);
                 return cached;
             }
         }
@@ -165,20 +352,18 @@ public final class CointRadioPlayer {
 
         putInCache(cleanUrl, data);
 
-        System.out.println("[CointMusic] Downloaded and cached: " + cleanUrl + " size=" + data.length);
-
         return data;
     }
 
     private static void putInCache(String cleanUrl, byte[] data) {
-        synchronized (OGG_CACHE) {
-            byte[] old = OGG_CACHE.remove(cleanUrl);
+        synchronized (AUDIO_CACHE) {
+            byte[] old = AUDIO_CACHE.remove(cleanUrl);
 
             if (old != null) {
                 currentCacheSizeBytes -= old.length;
             }
 
-            OGG_CACHE.put(cleanUrl, data);
+            AUDIO_CACHE.put(cleanUrl, data);
             currentCacheSizeBytes += data.length;
 
             trimCacheIfNeeded();
@@ -187,21 +372,19 @@ public final class CointRadioPlayer {
 
     private static void trimCacheIfNeeded() {
         while (
-                OGG_CACHE.size() > MAX_CACHED_TRACKS
+                AUDIO_CACHE.size() > MAX_CACHED_TRACKS
                         || currentCacheSizeBytes > MAX_CACHE_SIZE_BYTES
         ) {
-            Map.Entry<String, byte[]> eldest = OGG_CACHE.entrySet().iterator().next();
+            Map.Entry<String, byte[]> eldest = AUDIO_CACHE.entrySet().iterator().next();
 
             String removedUrl = eldest.getKey();
             byte[] removedData = eldest.getValue();
 
-            OGG_CACHE.remove(removedUrl);
+            AUDIO_CACHE.remove(removedUrl);
 
             if (removedData != null) {
                 currentCacheSizeBytes -= removedData.length;
             }
-
-            System.out.println("[CointMusic] Removed old cached track: " + removedUrl);
         }
 
         if (currentCacheSizeBytes < 0) {
@@ -210,17 +393,15 @@ public final class CointRadioPlayer {
     }
 
     public static void clearCache() {
-        synchronized (OGG_CACHE) {
-            OGG_CACHE.clear();
+        synchronized (AUDIO_CACHE) {
+            AUDIO_CACHE.clear();
             currentCacheSizeBytes = 0;
         }
-
-        System.out.println("[CointMusic] Audio cache cleared");
     }
 
     public static String getCacheStats() {
-        synchronized (OGG_CACHE) {
-            return "tracks=" + OGG_CACHE.size()
+        synchronized (AUDIO_CACHE) {
+            return "tracks=" + AUDIO_CACHE.size()
                     + ", size=" + currentCacheSizeBytes / 1024 + " KB"
                     + ", maxTracks=" + MAX_CACHED_TRACKS
                     + ", maxSize=" + MAX_CACHE_SIZE_BYTES / 1024 / 1024 + " MB";
@@ -283,8 +464,6 @@ public final class CointRadioPlayer {
         int safePercent = Math.max(0, Math.min(100, percent));
         setVolume(safePercent / 100.0f);
         saveVolumePercent(safePercent);
-
-        System.out.println("[CointMusic] Volume set to " + safePercent + "%");
     }
 
     public static int getVolumePercent() {
@@ -320,8 +499,6 @@ public final class CointRadioPlayer {
             if (sourceId != 0) {
                 AL10.alSourcef(sourceId, AL10.AL_GAIN, volume);
             }
-
-            System.out.println("[CointMusic] Loaded saved volume: " + safePercent + "%");
         } catch (Throwable e) {
             System.out.println("[CointMusic] Failed to load saved volume: " + e.getMessage());
         }
@@ -391,9 +568,7 @@ public final class CointRadioPlayer {
 
         playing = true;
         loading = false;
-        int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
         send(feedback, "§a[CointMusic] Воспроизведение началось.");
-        System.out.println("[CointMusic] Audio started. format=" + format + ", sampleRate=" + sampleRate + ", state=" + state);
     }
 
     private static int getOpenAlFormat(AudioFormat format) {

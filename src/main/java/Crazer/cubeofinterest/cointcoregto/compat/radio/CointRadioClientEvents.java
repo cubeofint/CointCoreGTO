@@ -19,7 +19,5 @@ public final class CointRadioClientEvents {
     public static void onClientLogout(ClientPlayerNetworkEvent.LoggingOut event) {
         CointRadioPlayer.stop();
         CointRadioClientPacketHandler.resetCurrentRadio();
-
-        System.out.println("[CointMusic] Stopped radio because client left the world/server");
     }
 }

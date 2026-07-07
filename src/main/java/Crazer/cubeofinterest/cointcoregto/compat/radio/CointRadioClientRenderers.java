@@ -21,7 +21,5 @@ public final class CointRadioClientRenderers {
                 CointRadioBlocks.COINT_RADIO_BLOCK_ENTITY.get(),
                 CointRadioBlockRenderer::new
         );
-
-        System.out.println("[CointMusic] Radio block renderer registered");
     }
 }

@@ -103,10 +103,12 @@ dependencies {
 
     compileOnly 'net.luckperms:api:5.4'
 
+    minecraftLibrary "javazoom:jlayer:1.0.1"
 
     implementation fg.deobf('curse.maven:architectury-api-419699:5137938')
     implementation fg.deobf('curse.maven:ftb-library-forge-404465:6807424')
     implementation fg.deobf('curse.maven:ftb-essentials-410811:6555287')
+    implementation "javazoom:jlayer:1.0.1"
 
     // Optional Jade integration for dev/build. Do not shade Jade.
     compileOnly fg.deobf('maven.modrinth:jade:11.13.2+forge')
@@ -123,6 +125,7 @@ dependencies {
     // JDA is visible in dev through implementation.extendsFrom(shade),
     // and packed into release jar through shadowJar + relocations.
     shade 'net.dv8tion:JDA:5.0.0'
+    shade "javazoom:jlayer:1.0.1"
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -181,6 +184,7 @@ shadowJar {
     relocate 'org.jetbrains', 'crazer.cubeofinterest.cointcoregto.shadow.jetbrains'
     relocate 'org.intellij', 'crazer.cubeofinterest.cointcoregto.shadow.intellij'
     relocate 'com.sun.jna', 'crazer.cubeofinterest.cointcoregto.shadow.jna'
+    relocate 'javazoom', 'crazer.cubeofinterest.cointcoregto.shadow.javazoom'
 
     mergeServiceFiles()
 }

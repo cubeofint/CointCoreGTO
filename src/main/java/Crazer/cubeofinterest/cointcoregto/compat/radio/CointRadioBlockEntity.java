@@ -64,11 +64,27 @@ public class CointRadioBlockEntity extends BlockEntity {
     }
 
     private static boolean isAllowedCustomUrl(String url) {
-        String lowered = url.toLowerCase(Locale.ROOT);
+        if (url == null || url.isBlank()) {
+            return false;
+        }
 
-        return (lowered.startsWith("http://") || lowered.startsWith("https://"))
-                && lowered.endsWith(".ogg")
-                && url.length() <= 2048;
+        String lowered = url.toLowerCase(Locale.ROOT);
+        String cleanPath = lowered;
+
+        int queryIndex = cleanPath.indexOf('?');
+        if (queryIndex >= 0) {
+            cleanPath = cleanPath.substring(0, queryIndex);
+        }
+
+        return url.length() <= 2048
+                && (lowered.startsWith("http://") || lowered.startsWith("https://"))
+                && (
+                cleanPath.endsWith(".ogg")
+                        || cleanPath.endsWith(".mp3")
+                        || cleanPath.endsWith(".m3u")
+                        || cleanPath.endsWith(".m3u8")
+                        || cleanPath.endsWith(".pls")
+        );
     }
 
     public String getStationId() {

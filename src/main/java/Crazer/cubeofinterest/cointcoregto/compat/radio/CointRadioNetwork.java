@@ -118,10 +118,22 @@ public final class CointRadioNetwork {
         }
 
         String lowered = url.toLowerCase(java.util.Locale.ROOT);
+        String cleanPath = lowered;
+
+        int queryIndex = cleanPath.indexOf('?');
+        if (queryIndex >= 0) {
+            cleanPath = cleanPath.substring(0, queryIndex);
+        }
 
         return url.length() <= 2048
                 && (lowered.startsWith("http://") || lowered.startsWith("https://"))
-                && lowered.endsWith(".ogg");
+                && (
+                cleanPath.endsWith(".ogg")
+                        || cleanPath.endsWith(".mp3")
+                        || cleanPath.endsWith(".m3u")
+                        || cleanPath.endsWith(".m3u8")
+                        || cleanPath.endsWith(".pls")
+        );
     }
 
     private static boolean isValidRadioAccess(ServerPlayer player, BlockPos pos) {
@@ -413,7 +425,7 @@ public final class CointRadioNetwork {
 
                 if (!isAllowedCustomUrl(cleanUrl)) {
                     player.displayClientMessage(
-                            Component.literal("§c[CointMusic] Нужна прямая ссылка на .ogg файл."),
+                            Component.literal("§c[CointMusic] Нужна прямая .ogg/.mp3 ссылка или плейлист .m3u/.pls."),
                             true
                     );
                     return;

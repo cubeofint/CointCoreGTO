@@ -55,7 +55,7 @@ public final class CointRadioClientCommands {
                                 .then(Commands.argument("percent", IntegerArgumentType.integer(0, 100))
                                         .executes(ctx -> {
                                             int percent = IntegerArgumentType.getInteger(ctx, "percent");
-                                            CointRadioPlayer.setVolume(percent / 100.0f);
+                                            CointRadioPlayer.setVolumePercent(percent);
 
                                             ctx.getSource().sendSuccess(
                                                     () -> Component.literal("§a[CointMusic] Громкость: §f" + percent + "%"),
@@ -64,6 +64,7 @@ public final class CointRadioClientCommands {
 
                                             return 1;
                                         })))
+
                         .then(Commands.literal("clearcache")
                                 .executes(ctx -> {
                                     CointRadioPlayer.clearCache();
@@ -75,6 +76,7 @@ public final class CointRadioClientCommands {
 
                                     return 1;
                                 }))
+
                         .then(Commands.literal("cachestats")
                                 .executes(ctx -> {
                                     ctx.getSource().sendSuccess(
@@ -85,7 +87,5 @@ public final class CointRadioClientCommands {
                                     return 1;
                                 }))
         );
-
-        System.out.println("[CointMusic] Client commands registered");
     }
 }

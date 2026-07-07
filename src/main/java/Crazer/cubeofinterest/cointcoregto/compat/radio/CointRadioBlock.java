@@ -49,8 +49,6 @@ public class CointRadioBlock extends BaseEntityBlock {
         return RenderShape.INVISIBLE;
     }
 
-
-
     @Override
     public List<ItemStack> getDrops(BlockState state, LootParams.Builder builder) {
         return List.of(new ItemStack(CointRadioBlocks.COINT_RADIO_ITEM.get()));

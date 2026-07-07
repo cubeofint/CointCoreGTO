@@ -62,7 +62,7 @@ public class CointRadioScreen extends Screen {
 
         this.urlBox.setMaxLength(2048);
         this.urlBox.setValue(customUrl);
-        this.urlBox.setHint(Component.literal("https://example.com/music.ogg"));
+        this.urlBox.setHint(Component.literal("https://example.com/radio.m3u или .mp3/.ogg"));
         this.addRenderableWidget(this.urlBox);
 
         this.addRenderableWidget(
@@ -199,7 +199,7 @@ public class CointRadioScreen extends Screen {
 
         graphics.drawCenteredString(
                 this.font,
-                "Прямая .ogg ссылка:",
+                "Ссылка .mp3/.ogg/.m3u/.pls:",
                 this.width / 2,
                 66,
                 0xAAAAAA

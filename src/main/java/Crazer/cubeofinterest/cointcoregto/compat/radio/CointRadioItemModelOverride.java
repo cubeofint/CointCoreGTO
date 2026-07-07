@@ -33,7 +33,5 @@ public final class CointRadioItemModelOverride {
         }
 
         event.getModels().put(radioItemModel, vanillaModel);
-
-        System.out.println("[CointMusic] Radio item model replaced with vanilla note_block model");
     }
 }
