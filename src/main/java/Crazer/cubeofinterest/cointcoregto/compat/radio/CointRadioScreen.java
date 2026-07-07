@@ -62,7 +62,7 @@ public class CointRadioScreen extends Screen {
 
         this.urlBox.setMaxLength(2048);
         this.urlBox.setValue(customUrl);
-        this.urlBox.setHint(Component.literal("https://example.com/radio.m3u или .mp3/.ogg"));
+        this.urlBox.setHint(Component.literal("https://radio.example.com/stream"));
         this.addRenderableWidget(this.urlBox);
 
         this.addRenderableWidget(
@@ -128,28 +128,34 @@ public class CointRadioScreen extends Screen {
         int stationStartY = startY + 136;
 
         for (int i = 0; i < stations.size(); i++) {
-            String stationId = stations.get(i);
+            String stationEntry = stations.get(i);
+            String stationId = stationIdFromEntry(stationEntry);
+            String stationName = stationNameFromEntry(stationEntry);
 
             Component label;
 
             if (!customUrl.isBlank()) {
-                label = Component.literal("§8" + stationId);
+                label = Component.literal("§8" + stationName);
             } else if (stationId.equalsIgnoreCase(currentStation)) {
-                label = Component.literal("§a▶ " + stationId);
+                label = Component.literal("§a▶ " + stationName);
             } else {
-                label = Component.literal("§f" + stationId);
+                label = Component.literal("§f" + stationName);
             }
 
             int y = stationStartY + i * 24;
 
-            this.addRenderableWidget(
-                    Button.builder(label, button -> {
-                                CointRadioNetwork.sendSelectStationToServer(pos, stationId);
-                                this.onClose();
-                            })
-                            .bounds(this.width / 2 - buttonWidth / 2, y, buttonWidth, buttonHeight)
-                            .build()
-            );
+            Button stationButton = Button.builder(label, button -> {
+                        CointRadioNetwork.sendSelectStationToServer(pos, stationId);
+                        this.onClose();
+                    })
+                    .bounds(this.width / 2 - buttonWidth / 2, y, buttonWidth, buttonHeight)
+                    .build();
+
+            if (!customUrl.isBlank()) {
+                stationButton.active = false;
+            }
+
+            this.addRenderableWidget(stationButton);
         }
 
         this.addRenderableWidget(
@@ -171,7 +177,7 @@ public class CointRadioScreen extends Screen {
                 0xFFFFFF
         );
 
-        String stationText = customUrl.isBlank() ? currentStation : "custom URL";
+        String stationText = customUrl.isBlank() ? getCurrentStationDisplayName() : "custom URL";
 
         graphics.drawCenteredString(
                 this.font,
@@ -199,13 +205,53 @@ public class CointRadioScreen extends Screen {
 
         graphics.drawCenteredString(
                 this.font,
-                "Ссылка .mp3/.ogg/.m3u/.pls:",
+                "Ссылка или online-radio stream:",
                 this.width / 2,
                 66,
                 0xAAAAAA
         );
 
         super.render(graphics, mouseX, mouseY, partialTick);
+    }
+
+    private static String stationIdFromEntry(String entry) {
+        if (entry == null || entry.isBlank()) {
+            return "";
+        }
+
+        int separator = entry.indexOf('\u001F');
+
+        if (separator < 0) {
+            return entry;
+        }
+
+        return entry.substring(0, separator);
+    }
+
+    private static String stationNameFromEntry(String entry) {
+        if (entry == null || entry.isBlank()) {
+            return "";
+        }
+
+        int separator = entry.indexOf('\u001F');
+
+        if (separator < 0 || separator >= entry.length() - 1) {
+            return entry;
+        }
+
+        return entry.substring(separator + 1);
+    }
+
+    private String getCurrentStationDisplayName() {
+        for (String stationEntry : stations) {
+            String stationId = stationIdFromEntry(stationEntry);
+
+            if (stationId.equalsIgnoreCase(currentStation)) {
+                return stationNameFromEntry(stationEntry);
+            }
+        }
+
+        return currentStation;
     }
 
     @Override

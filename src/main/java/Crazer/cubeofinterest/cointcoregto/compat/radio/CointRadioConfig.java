@@ -139,6 +139,16 @@ public final class CointRadioConfig {
         return result;
     }
 
+    public static List<String> getStationScreenEntries() {
+        List<String> result = new ArrayList<>();
+
+        for (RadioStation station : getStationData().values()) {
+            result.add(station.id() + "\u001F" + station.name());
+        }
+
+        return result;
+    }
+
     public static String getOnMessage(String stationId) {
         String displayName = getStationName(stationId);
 

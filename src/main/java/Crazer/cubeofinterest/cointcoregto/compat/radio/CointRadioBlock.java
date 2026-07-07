@@ -131,7 +131,7 @@ public class CointRadioBlock extends BaseEntityBlock {
             CointRadioNetwork.sendOpenScreen(
                     serverPlayer,
                     pos,
-                    CointRadioConfig.getStationIds(),
+                    CointRadioConfig.getStationScreenEntries(),
                     radio.getStationId(),
                     radio.isActive(),
                     radio.getRadius(),
