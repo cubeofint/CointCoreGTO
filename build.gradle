@@ -73,21 +73,21 @@ repositories {
     }
 
     maven {
-        name = "luckperms"
-        url = "https://repo.lucko.me/"
+        name = 'luckperms'
+        url = 'https://repo.lucko.me/'
     }
 
     maven {
-        name = "CurseMaven"
-        url = "https://cursemaven.com"
+        name = 'CurseMaven'
+        url = 'https://cursemaven.com'
         content {
-            includeGroup "curse.maven"
+            includeGroup 'curse.maven'
         }
     }
 
     maven {
-        name = "Modrinth"
-        url = "https://api.modrinth.com/maven"
+        name = 'Modrinth'
+        url = 'https://api.modrinth.com/maven'
     }
 
     mavenCentral()
@@ -95,6 +95,7 @@ repositories {
 
 configurations {
     shade
+    implementation.extendsFrom(shade)
 }
 
 dependencies {
@@ -102,18 +103,17 @@ dependencies {
 
     compileOnly 'net.luckperms:api:5.4'
 
-    implementation fg.deobf("curse.maven:architectury-api-419699:5137938")
-    implementation fg.deobf("curse.maven:ftb-library-forge-404465:6807424")
-    implementation fg.deobf("curse.maven:ftb-essentials-410811:6555287")
+
+    implementation fg.deobf('curse.maven:architectury-api-419699:5137938')
+    implementation fg.deobf('curse.maven:ftb-library-forge-404465:6807424')
+    implementation fg.deobf('curse.maven:ftb-essentials-410811:6555287')
 
     // Optional Jade integration for dev/build. Do not shade Jade.
-    compileOnly fg.deobf("maven.modrinth:jade:11.13.2+forge")
-    runtimeOnly fg.deobf("maven.modrinth:jade:11.13.2+forge")
+    compileOnly fg.deobf('maven.modrinth:jade:11.13.2+forge')
+    runtimeOnly fg.deobf('maven.modrinth:jade:11.13.2+forge')
 
-    // Needed so runClient/runServer in dev can see JDA.
-    implementation 'net.dv8tion:JDA:5.0.0'
-
-    // Needed so release jar contains relocated JDA.
+    // JDA is visible in dev through implementation.extendsFrom(shade),
+    // and packed into release jar through shadowJar + relocations.
     shade 'net.dv8tion:JDA:5.0.0'
 }
 
@@ -160,6 +160,19 @@ shadowJar {
     exclude 'META-INF/INDEX.LIST'
     exclude 'module-info.class'
     exclude 'META-INF/versions/**'
+
+    relocate 'net.dv8tion.jda', 'crazer.cubeofinterest.cointcoregto.shadow.jda'
+    relocate 'okhttp3', 'crazer.cubeofinterest.cointcoregto.shadow.okhttp3'
+    relocate 'okio', 'crazer.cubeofinterest.cointcoregto.shadow.okio'
+    relocate 'kotlin', 'crazer.cubeofinterest.cointcoregto.shadow.kotlin'
+    relocate 'kotlinx', 'crazer.cubeofinterest.cointcoregto.shadow.kotlinx'
+    relocate 'org.slf4j', 'crazer.cubeofinterest.cointcoregto.shadow.slf4j'
+    relocate 'com.neovisionaries', 'crazer.cubeofinterest.cointcoregto.shadow.neovisionaries'
+    relocate 'com.fasterxml', 'crazer.cubeofinterest.cointcoregto.shadow.fasterxml'
+    relocate 'gnu.trove', 'crazer.cubeofinterest.cointcoregto.shadow.trove'
+    relocate 'org.jetbrains', 'crazer.cubeofinterest.cointcoregto.shadow.jetbrains'
+    relocate 'org.intellij', 'crazer.cubeofinterest.cointcoregto.shadow.intellij'
+    relocate 'com.sun.jna', 'crazer.cubeofinterest.cointcoregto.shadow.jna'
 
     mergeServiceFiles()
 }

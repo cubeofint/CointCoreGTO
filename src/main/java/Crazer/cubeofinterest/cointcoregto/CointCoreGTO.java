@@ -3462,7 +3462,7 @@ public class CointCoreGTO {
         return false;
     }
 
-    private static boolean hasPermissionNode(ServerPlayer player, String permission) {
+    public static boolean hasPermissionNode(ServerPlayer player, String permission) {
         try {
             LuckPerms luckPerms = LuckPermsProvider.get();
             User user = luckPerms.getPlayerAdapter(ServerPlayer.class).getUser(player);

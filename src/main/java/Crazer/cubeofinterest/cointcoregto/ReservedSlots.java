@@ -7,69 +7,109 @@ import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
-import java.util.UUID;
-
-@Mod.EventBusSubscriber(modid = CointCoreGTO.MODID)
+@Mod.EventBusSubscriber(
+        modid = CointCoreGTO.MODID,
+        bus = Mod.EventBusSubscriber.Bus.FORGE
+)
 public final class ReservedSlots {
     private ReservedSlots() {
     }
 
     @SubscribeEvent
-    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
+    public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
         if (!(event.getEntity() instanceof ServerPlayer player)) {
             return;
         }
 
         MinecraftServer server = player.getServer();
+
         if (server == null) {
             return;
         }
 
-        int publicSlots = CointCoreGTO.RESERVED_PUBLIC_SLOTS.get();
-        int totalSlots = CointCoreGTO.RESERVED_TOTAL_SLOTS.get();
-        String permission = CointCoreGTO.RESERVED_PERMISSION.get();
+        int publicSlots = getPublicSlots();
+        int totalSlots = getTotalSlots();
 
-        int online = server.getPlayerList().getPlayerCount();
-
-        if (online > totalSlots) {
-            player.connection.disconnect(Component.literal(CointCoreGTO.RESERVED_FULL_MESSAGE.get()));
+        if (publicSlots <= 0 || totalSlots <= 0) {
             return;
         }
 
+        int online = server.getPlayerList().getPlayerCount();
+
+        // Игрок уже вошёл, поэтому 51-й игрок даст online == 51.
         if (online <= publicSlots) {
             return;
         }
 
-        if (!hasPermission(player, permission)) {
-            player.connection.disconnect(Component.literal(CointCoreGTO.RESERVED_NO_PERMISSION_MESSAGE.get()));
+        if (online > totalSlots) {
+            player.connection.disconnect(Component.literal(getFullMessage()));
+            return;
+        }
+
+        if (!hasReservedSlotPermission(player)) {
+            player.connection.disconnect(Component.literal(getNoPermissionMessage()));
         }
     }
 
-    private static boolean hasPermission(ServerPlayer player, String permission) {
-        try {
-            Class<?> providerClass = Class.forName("net.luckperms.api.LuckPermsProvider");
+    public static int getPublicSlotsForDisplay(int originalMaxPlayers) {
+        int publicSlots = getPublicSlots();
 
-            Object luckPerms = providerClass.getMethod("get").invoke(null);
-            Object userManager = luckPerms.getClass().getMethod("getUserManager").invoke(luckPerms);
-            Object user = userManager.getClass()
-                    .getMethod("getUser", UUID.class)
-                    .invoke(userManager, player.getUUID());
-
-            if (user != null) {
-                Object cachedData = user.getClass().getMethod("getCachedData").invoke(user);
-                Object permissionData = cachedData.getClass().getMethod("getPermissionData").invoke(cachedData);
-                Object result = permissionData.getClass()
-                        .getMethod("checkPermission", String.class)
-                        .invoke(permissionData, permission);
-                Object booleanResult = result.getClass().getMethod("asBoolean").invoke(result);
-
-                return (boolean) booleanResult;
-            }
-        } catch (Throwable ignored) {
-            // LuckPerms отсутствует или недоступен.
+        if (publicSlots <= 0) {
+            return originalMaxPlayers;
         }
 
-        // OP тоже может заходить в резервные слоты.
-        return player.hasPermissions(2);
+        return publicSlots;
+    }
+
+    private static boolean hasReservedSlotPermission(ServerPlayer player) {
+        if (player == null) {
+            return false;
+        }
+
+        if (player.hasPermissions(2)) {
+            return true;
+        }
+
+        return CointCoreGTO.hasPermissionNode(player, getPermission());
+    }
+
+    private static int getPublicSlots() {
+        try {
+            return CointCoreGTO.RESERVED_PUBLIC_SLOTS.get();
+        } catch (Throwable ignored) {
+            return 50;
+        }
+    }
+
+    private static int getTotalSlots() {
+        try {
+            return CointCoreGTO.RESERVED_TOTAL_SLOTS.get();
+        } catch (Throwable ignored) {
+            return 75;
+        }
+    }
+
+    private static String getPermission() {
+        try {
+            return CointCoreGTO.RESERVED_PERMISSION.get();
+        } catch (Throwable ignored) {
+            return "cubechatjoinfull";
+        }
+    }
+
+    private static String getFullMessage() {
+        try {
+            return CointCoreGTO.RESERVED_FULL_MESSAGE.get();
+        } catch (Throwable ignored) {
+            return "Сервер заполнен.";
+        }
+    }
+
+    private static String getNoPermissionMessage() {
+        try {
+            return CointCoreGTO.RESERVED_NO_PERMISSION_MESSAGE.get();
+        } catch (Throwable ignored) {
+            return "Сервер заполнен. Резервные слоты доступны только администрации и донатерам.";
+        }
     }
 }
