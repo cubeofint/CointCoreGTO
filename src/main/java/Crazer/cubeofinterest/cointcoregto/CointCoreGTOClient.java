@@ -6,9 +6,11 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.ChatComponent;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
+import net.minecraft.client.resources.sounds.SoundInstance;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.util.RandomSource;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientChatReceivedEvent;
 import net.minecraftforge.client.event.ScreenEvent;
@@ -45,9 +47,10 @@ public class CointCoreGTOClient {
     private static final ButtonArea localButton = new ButtonArea();
     private static final ButtonArea globalButton = new ButtonArea();
     private static final ButtonArea privateButton = new ButtonArea();
+
     private static long lastChatButtonClickMillis = 0L;
+
     private static final ResourceLocation MENTION_SOUND_ID = new ResourceLocation(CointCoreGTO.MODID, "mention");
-    private static final SoundEvent MENTION_SOUND_EVENT = SoundEvent.createVariableRangeEvent(MENTION_SOUND_ID);
     private static final long MENTION_SOUND_COOLDOWN_MILLIS = 1500L;
 
     private static long lastMentionSoundMillis = 0L;
@@ -102,7 +105,9 @@ public class CointCoreGTOClient {
             return;
         }
 
-        boolean privateMessage = cleanText.contains("[PM]") || cleanText.contains("[ЛС]") || cleanText.toLowerCase(java.util.Locale.ROOT).contains("private");
+        boolean privateMessage = cleanText.contains("[PM]")
+                || cleanText.contains("[ЛС]")
+                || cleanText.toLowerCase(java.util.Locale.ROOT).contains("private");
 
         String messageBody = getMessageBodyAfterColon(cleanText);
         boolean mentionedByName = containsIgnoreCase(messageBody, playerName);
@@ -127,9 +132,21 @@ public class CointCoreGTOClient {
         if (minecraft == null || minecraft.getSoundManager() == null) {
             return;
         }
-
         minecraft.getSoundManager().play(
-                SimpleSoundInstance.forUI(MENTION_SOUND_EVENT, 1.0F, 0.85F)
+                new SimpleSoundInstance(
+                        MENTION_SOUND_ID,
+                        SoundSource.MASTER,
+                        1.0F,
+                        0.85F,
+                        RandomSource.create(),
+                        false,
+                        0,
+                        SoundInstance.Attenuation.NONE,
+                        0.0D,
+                        0.0D,
+                        0.0D,
+                        true
+                )
         );
     }
 

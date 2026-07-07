@@ -22,9 +22,11 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Mod.EventBusSubscriber(
         modid = CointCoreGTO.MODID,
@@ -41,12 +43,13 @@ public final class CointCoreGTOItemIconOverlay {
     private static final int ICON_X_OFFSET = -10;
     private static final int ICON_Y_OFFSET = -9;
 
-    private static final long CLOSED_CHAT_VISIBLE_MILLIS = 10_000L;
+    private static final long CLOSED_CHAT_VISIBLE_MILLIS = 9_000L;
     private static final long CLOSED_CHAT_SEEN_CLEANUP_MILLIS = 30_000L;
     private static final int CLOSED_CHAT_MAX_LINES = 10;
 
     private static final Map<String, CachedIcon> ITEM_CACHE = new HashMap<>();
     private static final Map<String, Long> CLOSED_CHAT_LINE_FIRST_SEEN = new HashMap<>();
+    private static final Set<String> CLOSED_CHAT_EXPIRED_LINES = new HashSet<>();
 
     private CointCoreGTOItemIconOverlay() {
     }
@@ -60,6 +63,12 @@ public final class CointCoreGTOItemIconOverlay {
     }
 
     public static void clearIcons() {
+        synchronized (ITEM_CACHE) {
+            ITEM_CACHE.clear();
+        }
+
+        CLOSED_CHAT_LINE_FIRST_SEEN.clear();
+        CLOSED_CHAT_EXPIRED_LINES.clear();
     }
 
     public static void clearAllIconCache() {
@@ -196,11 +205,6 @@ public final class CointCoreGTOItemIconOverlay {
         if (cleanLine.isBlank()) {
             return null;
         }
-
-        /*
-         * Нормальный случай:
-         * предмет полностью находится в одной видимой строке: [Предмет]
-         */
         ArrayList<String> bracketTokens = extractBracketTokens(cleanLine);
 
         for (int i = bracketTokens.size() - 1; i >= 0; i--) {
@@ -222,15 +226,6 @@ public final class CointCoreGTOItemIconOverlay {
                 }
             }
         }
-
-        /*
-         * Длинные названия Minecraft переносит на несколько строк.
-         * В первой строке может быть только начало:
-         * [Очень длинное название предмета...
-         *
-         * Рисуем иконку только на первой строке, где реально есть открывающая '['.
-         * На строках-продолжениях без '[' иконку не рисуем.
-         */
         return findWrappedItemStartForLine(lineText);
     }
 
@@ -339,20 +334,32 @@ public final class CointCoreGTOItemIconOverlay {
             return false;
         }
 
-        long now = System.currentTimeMillis();
         String key = normalize(lineText);
 
-        synchronized (CLOSED_CHAT_LINE_FIRST_SEEN) {
-            Long firstSeen = CLOSED_CHAT_LINE_FIRST_SEEN.get(key);
-
-            if (firstSeen == null) {
-                CLOSED_CHAT_LINE_FIRST_SEEN.put(key, now);
-                cleanupClosedChatSeenLines(now);
-                return true;
-            }
-
-            return now - firstSeen < CLOSED_CHAT_VISIBLE_MILLIS;
+        if (key.isBlank()) {
+            return false;
         }
+
+        long now = System.currentTimeMillis();
+
+        if (CLOSED_CHAT_EXPIRED_LINES.contains(key)) {
+            return false;
+        }
+
+        Long firstSeen = CLOSED_CHAT_LINE_FIRST_SEEN.get(key);
+
+        if (firstSeen == null) {
+            CLOSED_CHAT_LINE_FIRST_SEEN.put(key, now);
+            return true;
+        }
+
+        if (now - firstSeen > CLOSED_CHAT_VISIBLE_MILLIS) {
+            CLOSED_CHAT_LINE_FIRST_SEEN.remove(key);
+            CLOSED_CHAT_EXPIRED_LINES.add(key);
+            return false;
+        }
+
+        return true;
     }
 
     private static void cleanupClosedChatSeenLines(long now) {
