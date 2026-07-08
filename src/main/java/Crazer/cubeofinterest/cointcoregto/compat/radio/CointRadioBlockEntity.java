@@ -2,6 +2,8 @@ package Crazer.cubeofinterest.cointcoregto.compat.radio;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.server.level.ServerLevel;
@@ -26,7 +28,9 @@ public class CointRadioBlockEntity extends BlockEntity {
     private String customUrl = "";
     private int radius = clampRadius(CointRadioConfig.getRadius());
     private int tickCounter = 0;
+
     private final Set<UUID> listeners = new HashSet<>();
+    private final Set<BlockPos> speakers = new HashSet<>();
 
     public CointRadioBlockEntity(BlockPos pos, BlockState state) {
         super(CointRadioBlocks.COINT_RADIO_BLOCK_ENTITY.get(), pos, state);
@@ -56,6 +60,15 @@ public class CointRadioBlockEntity extends BlockEntity {
         }
 
         return name;
+    }
+
+    public int getSpeakerCount() {
+        cleanupMissingSpeakers();
+        return speakers.size();
+    }
+
+    public Set<BlockPos> getSpeakersView() {
+        return Set.copyOf(speakers);
     }
 
     public void setCustomUrl(String customUrl) {
@@ -242,10 +255,84 @@ public class CointRadioBlockEntity extends BlockEntity {
         setChanged();
         syncToClient();
 
-        refreshListenersAfterRadiusChange();
+        refreshListenersAfterCoverageChange();
     }
 
-    private void refreshListenersAfterRadiusChange() {
+    public void increaseRadius() {
+        setRadius(getRadius() + 1);
+    }
+
+    public void decreaseRadius() {
+        setRadius(getRadius() - 1);
+    }
+
+    private static int clampRadius(int value) {
+        if (value < 0) {
+            return 0;
+        }
+
+        return Math.min(value, 32);
+    }
+
+    public void addSpeaker(BlockPos speakerPos) {
+        if (speakerPos == null) {
+            return;
+        }
+
+        if (speakers.add(speakerPos.immutable())) {
+            setChanged();
+            syncToClient();
+            refreshListenersAfterCoverageChange();
+        }
+    }
+
+    public void removeSpeaker(BlockPos speakerPos) {
+        if (speakerPos == null) {
+            return;
+        }
+
+        if (speakers.remove(speakerPos)) {
+            setChanged();
+            syncToClient();
+            refreshListenersAfterCoverageChange();
+        }
+    }
+
+    private void cleanupMissingSpeakers() {
+        if (!(level instanceof ServerLevel serverLevel)) {
+            return;
+        }
+
+        boolean changed = false;
+
+        for (BlockPos speakerPos : new HashSet<>(speakers)) {
+            if (!serverLevel.isLoaded(speakerPos)) {
+                continue;
+            }
+
+            BlockEntity blockEntity = serverLevel.getBlockEntity(speakerPos);
+
+            if (!(blockEntity instanceof CointSpeakerBlockEntity speaker)) {
+                speakers.remove(speakerPos);
+                changed = true;
+                continue;
+            }
+
+            BlockPos linkedRadio = speaker.getRadioPos();
+
+            if (linkedRadio == null || !linkedRadio.equals(worldPosition)) {
+                speakers.remove(speakerPos);
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            setChanged();
+            syncToClient();
+        }
+    }
+
+    private void refreshListenersAfterCoverageChange() {
         if (!active) {
             return;
         }
@@ -255,7 +342,6 @@ public class CointRadioBlockEntity extends BlockEntity {
         }
 
         String radioId = getRadioId();
-
         Set<UUID> nearbyNow = new HashSet<>();
 
         for (ServerPlayer player : getNearbyPlayers(serverLevel)) {
@@ -281,22 +367,6 @@ public class CointRadioBlockEntity extends BlockEntity {
 
         listeners.clear();
         listeners.addAll(nearbyNow);
-    }
-
-    public void increaseRadius() {
-        setRadius(getRadius() + 1);
-    }
-
-    public void decreaseRadius() {
-        setRadius(getRadius() - 1);
-    }
-
-    private static int clampRadius(int value) {
-        if (value < 0) {
-            return 0;
-        }
-
-        return Math.min(value, 32);
     }
 
     public void setActive(boolean active) {
@@ -428,23 +498,71 @@ public class CointRadioBlockEntity extends BlockEntity {
             return List.of();
         }
 
-        AABB box = new AABB(worldPosition).inflate(radius);
+        cleanupMissingSpeakers();
 
-        return serverLevel.getEntitiesOfClass(ServerPlayer.class, box);
+        Set<ServerPlayer> result = new HashSet<>();
+
+        addPlayersAround(serverLevel, worldPosition, radius, result);
+
+        for (BlockPos speakerPos : new HashSet<>(speakers)) {
+            if (!serverLevel.isLoaded(speakerPos)) {
+                continue;
+            }
+
+            BlockEntity blockEntity = serverLevel.getBlockEntity(speakerPos);
+
+            if (!(blockEntity instanceof CointSpeakerBlockEntity speaker)) {
+                continue;
+            }
+
+            BlockPos linkedRadio = speaker.getRadioPos();
+
+            if (linkedRadio == null || !linkedRadio.equals(worldPosition)) {
+                continue;
+            }
+
+            addPlayersAround(serverLevel, speakerPos, radius, result);
+        }
+
+        return List.copyOf(result);
+    }
+
+    private static void addPlayersAround(
+            ServerLevel serverLevel,
+            BlockPos center,
+            int radius,
+            Set<ServerPlayer> result
+    ) {
+        AABB box = new AABB(center).inflate(radius);
+        result.addAll(serverLevel.getEntitiesOfClass(ServerPlayer.class, box));
     }
 
     @Override
     protected void saveAdditional(CompoundTag tag) {
         super.saveAdditional(tag);
+
         tag.putString("StationId", getStationId());
         tag.putBoolean("Active", active);
         tag.putString("CustomUrl", getCustomUrl());
         tag.putInt("Radius", getRadius());
+
+        ListTag speakersTag = new ListTag();
+
+        for (BlockPos speakerPos : speakers) {
+            CompoundTag speakerTag = new CompoundTag();
+            speakerTag.putInt("X", speakerPos.getX());
+            speakerTag.putInt("Y", speakerPos.getY());
+            speakerTag.putInt("Z", speakerPos.getZ());
+            speakersTag.add(speakerTag);
+        }
+
+        tag.put("Speakers", speakersTag);
     }
 
     @Override
     public void load(CompoundTag tag) {
         super.load(tag);
+
         stationId = tag.getString("StationId");
         active = tag.getBoolean("Active");
         customUrl = tag.getString("CustomUrl");
@@ -453,6 +571,22 @@ public class CointRadioBlockEntity extends BlockEntity {
             radius = clampRadius(tag.getInt("Radius"));
         } else {
             radius = clampRadius(CointRadioConfig.getRadius());
+        }
+
+        speakers.clear();
+
+        if (tag.contains("Speakers", Tag.TAG_LIST)) {
+            ListTag speakersTag = tag.getList("Speakers", Tag.TAG_COMPOUND);
+
+            for (int i = 0; i < speakersTag.size(); i++) {
+                CompoundTag speakerTag = speakersTag.getCompound(i);
+
+                speakers.add(new BlockPos(
+                        speakerTag.getInt("X"),
+                        speakerTag.getInt("Y"),
+                        speakerTag.getInt("Z")
+                ));
+            }
         }
     }
 
@@ -504,6 +638,7 @@ public class CointRadioBlockEntity extends BlockEntity {
         tag.putString("CustomUrl", getCustomUrl());
         tag.putString("StationName", CointRadioConfig.getStationName(getStationId()));
         tag.putInt("Radius", getRadius());
+        tag.putInt("SpeakerCount", speakers.size());
 
         return tag;
     }

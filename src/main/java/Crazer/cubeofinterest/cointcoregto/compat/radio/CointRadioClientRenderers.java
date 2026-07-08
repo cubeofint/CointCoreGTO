@@ -16,10 +16,6 @@ public final class CointRadioClientRenderers {
     }
 
     @SubscribeEvent
-    public static void registerRenderers(EntityRenderersEvent.RegisterRenderers event) {
-        event.registerBlockEntityRenderer(
-                CointRadioBlocks.COINT_RADIO_BLOCK_ENTITY.get(),
-                CointRadioBlockRenderer::new
-        );
+    public static void onRegisterRenderers(EntityRenderersEvent.RegisterRenderers event) {
     }
 }

@@ -31,10 +31,26 @@ public final class CointRadioCraftEvents {
             return;
         }
 
-        if (!held.is(Items.JUKEBOX)) {
+        if (held.is(Items.JUKEBOX)) {
+            craftRadio(event, player, held);
             return;
         }
 
+        if (held.is(Items.NOTE_BLOCK)) {
+            craftSpeaker(event, player, held);
+            return;
+        }
+
+        if (held.is(Items.COMPASS)) {
+            craftTuner(event, player, held);
+        }
+    }
+
+    private static void craftRadio(
+            PlayerInteractEvent.RightClickItem event,
+            Player player,
+            ItemStack held
+    ) {
         if (player.level().isClientSide) {
             event.setCanceled(true);
             return;
@@ -44,7 +60,7 @@ public final class CointRadioCraftEvents {
             return;
         }
 
-        if (!hasRequiredItems(player)) {
+        if (!hasItems(player, Items.NOTE_BLOCK, Items.REDSTONE)) {
             serverPlayer.displayClientMessage(
                     Component.literal("§c[CointMusic] Для создания радио нужны: проигрыватель, нотный блок и редстоун."),
                     true
@@ -59,11 +75,7 @@ public final class CointRadioCraftEvents {
             removeOne(player, Items.REDSTONE);
         }
 
-        ItemStack radioStack = new ItemStack(CointRadioBlocks.COINT_RADIO_ITEM.get());
-
-        if (!player.getInventory().add(radioStack)) {
-            player.drop(radioStack, false);
-        }
+        give(player, new ItemStack(CointRadioBlocks.COINT_RADIO_ITEM.get()));
 
         serverPlayer.displayClientMessage(
                 Component.literal("§a[CointMusic] Радио создано."),
@@ -73,13 +85,96 @@ public final class CointRadioCraftEvents {
         event.setCanceled(true);
     }
 
-    private static boolean hasRequiredItems(Player player) {
+    private static void craftSpeaker(
+            PlayerInteractEvent.RightClickItem event,
+            Player player,
+            ItemStack held
+    ) {
+        if (player.level().isClientSide) {
+            event.setCanceled(true);
+            return;
+        }
+
+        if (!(player instanceof ServerPlayer serverPlayer)) {
+            return;
+        }
+
+        if (!hasItems(player, Items.IRON_INGOT, Items.REDSTONE)) {
+            serverPlayer.displayClientMessage(
+                    Component.literal("§c[CointMusic] Для создания динамика нужны: нотный блок, железный слиток и редстоун."),
+                    true
+            );
+            event.setCanceled(true);
+            return;
+        }
+
+        if (!player.getAbilities().instabuild) {
+            held.shrink(1);
+            removeOne(player, Items.IRON_INGOT);
+            removeOne(player, Items.REDSTONE);
+        }
+
+        give(player, new ItemStack(CointRadioBlocks.COINT_SPEAKER_ITEM.get()));
+
+        serverPlayer.displayClientMessage(
+                Component.literal("§a[CointMusic] Динамик создан."),
+                true
+        );
+
+        event.setCanceled(true);
+    }
+
+    private static void craftTuner(
+            PlayerInteractEvent.RightClickItem event,
+            Player player,
+            ItemStack held
+    ) {
+        if (player.level().isClientSide) {
+            event.setCanceled(true);
+            return;
+        }
+
+        if (!(player instanceof ServerPlayer serverPlayer)) {
+            return;
+        }
+
+        if (!hasItems(player, Items.IRON_INGOT, Items.REDSTONE)) {
+            serverPlayer.displayClientMessage(
+                    Component.literal("§c[CointMusic] Для создания тюнера нужны: компас, железный слиток и редстоун."),
+                    true
+            );
+            event.setCanceled(true);
+            return;
+        }
+
+        if (!player.getAbilities().instabuild) {
+            held.shrink(1);
+            removeOne(player, Items.IRON_INGOT);
+            removeOne(player, Items.REDSTONE);
+        }
+
+        give(player, new ItemStack(CointRadioBlocks.COINT_TUNER_ITEM.get()));
+
+        serverPlayer.displayClientMessage(
+                Component.literal("§a[CointMusic] Тюнер создан."),
+                true
+        );
+
+        event.setCanceled(true);
+    }
+
+    private static boolean hasItems(Player player, Item... items) {
         if (player.getAbilities().instabuild) {
             return true;
         }
 
-        return hasItem(player, Items.NOTE_BLOCK)
-                && hasItem(player, Items.REDSTONE);
+        for (Item item : items) {
+            if (!hasItem(player, item)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static boolean hasItem(Player player, Item item) {
@@ -106,6 +201,12 @@ public final class CointRadioCraftEvents {
                 stack.shrink(1);
                 return;
             }
+        }
+    }
+
+    private static void give(Player player, ItemStack stack) {
+        if (!player.getInventory().add(stack)) {
+            player.drop(stack, false);
         }
     }
 }

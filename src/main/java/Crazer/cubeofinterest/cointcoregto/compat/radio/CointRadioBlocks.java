@@ -22,6 +22,9 @@ public final class CointRadioBlocks {
     public static final RegistryObject<Block> COINT_RADIO =
             BLOCKS.register("coint_radio", CointRadioBlock::new);
 
+    public static final RegistryObject<Block> COINT_SPEAKER =
+            BLOCKS.register("coint_speaker", CointSpeakerBlock::new);
+
     public static final RegistryObject<Item> COINT_RADIO_ITEM =
             ITEMS.register(
                     "coint_radio",
@@ -31,11 +34,34 @@ public final class CointRadioBlocks {
                     )
             );
 
+    public static final RegistryObject<Item> COINT_SPEAKER_ITEM =
+            ITEMS.register(
+                    "coint_speaker",
+                    () -> new CointSpeakerBlockItem(
+                            COINT_SPEAKER.get(),
+                            new Item.Properties()
+                    )
+            );
+
+    public static final RegistryObject<Item> COINT_TUNER_ITEM =
+            ITEMS.register(
+                    "coint_tuner",
+                    () -> new CointTunerItem(new Item.Properties().stacksTo(1))
+            );
+
     public static final RegistryObject<BlockEntityType<CointRadioBlockEntity>> COINT_RADIO_BLOCK_ENTITY =
             BLOCK_ENTITIES.register(
                     "coint_radio",
                     () -> BlockEntityType.Builder
                             .of(CointRadioBlockEntity::new, COINT_RADIO.get())
+                            .build(null)
+            );
+
+    public static final RegistryObject<BlockEntityType<CointSpeakerBlockEntity>> COINT_SPEAKER_BLOCK_ENTITY =
+            BLOCK_ENTITIES.register(
+                    "coint_speaker",
+                    () -> BlockEntityType.Builder
+                            .of(CointSpeakerBlockEntity::new, COINT_SPEAKER.get())
                             .build(null)
             );
 

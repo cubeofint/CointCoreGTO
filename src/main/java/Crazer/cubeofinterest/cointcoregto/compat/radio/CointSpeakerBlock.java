@@ -17,31 +17,18 @@ import net.minecraft.world.level.block.entity.BlockEntityTicker;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.StateDefinition;
-import net.minecraft.world.level.block.state.properties.BooleanProperty;
 import net.minecraft.world.level.storage.loot.LootParams;
 import net.minecraft.world.phys.BlockHitResult;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
 
-public class CointRadioBlock extends BaseEntityBlock {
-    public static final BooleanProperty ACTIVE = BooleanProperty.create("active");
-
-    public CointRadioBlock() {
+public class CointSpeakerBlock extends BaseEntityBlock {
+    public CointSpeakerBlock() {
         super(BlockBehaviour.Properties.of()
-                .strength(2.0f, 6.0f)
-                .sound(SoundType.METAL)
+                .strength(1.5f, 4.0f)
+                .sound(SoundType.WOOD)
         );
-
-        this.registerDefaultState(this.stateDefinition.any()
-                .setValue(ACTIVE, false)
-        );
-    }
-
-    @Override
-    protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {
-        builder.add(ACTIVE);
     }
 
     @Override
@@ -51,7 +38,7 @@ public class CointRadioBlock extends BaseEntityBlock {
 
     @Override
     public List<ItemStack> getDrops(BlockState state, LootParams.Builder builder) {
-        return List.of(new ItemStack(CointRadioBlocks.COINT_RADIO_ITEM.get()));
+        return List.of(new ItemStack(CointRadioBlocks.COINT_SPEAKER_ITEM.get()));
     }
 
     @Override
@@ -60,13 +47,13 @@ public class CointRadioBlock extends BaseEntityBlock {
             BlockPos pos,
             BlockState state
     ) {
-        return new ItemStack(CointRadioBlocks.COINT_RADIO_ITEM.get());
+        return new ItemStack(CointRadioBlocks.COINT_SPEAKER_ITEM.get());
     }
 
     @Nullable
     @Override
     public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
-        return new CointRadioBlockEntity(pos, state);
+        return new CointSpeakerBlockEntity(pos, state);
     }
 
     @Nullable
@@ -76,15 +63,7 @@ public class CointRadioBlock extends BaseEntityBlock {
             BlockState state,
             BlockEntityType<T> type
     ) {
-        if (level.isClientSide) {
-            return null;
-        }
-
-        return createTickerHelper(
-                type,
-                CointRadioBlocks.COINT_RADIO_BLOCK_ENTITY.get(),
-                CointRadioBlockEntity::serverTick
-        );
+        return null;
     }
 
     @Override
@@ -104,55 +83,26 @@ public class CointRadioBlock extends BaseEntityBlock {
             return InteractionResult.SUCCESS;
         }
 
-        if (!CointRadioProtection.canUseRadio(serverPlayer, pos, hand)) {
-            CointRadioProtection.denyWithMessage(serverPlayer);
-            return InteractionResult.SUCCESS;
-        }
+        ItemStack held = player.getItemInHand(hand);
 
-        if (!CointRadioConfig.isEnabled()) {
-            player.displayClientMessage(
-                    Component.literal("§c[CointMusic] Радио отключено в конфиге."),
-                    true
-            );
-            return InteractionResult.SUCCESS;
+        if (held.getItem() instanceof CointTunerItem) {
+            return InteractionResult.PASS;
         }
 
         BlockEntity blockEntity = level.getBlockEntity(pos);
 
-        if (!(blockEntity instanceof CointRadioBlockEntity radio)) {
-            player.displayClientMessage(
-                    Component.literal("§c[CointMusic] Ошибка радио."),
-                    true
-            );
+        if (!(blockEntity instanceof CointSpeakerBlockEntity speaker)) {
             return InteractionResult.SUCCESS;
         }
 
-        if (player.isShiftKeyDown()) {
-            CointRadioNetwork.sendOpenScreen(
-                    serverPlayer,
-                    pos,
-                    CointRadioConfig.getStationScreenEntries(),
-                    radio.getStationId(),
-                    radio.isActive(),
-                    radio.getRadius(),
-                    radio.getCustomUrl()
-            );
-
-            return InteractionResult.SUCCESS;
-        }
-
-        if (!radio.isActive()) {
-            radio.setActive(true);
-
-            player.displayClientMessage(
-                    Component.literal("§a[CointMusic] Радио включено. Радиус: §f" + radio.getRadius()),
+        if (speaker.hasRadio()) {
+            serverPlayer.displayClientMessage(
+                    Component.literal("§e[CointMusic] Динамик связан с радио: §f" + speaker.getRadioPosText()),
                     true
             );
         } else {
-            String nextStation = radio.nextStation();
-
-            player.displayClientMessage(
-                    Component.literal("§e[CointMusic] Следующая станция: §f" + CointRadioConfig.getStationName(nextStation)),
+            serverPlayer.displayClientMessage(
+                    Component.literal("§7[CointMusic] Динамик не связан. Используй тюнер."),
                     true
             );
         }
@@ -171,8 +121,8 @@ public class CointRadioBlock extends BaseEntityBlock {
         if (!state.is(newState.getBlock())) {
             BlockEntity blockEntity = level.getBlockEntity(pos);
 
-            if (blockEntity instanceof CointRadioBlockEntity radio) {
-                radio.stopAllListeners();
+            if (blockEntity instanceof CointSpeakerBlockEntity speaker) {
+                speaker.unlinkFromRadio();
             }
         }
 
@@ -181,6 +131,6 @@ public class CointRadioBlock extends BaseEntityBlock {
 
     @Override
     public net.minecraft.network.chat.MutableComponent getName() {
-        return net.minecraft.network.chat.Component.literal("Радио");
+        return Component.literal("Динамик");
     }
 }
