@@ -392,6 +392,124 @@ public final class CointRadioPlayer {
         });
     }
 
+    public static void playLiveMp3Stream(InputStream input, Consumer<Component> feedback, String label) {
+        loadSavedVolume();
+
+        if (input == null) {
+            send(feedback, "§c[CointMusic] Пустой live-поток.");
+            return;
+        }
+
+        final int generation = ++playGeneration;
+        loading = true;
+
+        Minecraft minecraft = Minecraft.getInstance();
+
+        if (minecraft == null) {
+            loading = false;
+            closeQuietly(input);
+            return;
+        }
+
+        minecraft.execute(() -> {
+            stopNowOnClientThread(false);
+
+            if (generation != playGeneration) {
+                loading = false;
+                closeQuietly(input);
+                return;
+            }
+
+            streaming = true;
+            clearOpenAlError();
+
+            sourceId = AL10.alGenSources();
+            checkOpenAl("packet stream alGenSources", feedback);
+
+            AL10.alSourcef(sourceId, AL10.AL_GAIN, volume);
+            AL10.alSourcef(sourceId, AL10.AL_PITCH, 1.0f);
+            AL10.alSourcei(sourceId, AL10.AL_SOURCE_RELATIVE, AL10.AL_TRUE);
+            AL10.alSource3f(sourceId, AL10.AL_POSITION, 0.0f, 0.0f, 0.0f);
+            AL10.alSource3f(sourceId, AL10.AL_VELOCITY, 0.0f, 0.0f, 0.0f);
+
+            playing = true;
+            loading = false;
+
+            String cleanLabel = label == null || label.isBlank() ? "Live stream" : label;
+            send(feedback, "§a[CointMusic] Live-radio запущено: §f" + cleanLabel);
+
+            streamingFuture = CompletableFuture.runAsync(() -> runMp3StreamInputLoop(input, feedback, generation));
+        });
+    }
+
+    private static void runMp3StreamInputLoop(InputStream input, Consumer<Component> feedback, int generation) {
+        try (InputStream rawInput = new BufferedInputStream(input)) {
+            Bitstream bitstream = new Bitstream(rawInput);
+            Decoder decoder = new Decoder();
+
+            int sampleRate = 44100;
+            int channels = 2;
+
+            while (streaming && generation == playGeneration) {
+                ByteArrayOutputStream pcmOutput = new ByteArrayOutputStream();
+                int frames = 0;
+
+                while (streaming && generation == playGeneration && frames < 24) {
+                    Header header = bitstream.readFrame();
+
+                    if (header == null) {
+                        break;
+                    }
+
+                    SampleBuffer output = (SampleBuffer) decoder.decodeFrame(header, bitstream);
+
+                    sampleRate = output.getSampleFrequency();
+                    channels = output.getChannelCount();
+
+                    short[] samples = output.getBuffer();
+                    int length = output.getBufferLength();
+
+                    for (int i = 0; i < length; i++) {
+                        short sample = samples[i];
+
+                        pcmOutput.write(sample & 0xFF);
+                        pcmOutput.write((sample >> 8) & 0xFF);
+                    }
+
+                    bitstream.closeFrame();
+                    frames++;
+                }
+
+                if (generation != playGeneration) {
+                    break;
+                }
+
+                byte[] pcmBytes = pcmOutput.toByteArray();
+
+                if (pcmBytes.length <= 0) {
+                    break;
+                }
+
+                queueStreamChunk(pcmBytes, sampleRate, channels, feedback, generation);
+                waitForStreamQueueRoom(generation);
+            }
+        } catch (Throwable e) {
+            Minecraft minecraft = Minecraft.getInstance();
+
+            if (minecraft != null) {
+                minecraft.execute(() -> {
+                    if (streaming && generation == playGeneration) {
+                        loading = false;
+                        playing = false;
+                        send(feedback, "§c[CointMusic] Live-radio остановилось: §f" + e.getMessage());
+                        System.out.println("[CointMusic] Packet stream error: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                });
+            }
+        }
+    }
+
     private static URLConnection openRadioConnection(String url) throws Exception {
         URLConnection connection = new URL(url).openConnection();
 
@@ -938,6 +1056,15 @@ public final class CointRadioPlayer {
         try {
             if (buffer != null && buffer.isDirect()) {
                 MemoryUtil.memFree(buffer);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void closeQuietly(InputStream input) {
+        try {
+            if (input != null) {
+                input.close();
             }
         } catch (Throwable ignored) {
         }

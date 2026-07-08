@@ -56,6 +56,10 @@ public final class CointRadioNetwork {
         CHANNEL.registerMessage(nextId(), YouTubeTransferChunkPacket.class, YouTubeTransferChunkPacket::encode, YouTubeTransferChunkPacket::decode, YouTubeTransferChunkPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
         CHANNEL.registerMessage(nextId(), YouTubeTransferFinishPacket.class, YouTubeTransferFinishPacket::encode, YouTubeTransferFinishPacket::decode, YouTubeTransferFinishPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
         CHANNEL.registerMessage(nextId(), YouTubeTransferFailPacket.class, YouTubeTransferFailPacket::encode, YouTubeTransferFailPacket::decode, YouTubeTransferFailPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), LiveTranscodeStartPacket.class, LiveTranscodeStartPacket::encode, LiveTranscodeStartPacket::decode, LiveTranscodeStartPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), LiveTranscodeChunkPacket.class, LiveTranscodeChunkPacket::encode, LiveTranscodeChunkPacket::decode, LiveTranscodeChunkPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), LiveTranscodeStopPacket.class, LiveTranscodeStopPacket::encode, LiveTranscodeStopPacket::decode, LiveTranscodeStopPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), LiveTranscodeFailPacket.class, LiveTranscodeFailPacket::encode, LiveTranscodeFailPacket::decode, LiveTranscodeFailPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
     }
 
     public static void sendPlay(ServerPlayer player, String url, String stationId, String radioId) {
@@ -63,6 +67,7 @@ public final class CointRadioNetwork {
     }
 
     public static void sendStop(ServerPlayer player, String radioId) {
+        CointRadioTranscodeSession.stop(player.getUUID(), radioId);
         CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), new StopRadioPacket(radioId));
     }
 
@@ -117,6 +122,22 @@ public final class CointRadioNetwork {
         CHANNEL.sendToServer(new SetRadiusPacket(pos, radius));
     }
 
+    public static void sendTranscodedRadio(ServerPlayer player, String url, String station, String radioId) {
+        CointRadioTranscodeSession.start(player, url, station, radioId);
+    }
+
+    static void sendLiveTranscodeStart(ServerPlayer player, UUID transferId, String station, String radioId) {
+        CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), new LiveTranscodeStartPacket(transferId, station, radioId));
+    }
+
+    static void sendLiveTranscodeChunk(ServerPlayer player, UUID transferId, byte[] data) {
+        CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), new LiveTranscodeChunkPacket(transferId, data));
+    }
+
+    static void sendLiveTranscodeFail(ServerPlayer player, UUID transferId, String message) {
+        CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), new LiveTranscodeFailPacket(transferId, message == null ? "" : message));
+    }
+
     public static void sendYouTubeCachedMp3(
             ServerPlayer player,
             String youtubeUrl,
@@ -124,6 +145,16 @@ public final class CointRadioNetwork {
             String radioId,
             long startOffsetMs
     ) {
+        if (!CointRadioExternalTools.isYouTubeAvailable()) {
+            UUID transferId = UUID.randomUUID();
+
+            CHANNEL.send(
+                    PacketDistributor.PLAYER.with(() -> player),
+                    new YouTubeTransferFailPacket(transferId, "YouTube-ссылки не поддерживаются серверным радио.")
+            );
+            return;
+        }
+
         CompletableFuture.runAsync(() -> {
             UUID transferId = UUID.randomUUID();
 
@@ -177,8 +208,7 @@ public final class CointRadioNetwork {
                     );
                 });
             } catch (Throwable throwable) {
-                System.out.println("[CointMusic] Failed to send YouTube MP3: " + throwable.getMessage());
-                throwable.printStackTrace();
+                System.out.println("[CointMusic] Failed to send YouTube MP3: " + shortError(throwable));
 
                 if (player.getServer() != null) {
                     player.getServer().execute(() -> CHANNEL.send(
@@ -192,6 +222,30 @@ public final class CointRadioNetwork {
 
     private static int nextId() {
         return packetId++;
+    }
+
+    private static String shortError(Throwable throwable) {
+        if (throwable == null) {
+            return "unknown error";
+        }
+
+        String message = throwable.getMessage();
+
+        if (message == null || message.isBlank()) {
+            return throwable.getClass().getSimpleName();
+        }
+
+        int lineBreak = message.indexOf('\n');
+
+        if (lineBreak >= 0) {
+            message = message.substring(0, lineBreak);
+        }
+
+        if (message.length() > 240) {
+            message = message.substring(0, 240) + "...";
+        }
+
+        return message;
     }
 
     private static boolean isAllowedCustomUrl(String url) {
@@ -228,6 +282,94 @@ public final class CointRadioNetwork {
         }
 
         return true;
+    }
+
+    public record LiveTranscodeStartPacket(UUID transferId, String station, String radioId) {
+        public static void encode(LiveTranscodeStartPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeUUID(packet.transferId);
+            buffer.writeUtf(packet.station == null ? "" : packet.station, 256);
+            buffer.writeUtf(packet.radioId == null ? "" : packet.radioId, 256);
+        }
+
+        public static LiveTranscodeStartPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new LiveTranscodeStartPacket(buffer.readUUID(), buffer.readUtf(256), buffer.readUtf(256));
+        }
+
+        public static void handle(LiveTranscodeStartPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                    Dist.CLIENT,
+                    () -> () -> CointRadioClientLiveStream.start(packet.transferId, packet.station, packet.radioId)
+            ));
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record LiveTranscodeChunkPacket(UUID transferId, byte[] data) {
+        public static void encode(LiveTranscodeChunkPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeUUID(packet.transferId);
+            buffer.writeByteArray(packet.data == null ? new byte[0] : packet.data);
+        }
+
+        public static LiveTranscodeChunkPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new LiveTranscodeChunkPacket(buffer.readUUID(), buffer.readByteArray(32768));
+        }
+
+        public static void handle(LiveTranscodeChunkPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                    Dist.CLIENT,
+                    () -> () -> CointRadioClientLiveStream.chunk(packet.transferId, packet.data)
+            ));
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record LiveTranscodeStopPacket(UUID transferId) {
+        public static void encode(LiveTranscodeStopPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeUUID(packet.transferId);
+        }
+
+        public static LiveTranscodeStopPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new LiveTranscodeStopPacket(buffer.readUUID());
+        }
+
+        public static void handle(LiveTranscodeStopPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                    Dist.CLIENT,
+                    () -> () -> CointRadioClientLiveStream.stop(packet.transferId)
+            ));
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record LiveTranscodeFailPacket(UUID transferId, String message) {
+        public static void encode(LiveTranscodeFailPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeUUID(packet.transferId);
+            buffer.writeUtf(packet.message == null ? "" : packet.message, 32767);
+        }
+
+        public static LiveTranscodeFailPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new LiveTranscodeFailPacket(buffer.readUUID(), buffer.readUtf(32767));
+        }
+
+        public static void handle(LiveTranscodeFailPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                    Dist.CLIENT,
+                    () -> () -> CointRadioClientLiveStream.fail(packet.transferId, packet.message)
+            ));
+
+            context.setPacketHandled(true);
+        }
     }
 
     public record YouTubeTransferStartPacket(
@@ -383,6 +525,7 @@ public final class CointRadioNetwork {
                     Dist.CLIENT,
                     () -> () -> {
                         CointYouTubeClientTransfer.cancelRadio(packet.radioId);
+                        CointRadioClientLiveStream.cancelRadio(packet.radioId);
                         CointRadioClientPacketHandler.stop(packet.radioId);
                     }
             ));
@@ -618,6 +761,22 @@ public final class CointRadioNetwork {
                 }
 
                 radio.setCustomUrl(cleanUrl);
+
+                if (CointYouTubeResolver.isYouTubeUrl(cleanUrl) && !CointRadioExternalTools.isYouTubeAvailable()) {
+                    player.displayClientMessage(
+                            Component.literal("§e[CointMusic] URL сохранён, но YouTube-ссылки не поддерживаются серверным радио."),
+                            true
+                    );
+                    return;
+                }
+
+                if (CointRadioTranscodeSession.shouldTranscode(cleanUrl) && !CointRadioExternalTools.isFfmpegAvailable()) {
+                    player.displayClientMessage(
+                            Component.literal("§e[CointMusic] URL сохранён, но этот формат ссылки не поддерживается серверным радио."),
+                            true
+                    );
+                    return;
+                }
 
                 player.displayClientMessage(
                         Component.literal("§a[CointMusic] URL радио применён."),

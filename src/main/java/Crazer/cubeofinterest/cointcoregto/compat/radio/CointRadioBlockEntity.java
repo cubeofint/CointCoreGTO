@@ -481,22 +481,44 @@ public class CointRadioBlockEntity extends BlockEntity {
     }
 
     private void sendPlayToPlayer(ServerPlayer player, String sourceUrl, String station, String radioId) {
-        if (!CointYouTubeResolver.isYouTubeUrl(sourceUrl)) {
-            CointRadioNetwork.sendPlay(player, sourceUrl, station, radioId);
+        if (CointYouTubeResolver.isYouTubeUrl(sourceUrl)) {
+            if (!CointRadioExternalTools.isYouTubeAvailable()) {
+                player.displayClientMessage(
+                        net.minecraft.network.chat.Component.literal(CointRadioExternalTools.getYouTubeDisabledMessage()),
+                        true
+                );
+                return;
+            }
+
+            long offsetMs = getYoutubeCurrentOffsetMs(sourceUrl);
+
+            System.out.println("[CointMusic] YouTube URL detected, sending cached MP3 through Minecraft packets. OffsetMs=" + offsetMs);
+
+            CointRadioNetwork.sendYouTubeCachedMp3(
+                    player,
+                    sourceUrl,
+                    station,
+                    radioId,
+                    offsetMs
+            );
             return;
         }
 
-        long offsetMs = getYoutubeCurrentOffsetMs(sourceUrl);
+        if (CointRadioTranscodeSession.shouldTranscode(sourceUrl)) {
+            if (!CointRadioExternalTools.isFfmpegAvailable()) {
+                player.displayClientMessage(
+                        net.minecraft.network.chat.Component.literal(CointRadioExternalTools.getFfmpegDisabledMessage()),
+                        true
+                );
+                return;
+            }
 
-        System.out.println("[CointMusic] YouTube URL detected, sending cached MP3 through Minecraft packets. OffsetMs=" + offsetMs);
+            System.out.println("[CointMusic] Server live transcode detected: " + sourceUrl);
+            CointRadioNetwork.sendTranscodedRadio(player, sourceUrl, station, radioId);
+            return;
+        }
 
-        CointRadioNetwork.sendYouTubeCachedMp3(
-                player,
-                sourceUrl,
-                station,
-                radioId,
-                offsetMs
-        );
+        CointRadioNetwork.sendPlay(player, sourceUrl, station, radioId);
     }
 
     private void startYouTubeResolveIfNeeded(String sourceUrl) {
