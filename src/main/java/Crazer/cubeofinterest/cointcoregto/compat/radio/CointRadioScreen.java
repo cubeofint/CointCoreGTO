@@ -12,6 +12,7 @@ import net.minecraftforge.api.distmarker.OnlyIn;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 @OnlyIn(Dist.CLIENT)
 public class CointRadioScreen extends Screen {
@@ -22,8 +23,17 @@ public class CointRadioScreen extends Screen {
     private int radius;
     private final String customUrl;
 
+    private static final int STATIONS_PER_PAGE = 5;
+
     private int volumePercent;
     private EditBox urlBox;
+    private EditBox searchBox;
+
+    private int stationPage = 0;
+    private final List<Button> stationButtons = new ArrayList<>();
+    private Button prevPageButton;
+    private Button nextPageButton;
+    private Component pageLabel = Component.empty();
 
     public CointRadioScreen(
             BlockPos pos,
@@ -182,38 +192,24 @@ public class CointRadioScreen extends Screen {
                 }
         );
 
-        int stationStartY = startY + 208;
+        this.searchBox = new EditBox(
+                this.font,
+                this.width / 2 - buttonWidth / 2,
+                startY + 208,
+                buttonWidth,
+                buttonHeight,
+                Component.literal("Поиск станции")
+        );
 
-        for (int i = 0; i < stations.size(); i++) {
-            String stationEntry = stations.get(i);
-            String stationId = stationIdFromEntry(stationEntry);
-            String stationName = stationNameFromEntry(stationEntry);
+        this.searchBox.setMaxLength(64);
+        this.searchBox.setHint(Component.literal("Поиск станции..."));
+        this.searchBox.setResponder(value -> {
+            stationPage = 0;
+            rebuildStationButtons();
+        });
+        this.addRenderableWidget(this.searchBox);
 
-            Component label;
-
-            if (!customUrl.isBlank()) {
-                label = Component.literal("§8" + stationName);
-            } else if (stationId.equalsIgnoreCase(currentStation)) {
-                label = Component.literal("§a▶ " + stationName);
-            } else {
-                label = Component.literal("§f" + stationName);
-            }
-
-            int y = stationStartY + i * 24;
-
-            Button stationButton = Button.builder(label, button -> {
-                        CointRadioNetwork.sendSelectStationToServer(pos, stationId);
-                        this.onClose();
-                    })
-                    .bounds(this.width / 2 - buttonWidth / 2, y, buttonWidth, buttonHeight)
-                    .build();
-
-            if (!customUrl.isBlank()) {
-                stationButton.active = false;
-            }
-
-            this.addRenderableWidget(stationButton);
-        }
+        rebuildStationButtons();
 
         this.addRenderableWidget(
                 Button.builder(Component.literal("Закрыть"), button -> this.onClose())
@@ -269,6 +265,136 @@ public class CointRadioScreen extends Screen {
         );
 
         super.render(graphics, mouseX, mouseY, partialTick);
+
+        graphics.drawCenteredString(
+                this.font,
+                pageLabel,
+                this.width / 2,
+                78 + 232 + STATIONS_PER_PAGE * 24 + 9,
+                0xFFFFFF
+        );
+    }
+
+    private void rebuildStationButtons() {
+        for (Button button : stationButtons) {
+            this.removeWidget(button);
+        }
+
+        stationButtons.clear();
+
+        if (prevPageButton != null) {
+            this.removeWidget(prevPageButton);
+            prevPageButton = null;
+        }
+
+        if (nextPageButton != null) {
+            this.removeWidget(nextPageButton);
+            nextPageButton = null;
+        }
+
+        int buttonWidth = 220;
+        int buttonHeight = 20;
+        int startY = 78;
+        int centerX = this.width / 2 - buttonWidth / 2;
+        int stationStartY = startY + 232;
+
+        List<StationEntry> filteredStations = getFilteredStations();
+        int maxPage = Math.max(0, (filteredStations.size() - 1) / STATIONS_PER_PAGE);
+
+        if (stationPage > maxPage) {
+            stationPage = maxPage;
+        }
+
+        if (stationPage < 0) {
+            stationPage = 0;
+        }
+
+        int startIndex = stationPage * STATIONS_PER_PAGE;
+        int endIndex = Math.min(filteredStations.size(), startIndex + STATIONS_PER_PAGE);
+
+        for (int i = startIndex; i < endIndex; i++) {
+            StationEntry stationEntry = filteredStations.get(i);
+            String stationId = stationEntry.id();
+            String stationName = stationEntry.name();
+
+            Component label;
+
+            if (!customUrl.isBlank()) {
+                label = Component.literal("§8" + stationName);
+            } else if (stationId.equalsIgnoreCase(currentStation)) {
+                label = Component.literal("§a▶ " + stationName);
+            } else {
+                label = Component.literal("§f" + stationName);
+            }
+
+            int y = stationStartY + (i - startIndex) * 24;
+
+            Button stationButton = Button.builder(label, button -> {
+                        CointRadioNetwork.sendSelectStationToServer(pos, stationId);
+                        this.onClose();
+                    })
+                    .bounds(centerX, y, buttonWidth, buttonHeight)
+                    .build();
+
+            if (!customUrl.isBlank()) {
+                stationButton.active = false;
+            }
+
+            stationButtons.add(stationButton);
+            this.addRenderableWidget(stationButton);
+        }
+
+        int pageY = stationStartY + STATIONS_PER_PAGE * 24 + 4;
+
+        prevPageButton = Button.builder(Component.literal("§e← Назад"), button -> {
+                    stationPage--;
+                    rebuildStationButtons();
+                })
+                .bounds(centerX, pageY, 82, buttonHeight)
+                .build();
+
+        nextPageButton = Button.builder(Component.literal("§eВперёд →"), button -> {
+                    stationPage++;
+                    rebuildStationButtons();
+                })
+                .bounds(centerX + buttonWidth - 82, pageY, 82, buttonHeight)
+                .build();
+
+        prevPageButton.active = stationPage > 0;
+        nextPageButton.active = stationPage < maxPage;
+
+        pageLabel = Component.literal("Стр. " + (stationPage + 1) + "/" + (maxPage + 1));
+
+        this.addRenderableWidget(prevPageButton);
+        this.addRenderableWidget(nextPageButton);
+    }
+
+    private List<StationEntry> getFilteredStations() {
+        String query = searchBox == null ? "" : searchBox.getValue().trim().toLowerCase(Locale.ROOT);
+        List<StationEntry> result = new ArrayList<>();
+
+        for (String rawEntry : stations) {
+            StationEntry stationEntry = parseStationEntry(rawEntry);
+
+            if (stationEntry.id().isBlank() && stationEntry.name().isBlank()) {
+                continue;
+            }
+
+            if (query.isBlank()
+                    || stationEntry.id().toLowerCase(Locale.ROOT).contains(query)
+                    || stationEntry.name().toLowerCase(Locale.ROOT).contains(query)) {
+                result.add(stationEntry);
+            }
+        }
+
+        return result;
+    }
+
+    private static StationEntry parseStationEntry(String entry) {
+        return new StationEntry(stationIdFromEntry(entry), stationNameFromEntry(entry));
+    }
+
+    private record StationEntry(String id, String name) {
     }
 
     private static String stationIdFromEntry(String entry) {

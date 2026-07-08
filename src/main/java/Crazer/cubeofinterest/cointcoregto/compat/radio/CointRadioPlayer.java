@@ -74,8 +74,10 @@ public final class CointRadioPlayer {
         String cleanUrl = url.trim();
         String lowerUrl = cleanUrl.toLowerCase(Locale.ROOT);
 
-        if (!lowerUrl.startsWith("http://") && !lowerUrl.startsWith("https://")) {
-            send(feedback, "§c[CointMusic] Нужна http/https ссылка.");
+        if (!lowerUrl.startsWith("http://")
+                && !lowerUrl.startsWith("https://")
+                && !lowerUrl.startsWith("file:/")) {
+            send(feedback, "§c[CointMusic] Нужна http/https/file ссылка.");
             return;
         }
 

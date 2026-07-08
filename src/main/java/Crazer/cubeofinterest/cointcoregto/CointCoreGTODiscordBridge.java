@@ -124,6 +124,7 @@ public class CointCoreGTODiscordBridge {
                     }
 
                     startOnlineStatusUpdater();
+                    requestOnlineStatusUpdate();
                 } catch (Exception e) {
                     System.out.println("[CointDiscord] Failed to start Discord bridge: " + e.getMessage());
                 }
@@ -344,6 +345,16 @@ public class CointCoreGTODiscordBridge {
         String finalReplyToMinecraftPlayer = replyToMinecraftPlayer;
 
         server.execute(() -> CointCoreGTO.broadcastDiscordMessage(author, finalMessage, finalReplyToMinecraftPlayer));
+    }
+
+    public static void requestOnlineStatusUpdate() {
+        if (!enabled || !onlineStatusEnabled || jda == null || server == null) {
+            return;
+        }
+
+        Thread thread = new Thread(CointCoreGTODiscordBridge::updateOnlineStatusMessageNow, "CointDiscord-OnlineStatus-Manual");
+        thread.setDaemon(true);
+        thread.start();
     }
 
     private static void startOnlineStatusUpdater() {

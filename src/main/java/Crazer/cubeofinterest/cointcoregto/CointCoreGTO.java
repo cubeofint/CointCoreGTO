@@ -49,6 +49,8 @@ import net.minecraftforge.fml.ModLoadingContext;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.loading.FMLPaths;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
@@ -76,6 +78,11 @@ import java.util.function.Supplier;
 @Mod(CointCoreGTO.MODID)
 public class CointCoreGTO {
     public static final String MODID = "cointcoregto";
+
+    private static final Logger LOCAL_CHAT_LOGGER = LogManager.getLogger("CuBe:LocalChat");
+    private static final Logger GLOBAL_CHAT_LOGGER = LogManager.getLogger("CuBe:GlobalChat");
+    private static final Logger PRIVATE_CHAT_LOGGER = LogManager.getLogger("CuBe:PrivateChat");
+    private static final Logger DISCORD_CHAT_LOGGER = LogManager.getLogger("CuBe:DiscordChat");
 
     private static final String NETWORK_PROTOCOL_VERSION = "1";
     private static final SimpleChannel NETWORK_CHANNEL = NetworkRegistry.newSimpleChannel(
@@ -360,18 +367,21 @@ public class CointCoreGTO {
                 .comment("Radio block radius in blocks.")
                 .defineInRange("radius", 24, 1, 128);
 
-        RADIO_DEFAULT_STATION = builder
-                .comment("Default station id from stations list.")
+        RADIO_DEFAULT_STATION = builder.comment("Default station id from stations list.")
                 .define("default_station", "dorognoe");
 
         RADIO_STATIONS = builder.defineList(
                 "stations",
                 List.of(
                         "dorognoe|Дорожное радио|http://dorognoe.hostingradio.ru:8000/dorognoe",
-                        "groove|SomaFM Groove Salad|https://ice1.somafm.com/groovesalad-128-mp3",
-                        "drone|SomaFM Drone Zone|https://ice1.somafm.com/dronezone-128-mp3",
-                        "testmp3|Тест MP3|https://samplelib.com/lib/preview/mp3/sample-3s.mp3",
-                        "testogg|Тест OGG|https://upload.wikimedia.org/wikipedia/commons/c/c8/Example.ogg"
+                        "europa_plus|Европа Плюс|http://ep128.hostingradio.ru:8030/ep128",
+
+                        "soma_groove|SomaFM Groove Salad|https://somafm.com/groovesalad.pls",
+                        "soma_drone|SomaFM Drone Zone|https://somafm.com/dronezone.pls",
+                        "soma_defcon|SomaFM DEF CON Radio|https://somafm.com/defcon.pls",
+                        "soma_lush|SomaFM Lush|https://somafm.com/lush.pls",
+                        "soma_secret|SomaFM Secret Agent|https://somafm.com/secretagent.pls",
+                        "soma_indiepop|SomaFM Indie Pop Rocks|https://somafm.com/indiepop.pls"
                 ),
                 value -> {
                     if (!(value instanceof String string)) {
@@ -384,8 +394,6 @@ public class CointCoreGTO {
                         return false;
                     }
 
-                    // Старый формат:
-                    // id=https://url
                     if (trimmed.contains("=")) {
                         String[] parts = trimmed.split("=", 2);
 
@@ -394,8 +402,6 @@ public class CointCoreGTO {
                                 && isValidRadioUrl(parts[1].trim());
                     }
 
-                    // Новый формат:
-                    // id|Название|https://url
                     if (trimmed.contains("|")) {
                         String[] parts = trimmed.split("\\|", 3);
 
@@ -583,6 +589,8 @@ public class CointCoreGTO {
         if (SHOW_CHAT_PANEL_ON_JOIN.get()) {
             player.displayClientMessage(Component.literal("§7Откройте чат, чтобы выбрать канал: §f[ALL] §a[L] §6[G] §d[PM]"), true);
         }
+
+        CointCoreGTODiscordProxy.requestOnlineStatusUpdate();
     }
 
     @SubscribeEvent
@@ -595,6 +603,8 @@ public class CointCoreGTO {
         saveLastLocations();
         CHAT_HISTORY.remove(player.getUUID());
         LAST_CHAT_VIEW_SWITCH_MILLIS.remove(player.getUUID());
+
+        CointCoreGTODiscordProxy.requestOnlineStatusUpdate();
     }
 
     private static void removeRootCommand(CommandDispatcher<CommandSourceStack> dispatcher, String commandName) {
@@ -2091,7 +2101,7 @@ public class CointCoreGTO {
             CointCoreGTODiscordProxy.sendToDiscordLog(discordFormatted);
         }
 
-        System.out.println("[LocalChat] " + stripColor(timePrefix(player) + withoutTime));
+        LOCAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
     }
 
     private static void sendGlobalChat(ServerPlayer player, String message) {
@@ -2121,7 +2131,7 @@ public class CointCoreGTO {
             );
         }
 
-        System.out.println("[GlobalChat] " + stripColor(timePrefix(player) + withoutTime));
+        GLOBAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
     }
 
     private static void sendPrivateMessage(ServerPlayer sender, ServerPlayer target, String message) {
@@ -2165,7 +2175,7 @@ public class CointCoreGTO {
             CointCoreGTODiscordProxy.sendToDiscordLog("[PM] " + senderName + " -> " + targetName + ": " + plainMessage);
         }
 
-        System.out.println("[PrivateChat] " + senderName + " -> " + targetName + ": " + plainMessage);
+        PRIVATE_CHAT_LOGGER.info(senderName + " -> " + targetName + ": " + plainMessage);
     }
 
     private static boolean checkItemShareCooldown(ServerPlayer player) {
@@ -2279,7 +2289,7 @@ public class CointCoreGTO {
             CointCoreGTODiscordProxy.sendToDiscordLog(discordFormatted);
         }
 
-        System.out.println("[LocalChat] " + stripColor(timePrefix(player) + withoutTime));
+        LOCAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
     }
 
     private static void sendGlobalItemShare(ServerPlayer player, ItemStack stack, String itemText) {
@@ -2314,7 +2324,7 @@ public class CointCoreGTO {
             );
         }
 
-        System.out.println("[GlobalChat] " + stripColor(timePrefix(player) + withoutTime));
+        GLOBAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
     }
 
     public static void broadcastDiscordMessage(String author, String message, String replyToMinecraftPlayer) {
@@ -2349,7 +2359,7 @@ public class CointCoreGTO {
             sendFilteredChatMessage(target, ChatView.GLOBAL, formatted);
         }
 
-        System.out.println("[DiscordChat] " + safeAuthor + ": " + safeMessage);
+        DISCORD_CHAT_LOGGER.info(safeAuthor + ": " + safeMessage);
     }
 
     private static void mutePlayer(ServerPlayer player, long durationMillis, String reason) {

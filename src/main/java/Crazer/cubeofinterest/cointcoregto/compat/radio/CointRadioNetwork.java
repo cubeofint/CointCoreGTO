@@ -14,9 +14,14 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.PacketDistributor;
 import net.minecraftforge.network.simple.SimpleChannel;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
 public final class CointRadioNetwork {
@@ -47,6 +52,10 @@ public final class CointRadioNetwork {
         CHANNEL.registerMessage(nextId(), NextStationPacket.class, NextStationPacket::encode, NextStationPacket::decode, NextStationPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
         CHANNEL.registerMessage(nextId(), RandomStationPacket.class, RandomStationPacket::encode, RandomStationPacket::decode, RandomStationPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
         CHANNEL.registerMessage(nextId(), SetRadiusPacket.class, SetRadiusPacket::encode, SetRadiusPacket::decode, SetRadiusPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(nextId(), YouTubeTransferStartPacket.class, YouTubeTransferStartPacket::encode, YouTubeTransferStartPacket::decode, YouTubeTransferStartPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), YouTubeTransferChunkPacket.class, YouTubeTransferChunkPacket::encode, YouTubeTransferChunkPacket::decode, YouTubeTransferChunkPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), YouTubeTransferFinishPacket.class, YouTubeTransferFinishPacket::encode, YouTubeTransferFinishPacket::decode, YouTubeTransferFinishPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(nextId(), YouTubeTransferFailPacket.class, YouTubeTransferFailPacket::encode, YouTubeTransferFailPacket::decode, YouTubeTransferFailPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
     }
 
     public static void sendPlay(ServerPlayer player, String url, String stationId, String radioId) {
@@ -108,6 +117,79 @@ public final class CointRadioNetwork {
         CHANNEL.sendToServer(new SetRadiusPacket(pos, radius));
     }
 
+    public static void sendYouTubeCachedMp3(
+            ServerPlayer player,
+            String youtubeUrl,
+            String station,
+            String radioId,
+            long startOffsetMs
+    ) {
+        CompletableFuture.runAsync(() -> {
+            UUID transferId = UUID.randomUUID();
+
+            try {
+                Path mp3 = CointYouTubeCache.getOrCreateCachedMp3(youtubeUrl);
+                byte[] bytes = Files.readAllBytes(mp3);
+
+                if (bytes.length <= 64 * 1024) {
+                    throw new IllegalStateException("Cached MP3 is too small: " + bytes.length);
+                }
+
+                if (player.getServer() == null) {
+                    throw new IllegalStateException("Player server is null");
+                }
+
+                System.out.println("[CointMusic] Sending YouTube MP3 to player: "
+                        + player.getGameProfile().getName()
+                        + ", bytes="
+                        + bytes.length
+                        + ", transfer="
+                        + transferId
+                );
+
+                player.getServer().execute(() -> {
+                    CHANNEL.send(
+                            PacketDistributor.PLAYER.with(() -> player),
+                            new YouTubeTransferStartPacket(
+                                    transferId,
+                                    station,
+                                    radioId,
+                                    bytes.length,
+                                    Math.max(0L, startOffsetMs)
+                            )
+                    );
+
+                    int chunkSize = 24 * 1024;
+
+                    for (int offset = 0; offset < bytes.length; offset += chunkSize) {
+                        int end = Math.min(bytes.length, offset + chunkSize);
+                        byte[] chunk = Arrays.copyOfRange(bytes, offset, end);
+
+                        CHANNEL.send(
+                                PacketDistributor.PLAYER.with(() -> player),
+                                new YouTubeTransferChunkPacket(transferId, chunk)
+                        );
+                    }
+
+                    CHANNEL.send(
+                            PacketDistributor.PLAYER.with(() -> player),
+                            new YouTubeTransferFinishPacket(transferId)
+                    );
+                });
+            } catch (Throwable throwable) {
+                System.out.println("[CointMusic] Failed to send YouTube MP3: " + throwable.getMessage());
+                throwable.printStackTrace();
+
+                if (player.getServer() != null) {
+                    player.getServer().execute(() -> CHANNEL.send(
+                            PacketDistributor.PLAYER.with(() -> player),
+                            new YouTubeTransferFailPacket(transferId, throwable.getMessage())
+                    ));
+                }
+            }
+        });
+    }
+
     private static int nextId() {
         return packetId++;
     }
@@ -148,6 +230,120 @@ public final class CointRadioNetwork {
         return true;
     }
 
+    public record YouTubeTransferStartPacket(
+            UUID transferId,
+            String station,
+            String radioId,
+            int totalBytes,
+            long startOffsetMs
+    ) {
+        public static void encode(YouTubeTransferStartPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeUUID(packet.transferId);
+            buffer.writeUtf(packet.station, 256);
+            buffer.writeUtf(packet.radioId, 256);
+            buffer.writeInt(packet.totalBytes);
+            buffer.writeLong(packet.startOffsetMs);
+        }
+
+        public static YouTubeTransferStartPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new YouTubeTransferStartPacket(
+                    buffer.readUUID(),
+                    buffer.readUtf(256),
+                    buffer.readUtf(256),
+                    buffer.readInt(),
+                    buffer.readLong()
+            );
+        }
+
+        public static void handle(YouTubeTransferStartPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                    Dist.CLIENT,
+                    () -> () -> CointYouTubeClientTransfer.start(
+                            packet.transferId,
+                            packet.station,
+                            packet.radioId,
+                            packet.totalBytes,
+                            packet.startOffsetMs
+                    )
+            ));
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record YouTubeTransferChunkPacket(UUID transferId, byte[] data) {
+        public static void encode(YouTubeTransferChunkPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeUUID(packet.transferId);
+            buffer.writeByteArray(packet.data);
+        }
+
+        public static YouTubeTransferChunkPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new YouTubeTransferChunkPacket(
+                    buffer.readUUID(),
+                    buffer.readByteArray(32768)
+            );
+        }
+
+        public static void handle(YouTubeTransferChunkPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                    Dist.CLIENT,
+                    () -> () -> CointYouTubeClientTransfer.chunk(packet.transferId, packet.data)
+            ));
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record YouTubeTransferFinishPacket(UUID transferId) {
+        public static void encode(YouTubeTransferFinishPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeUUID(packet.transferId);
+        }
+
+        public static YouTubeTransferFinishPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new YouTubeTransferFinishPacket(buffer.readUUID());
+        }
+
+        public static void handle(YouTubeTransferFinishPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                    Dist.CLIENT,
+                    () -> () -> CointYouTubeClientTransfer.finish(packet.transferId)
+            ));
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record YouTubeTransferFailPacket(UUID transferId, String message) {
+        public static void encode(YouTubeTransferFailPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeUUID(packet.transferId);
+            buffer.writeUtf(packet.message == null ? "" : packet.message, 32767);
+        }
+
+        public static YouTubeTransferFailPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new YouTubeTransferFailPacket(
+                    buffer.readUUID(),
+                    buffer.readUtf(32767)
+            );
+        }
+
+        public static void handle(YouTubeTransferFailPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                    Dist.CLIENT,
+                    () -> () -> CointYouTubeClientTransfer.fail(packet.transferId, packet.message)
+            ));
+
+            context.setPacketHandled(true);
+        }
+    }
+
     public record PlayRadioPacket(String url, String stationId, String radioId) {
         public static void encode(PlayRadioPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
             buffer.writeUtf(packet.url, 32767);
@@ -185,7 +381,10 @@ public final class CointRadioNetwork {
 
             context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
                     Dist.CLIENT,
-                    () -> () -> CointRadioClientPacketHandler.stop(packet.radioId)
+                    () -> () -> {
+                        CointYouTubeClientTransfer.cancelRadio(packet.radioId);
+                        CointRadioClientPacketHandler.stop(packet.radioId);
+                    }
             ));
 
             context.setPacketHandled(true);

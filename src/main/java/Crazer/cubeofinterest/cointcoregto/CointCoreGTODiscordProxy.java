@@ -119,6 +119,10 @@ public final class CointCoreGTODiscordProxy {
         );
     }
 
+    public static void requestOnlineStatusUpdate() {
+        invokeServerOnly("requestOnlineStatusUpdate", new Class<?>[]{});
+    }
+
     private static void invokeServerOnly(String methodName, Class<?>[] parameterTypes, Object... args) {
         if (FMLEnvironment.dist != Dist.DEDICATED_SERVER) {
             return;

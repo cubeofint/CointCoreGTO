@@ -31,6 +31,12 @@ public class CointRadioBlockEntity extends BlockEntity {
 
     private final Set<UUID> listeners = new HashSet<>();
     private final Set<BlockPos> speakers = new HashSet<>();
+    private int playGeneration = 0;
+    private boolean resolvingYouTube = false;
+    private String resolvedSourceUrl = "";
+    private String resolvedDirectUrl = "";
+    private long youtubeResumeOffsetMs = 0L;
+    private long youtubePlaybackStartedAtMs = 0L;
 
     public CointRadioBlockEntity(BlockPos pos, BlockState state) {
         super(CointRadioBlocks.COINT_RADIO_BLOCK_ENTITY.get(), pos, state);
@@ -62,6 +68,50 @@ public class CointRadioBlockEntity extends BlockEntity {
         return name;
     }
 
+    private void resetYoutubeResume() {
+        youtubeResumeOffsetMs = 0L;
+        youtubePlaybackStartedAtMs = 0L;
+    }
+
+    private long getYoutubeCurrentOffsetMs(String sourceUrl) {
+        if (!CointYouTubeResolver.isYouTubeUrl(sourceUrl)) {
+            return 0L;
+        }
+
+        if (!active || youtubePlaybackStartedAtMs <= 0L) {
+            return Math.max(0L, youtubeResumeOffsetMs);
+        }
+
+        long now = System.currentTimeMillis();
+        long elapsed = now - youtubePlaybackStartedAtMs;
+
+        return Math.max(0L, youtubeResumeOffsetMs + elapsed);
+    }
+
+    private void markYoutubePlaybackStarted(String sourceUrl) {
+        if (!CointYouTubeResolver.isYouTubeUrl(sourceUrl)) {
+            return;
+        }
+
+        youtubePlaybackStartedAtMs = System.currentTimeMillis();
+    }
+
+    private void markYoutubePlaybackStopped(String sourceUrl) {
+        if (!CointYouTubeResolver.isYouTubeUrl(sourceUrl)) {
+            return;
+        }
+
+        if (youtubePlaybackStartedAtMs <= 0L) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        long elapsed = now - youtubePlaybackStartedAtMs;
+
+        youtubeResumeOffsetMs = Math.max(0L, youtubeResumeOffsetMs + elapsed);
+        youtubePlaybackStartedAtMs = 0L;
+    }
+
     public int getSpeakerCount() {
         cleanupMissingSpeakers();
         return speakers.size();
@@ -79,6 +129,8 @@ public class CointRadioBlockEntity extends BlockEntity {
         }
 
         this.customUrl = clean;
+        invalidateResolvedUrl();
+        resetYoutubeResume();
         setChanged();
         syncToClient();
 
@@ -89,6 +141,8 @@ public class CointRadioBlockEntity extends BlockEntity {
 
     public void clearCustomUrl() {
         this.customUrl = "";
+        invalidateResolvedUrl();
+        resetYoutubeResume();
         setChanged();
         syncToClient();
 
@@ -136,6 +190,8 @@ public class CointRadioBlockEntity extends BlockEntity {
 
         this.stationId = normalized;
         this.stationDisplayName = CointRadioConfig.getStationName(normalized);
+        invalidateResolvedUrl();
+        resetYoutubeResume();
 
         setChanged();
         syncToClient();
@@ -349,7 +405,7 @@ public class CointRadioBlockEntity extends BlockEntity {
             nearbyNow.add(uuid);
 
             if (!listeners.contains(uuid)) {
-                CointRadioNetwork.sendPlay(player, getStationUrl(), getStationId(), radioId);
+                sendPlayToPlayer(player, getStationUrl(), getStationId(), radioId);
             }
         }
 
@@ -370,7 +426,22 @@ public class CointRadioBlockEntity extends BlockEntity {
     }
 
     public void setActive(boolean active) {
+        if (this.active == active) {
+            return;
+        }
+
+        String sourceUrlBeforeChange = getStationUrl();
+
+        if (!active) {
+            markYoutubePlaybackStopped(sourceUrlBeforeChange);
+        }
+
         this.active = active;
+
+        if (active) {
+            markYoutubePlaybackStarted(sourceUrlBeforeChange);
+        }
+
         setChanged();
 
         if (level != null) {
@@ -402,6 +473,93 @@ public class CointRadioBlockEntity extends BlockEntity {
         return worldPosition.getX() + "," + worldPosition.getY() + "," + worldPosition.getZ();
     }
 
+    private void invalidateResolvedUrl() {
+        playGeneration++;
+        resolvingYouTube = false;
+        resolvedSourceUrl = "";
+        resolvedDirectUrl = "";
+    }
+
+    private void sendPlayToPlayer(ServerPlayer player, String sourceUrl, String station, String radioId) {
+        if (!CointYouTubeResolver.isYouTubeUrl(sourceUrl)) {
+            CointRadioNetwork.sendPlay(player, sourceUrl, station, radioId);
+            return;
+        }
+
+        long offsetMs = getYoutubeCurrentOffsetMs(sourceUrl);
+
+        System.out.println("[CointMusic] YouTube URL detected, sending cached MP3 through Minecraft packets. OffsetMs=" + offsetMs);
+
+        CointRadioNetwork.sendYouTubeCachedMp3(
+                player,
+                sourceUrl,
+                station,
+                radioId,
+                offsetMs
+        );
+    }
+
+    private void startYouTubeResolveIfNeeded(String sourceUrl) {
+        if (resolvingYouTube) {
+            return;
+        }
+
+        if (!(level instanceof ServerLevel serverLevel)) {
+            return;
+        }
+
+        resolvingYouTube = true;
+
+        int generation = ++playGeneration;
+        BlockPos radioPos = worldPosition.immutable();
+
+        System.out.println("[CointMusic] Resolving YouTube URL...");
+
+        CointYouTubeResolver.resolveAsync(sourceUrl).whenComplete((directUrl, throwable) -> {
+            serverLevel.getServer().execute(() -> {
+                if (!(level instanceof ServerLevel currentServerLevel)) {
+                    return;
+                }
+
+                if (!worldPosition.equals(radioPos)) {
+                    return;
+                }
+
+                if (generation != playGeneration) {
+                    return;
+                }
+
+                resolvingYouTube = false;
+
+                if (throwable != null) {
+                    System.out.println("[CointMusic] YouTube resolve failed: " + throwable.getMessage());
+                    throwable.printStackTrace();
+
+                    for (ServerPlayer player : getNearbyPlayers(currentServerLevel)) {
+                        player.displayClientMessage(
+                                net.minecraft.network.chat.Component.literal("§c[CointMusic] Не удалось запустить YouTube. Проверь yt-dlp на сервере."),
+                                true
+                        );
+                    }
+
+                    return;
+                }
+
+                if (directUrl == null || directUrl.isBlank()) {
+                    System.out.println("[CointMusic] YouTube resolve returned empty URL.");
+                    return;
+                }
+
+                resolvedSourceUrl = sourceUrl;
+                resolvedDirectUrl = directUrl;
+
+                if (active) {
+                    playToNearbyPlayers();
+                }
+            });
+        });
+    }
+
     public void playToNearbyPlayers() {
         if (!(level instanceof ServerLevel serverLevel)) {
             return;
@@ -412,7 +570,7 @@ public class CointRadioBlockEntity extends BlockEntity {
         String radioId = getRadioId();
 
         for (ServerPlayer player : getNearbyPlayers(serverLevel)) {
-            CointRadioNetwork.sendPlay(player, url, station, radioId);
+            sendPlayToPlayer(player, url, station, radioId);
             listeners.add(player.getUUID());
         }
     }
@@ -471,7 +629,7 @@ public class CointRadioBlockEntity extends BlockEntity {
             nearbyNow.add(uuid);
 
             if (!radio.listeners.contains(uuid)) {
-                CointRadioNetwork.sendPlay(player, url, station, radioId);
+                radio.sendPlayToPlayer(player, url, station, radioId);
             }
         }
 
