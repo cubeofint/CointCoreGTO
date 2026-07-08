@@ -46,6 +46,7 @@ public final class CointRadioNetwork {
         CHANNEL.registerMessage(nextId(), ClearCustomUrlPacket.class, ClearCustomUrlPacket::encode, ClearCustomUrlPacket::decode, ClearCustomUrlPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
         CHANNEL.registerMessage(nextId(), NextStationPacket.class, NextStationPacket::encode, NextStationPacket::decode, NextStationPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
         CHANNEL.registerMessage(nextId(), RandomStationPacket.class, RandomStationPacket::encode, RandomStationPacket::decode, RandomStationPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(nextId(), SetRadiusPacket.class, SetRadiusPacket::encode, SetRadiusPacket::decode, SetRadiusPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
     }
 
     public static void sendPlay(ServerPlayer player, String url, String stationId, String radioId) {
@@ -101,6 +102,10 @@ public final class CointRadioNetwork {
 
     public static void sendRandomStationToServer(BlockPos pos) {
         CHANNEL.sendToServer(new RandomStationPacket(pos));
+    }
+
+    public static void sendSetRadiusToServer(BlockPos pos, int radius) {
+        CHANNEL.sendToServer(new SetRadiusPacket(pos, radius));
     }
 
     private static int nextId() {
@@ -359,7 +364,7 @@ public final class CointRadioNetwork {
 
                 if (radio.isActive()) {
                     player.displayClientMessage(
-                            Component.literal("§a[CointMusic] Радио включено. Радиус: §f" + CointRadioConfig.getRadius()),
+                            Component.literal("§a[CointMusic] Радио включено. Радиус: §f" + radio.getRadius()),
                             true
                     );
                 } else {
@@ -528,6 +533,44 @@ public final class CointRadioNetwork {
 
                 player.displayClientMessage(
                         Component.literal("§d[CointMusic] Случайная станция: §f" + CointRadioConfig.getStationName(randomStation)),
+                        true
+                );
+            });
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record SetRadiusPacket(BlockPos pos, int radius) {
+        public static void encode(SetRadiusPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeBlockPos(packet.pos);
+            buffer.writeVarInt(packet.radius);
+        }
+
+        public static SetRadiusPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new SetRadiusPacket(buffer.readBlockPos(), buffer.readVarInt());
+        }
+
+        public static void handle(SetRadiusPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> {
+                ServerPlayer player = context.getSender();
+
+                if (!isValidRadioAccess(player, packet.pos)) {
+                    return;
+                }
+
+                BlockEntity blockEntity = player.level().getBlockEntity(packet.pos);
+
+                if (!(blockEntity instanceof CointRadioBlockEntity radio)) {
+                    return;
+                }
+
+                radio.setRadius(packet.radius);
+
+                player.displayClientMessage(
+                        Component.literal("§e[CointMusic] Радиус радио: §f" + radio.getRadius()),
                         true
                 );
             });

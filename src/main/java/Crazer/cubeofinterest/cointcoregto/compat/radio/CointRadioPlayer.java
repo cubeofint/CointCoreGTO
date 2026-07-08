@@ -46,9 +46,11 @@ public final class CointRadioPlayer {
 
     private static final Map<String, byte[]> AUDIO_CACHE = new LinkedHashMap<>(16, 0.75f, true);
     private static int currentCacheSizeBytes = 0;
+
     private static volatile boolean streaming = false;
     private static CompletableFuture<?> streamingFuture;
     private static final List<Integer> STREAM_BUFFERS = new ArrayList<>();
+    private static volatile int playGeneration = 0;
 
     private CointRadioPlayer() {
     }
@@ -76,10 +78,8 @@ public final class CointRadioPlayer {
             send(feedback, "§c[CointMusic] Нужна http/https ссылка.");
             return;
         }
-        if (loading) {
-            send(feedback, "§e[CointMusic] Трек уже загружается, подожди секунду.");
-            return;
-        }
+
+        final int generation = ++playGeneration;
 
         loading = true;
 
@@ -93,17 +93,34 @@ public final class CointRadioPlayer {
             try {
                 String resolvedUrl = resolvePlaylistIfNeeded(cleanUrl);
 
+                if (generation != playGeneration) {
+                    Minecraft.getInstance().execute(() -> loading = false);
+                    return;
+                }
+
                 if (shouldUseStreaming(resolvedUrl)) {
-                    startMp3Stream(resolvedUrl, feedback);
+                    startMp3Stream(resolvedUrl, feedback, generation);
                     return;
                 }
 
                 byte[] audioBytes = getOrDownloadAudio(resolvedUrl);
+
+                if (generation != playGeneration) {
+                    Minecraft.getInstance().execute(() -> loading = false);
+                    return;
+                }
+
                 DecodedAudio decodedAudio = decodeAudio(resolvedUrl, audioBytes);
 
                 Minecraft.getInstance().execute(() -> {
                     try {
-                        startDecodedAudio(decodedAudio.pcmBuffer(), decodedAudio.format(), feedback);
+                        if (generation != playGeneration) {
+                            loading = false;
+                            safeFree(decodedAudio.pcmBuffer());
+                            return;
+                        }
+
+                        startDecodedAudio(decodedAudio.pcmBuffer(), decodedAudio.format(), feedback, generation);
                     } catch (Throwable e) {
                         loading = false;
                         safeFree(decodedAudio.pcmBuffer());
@@ -113,8 +130,11 @@ public final class CointRadioPlayer {
                 });
             } catch (Throwable e) {
                 Minecraft.getInstance().execute(() -> {
-                    loading = false;
-                    send(feedback, "§c[CointMusic] Ошибка загрузки трека. Проверь прямую .ogg/.mp3 ссылку или не кликай слишком быстро.");
+                    if (generation == playGeneration) {
+                        loading = false;
+                        send(feedback, "§c[CointMusic] Ошибка загрузки трека. Проверь ссылку или не кликай слишком быстро.");
+                    }
+
                     System.out.println("[CointMusic] Failed to load URL: " + cleanUrl);
                     System.out.println("[CointMusic] Load error: " + e.getMessage());
                     e.printStackTrace();
@@ -147,23 +167,12 @@ public final class CointRadioPlayer {
         }
 
         int queryIndex = url.indexOf('?');
+
         if (queryIndex >= 0) {
             return url.substring(0, queryIndex);
         }
 
         return url;
-    }
-
-    private static boolean isSupportedAudioOrPlaylistUrl(String cleanPath) {
-        if (cleanPath == null || cleanPath.isBlank()) {
-            return false;
-        }
-
-        return cleanPath.endsWith(".ogg")
-                || cleanPath.endsWith(".mp3")
-                || cleanPath.endsWith(".m3u")
-                || cleanPath.endsWith(".m3u8")
-                || cleanPath.endsWith(".pls");
     }
 
     private static boolean isPlaylistUrl(String url) {
@@ -338,7 +347,7 @@ public final class CointRadioPlayer {
         }
     }
 
-    private static void startMp3Stream(String streamUrl, Consumer<Component> feedback) {
+    private static void startMp3Stream(String streamUrl, Consumer<Component> feedback, int generation) {
         Minecraft minecraft = Minecraft.getInstance();
 
         if (minecraft == null) {
@@ -347,7 +356,12 @@ public final class CointRadioPlayer {
         }
 
         minecraft.execute(() -> {
-            stopNowOnClientThread();
+            stopNowOnClientThread(false);
+
+            if (generation != playGeneration) {
+                loading = false;
+                return;
+            }
 
             streaming = true;
 
@@ -367,11 +381,11 @@ public final class CointRadioPlayer {
 
             send(feedback, "§a[CointMusic] Онлайн-радио запущено.");
 
-            streamingFuture = CompletableFuture.runAsync(() -> runMp3StreamLoop(streamUrl, feedback));
+            streamingFuture = CompletableFuture.runAsync(() -> runMp3StreamLoop(streamUrl, feedback, generation));
         });
     }
 
-    private static void runMp3StreamLoop(String streamUrl, Consumer<Component> feedback) {
+    private static void runMp3StreamLoop(String streamUrl, Consumer<Component> feedback, int generation) {
         try {
             URLConnection connection = new URL(streamUrl).openConnection();
             connection.setConnectTimeout(10_000);
@@ -386,11 +400,11 @@ public final class CointRadioPlayer {
                 int sampleRate = 44100;
                 int channels = 2;
 
-                while (streaming) {
+                while (streaming && generation == playGeneration) {
                     ByteArrayOutputStream pcmOutput = new ByteArrayOutputStream();
                     int frames = 0;
 
-                    while (streaming && frames < 24) {
+                    while (streaming && generation == playGeneration && frames < 24) {
                         Header header = bitstream.readFrame();
 
                         if (header == null) {
@@ -416,14 +430,18 @@ public final class CointRadioPlayer {
                         frames++;
                     }
 
+                    if (generation != playGeneration) {
+                        break;
+                    }
+
                     byte[] pcmBytes = pcmOutput.toByteArray();
 
                     if (pcmBytes.length <= 0) {
                         break;
                     }
 
-                    queueStreamChunk(pcmBytes, sampleRate, channels, feedback);
-                    waitForStreamQueueRoom();
+                    queueStreamChunk(pcmBytes, sampleRate, channels, feedback, generation);
+                    waitForStreamQueueRoom(generation);
                 }
             }
         } catch (Throwable e) {
@@ -431,7 +449,7 @@ public final class CointRadioPlayer {
 
             if (minecraft != null) {
                 minecraft.execute(() -> {
-                    if (streaming) {
+                    if (streaming && generation == playGeneration) {
                         loading = false;
                         playing = false;
                         send(feedback, "§c[CointMusic] Онлайн-радио остановилось: §f" + e.getMessage());
@@ -443,7 +461,13 @@ public final class CointRadioPlayer {
         }
     }
 
-    private static void queueStreamChunk(byte[] pcmBytes, int sampleRate, int channels, Consumer<Component> feedback) {
+    private static void queueStreamChunk(
+            byte[] pcmBytes,
+            int sampleRate,
+            int channels,
+            Consumer<Component> feedback,
+            int generation
+    ) {
         Minecraft minecraft = Minecraft.getInstance();
 
         if (minecraft == null || pcmBytes.length <= 0) {
@@ -456,7 +480,7 @@ public final class CointRadioPlayer {
 
         minecraft.execute(() -> {
             try {
-                if (!streaming || sourceId == 0) {
+                if (!streaming || generation != playGeneration || sourceId == 0) {
                     safeFree(pcmBuffer);
                     return;
                 }
@@ -468,8 +492,20 @@ public final class CointRadioPlayer {
                 int newBuffer = AL10.alGenBuffers();
                 checkOpenAl("stream alGenBuffers", feedback);
 
+                if (generation != playGeneration) {
+                    AL10.alDeleteBuffers(newBuffer);
+                    safeFree(pcmBuffer);
+                    return;
+                }
+
                 AL10.alBufferData(newBuffer, openAlFormat, pcmBuffer, sampleRate);
                 checkOpenAl("stream alBufferData", feedback);
+
+                if (generation != playGeneration) {
+                    AL10.alDeleteBuffers(newBuffer);
+                    safeFree(pcmBuffer);
+                    return;
+                }
 
                 AL10.alSourceQueueBuffers(sourceId, newBuffer);
                 checkOpenAl("stream alSourceQueueBuffers", feedback);
@@ -478,7 +514,7 @@ public final class CointRadioPlayer {
 
                 int state = AL10.alGetSourcei(sourceId, AL10.AL_SOURCE_STATE);
 
-                if (state != AL10.AL_PLAYING) {
+                if (state != AL10.AL_PLAYING && generation == playGeneration) {
                     AL10.alSourcePlay(sourceId);
                     checkOpenAl("stream alSourcePlay", feedback);
                 }
@@ -507,7 +543,7 @@ public final class CointRadioPlayer {
         }
     }
 
-    private static void waitForStreamQueueRoom() {
+    private static void waitForStreamQueueRoom(int generation) {
         AtomicInteger queued = new AtomicInteger(0);
         Minecraft minecraft = Minecraft.getInstance();
 
@@ -515,9 +551,13 @@ public final class CointRadioPlayer {
             return;
         }
 
-        minecraft.execute(() -> queued.set(STREAM_BUFFERS.size()));
+        minecraft.execute(() -> {
+            if (generation == playGeneration) {
+                queued.set(STREAM_BUFFERS.size());
+            }
+        });
 
-        while (streaming && queued.get() > 8) {
+        while (streaming && generation == playGeneration && queued.get() > 8) {
             try {
                 Thread.sleep(50L);
             } catch (InterruptedException ignored) {
@@ -526,6 +566,10 @@ public final class CointRadioPlayer {
             }
 
             minecraft.execute(() -> {
+                if (generation != playGeneration) {
+                    return;
+                }
+
                 cleanupProcessedStreamBuffers();
                 queued.set(STREAM_BUFFERS.size());
             });
@@ -637,15 +681,21 @@ public final class CointRadioPlayer {
             return;
         }
 
+        playGeneration++;
+
         if (minecraft.isSameThread()) {
-            stopNowOnClientThread();
+            stopNowOnClientThread(false);
         } else {
-            minecraft.execute(CointRadioPlayer::stopNowOnClientThread);
+            minecraft.execute(() -> stopNowOnClientThread(false));
         }
     }
 
-    private static void stopNowOnClientThread() {
+    private static void stopNowOnClientThread(boolean bumpGeneration) {
         try {
+            if (bumpGeneration) {
+                playGeneration++;
+            }
+
             playing = false;
             loading = false;
             streaming = false;
@@ -679,10 +729,15 @@ public final class CointRadioPlayer {
         }
     }
 
+    private static void stopNowOnClientThread() {
+        stopNowOnClientThread(true);
+    }
+
     public static void setVolume(float newVolume) {
         volume = Math.max(0.0f, Math.min(1.0f, newVolume));
 
         Minecraft minecraft = Minecraft.getInstance();
+
         if (minecraft == null) {
             return;
         }
@@ -766,11 +821,26 @@ public final class CointRadioPlayer {
                 .resolve("cointcoregto-radio-client.txt");
     }
 
-    private static void startDecodedAudio(ByteBuffer pcmBuffer, AudioFormat format, Consumer<Component> feedback) {
+    private static void startDecodedAudio(
+            ByteBuffer pcmBuffer,
+            AudioFormat format,
+            Consumer<Component> feedback,
+            int generation
+    ) {
+        if (generation != playGeneration) {
+            safeFree(pcmBuffer);
+            return;
+        }
+
         clearOpenAlError();
 
         if (sourceId != 0 || bufferId != 0 || currentPcmBuffer != null) {
-            stopNowOnClientThread();
+            stopNowOnClientThread(false);
+        }
+
+        if (generation != playGeneration) {
+            safeFree(pcmBuffer);
+            return;
         }
 
         int openAlFormat = getOpenAlFormat(format);

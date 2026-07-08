@@ -24,6 +24,7 @@ public class CointRadioBlockEntity extends BlockEntity {
     private String stationDisplayName = "";
     private boolean active = false;
     private String customUrl = "";
+    private int radius = clampRadius(CointRadioConfig.getRadius());
     private int tickCounter = 0;
     private final Set<UUID> listeners = new HashSet<>();
 
@@ -227,7 +228,75 @@ public class CointRadioBlockEntity extends BlockEntity {
     }
 
     public int getRadius() {
-        return CointRadioConfig.getRadius();
+        return clampRadius(radius);
+    }
+
+    public void setRadius(int radius) {
+        int cleanRadius = clampRadius(radius);
+
+        if (this.radius == cleanRadius) {
+            return;
+        }
+
+        this.radius = cleanRadius;
+        setChanged();
+        syncToClient();
+
+        refreshListenersAfterRadiusChange();
+    }
+
+    private void refreshListenersAfterRadiusChange() {
+        if (!active) {
+            return;
+        }
+
+        if (!(level instanceof ServerLevel serverLevel)) {
+            return;
+        }
+
+        String radioId = getRadioId();
+
+        Set<UUID> nearbyNow = new HashSet<>();
+
+        for (ServerPlayer player : getNearbyPlayers(serverLevel)) {
+            UUID uuid = player.getUUID();
+            nearbyNow.add(uuid);
+
+            if (!listeners.contains(uuid)) {
+                CointRadioNetwork.sendPlay(player, getStationUrl(), getStationId(), radioId);
+            }
+        }
+
+        for (UUID oldUuid : new HashSet<>(listeners)) {
+            if (nearbyNow.contains(oldUuid)) {
+                continue;
+            }
+
+            ServerPlayer oldPlayer = serverLevel.getServer().getPlayerList().getPlayer(oldUuid);
+
+            if (oldPlayer != null) {
+                CointRadioNetwork.sendStop(oldPlayer, radioId);
+            }
+        }
+
+        listeners.clear();
+        listeners.addAll(nearbyNow);
+    }
+
+    public void increaseRadius() {
+        setRadius(getRadius() + 1);
+    }
+
+    public void decreaseRadius() {
+        setRadius(getRadius() - 1);
+    }
+
+    private static int clampRadius(int value) {
+        if (value < 0) {
+            return 0;
+        }
+
+        return Math.min(value, 32);
     }
 
     public void setActive(boolean active) {
@@ -353,7 +422,12 @@ public class CointRadioBlockEntity extends BlockEntity {
     }
 
     private List<ServerPlayer> getNearbyPlayers(ServerLevel serverLevel) {
-        int radius = CointRadioConfig.getRadius();
+        int radius = getRadius();
+
+        if (radius <= 0) {
+            return List.of();
+        }
+
         AABB box = new AABB(worldPosition).inflate(radius);
 
         return serverLevel.getEntitiesOfClass(ServerPlayer.class, box);
@@ -365,6 +439,7 @@ public class CointRadioBlockEntity extends BlockEntity {
         tag.putString("StationId", getStationId());
         tag.putBoolean("Active", active);
         tag.putString("CustomUrl", getCustomUrl());
+        tag.putInt("Radius", getRadius());
     }
 
     @Override
@@ -373,6 +448,12 @@ public class CointRadioBlockEntity extends BlockEntity {
         stationId = tag.getString("StationId");
         active = tag.getBoolean("Active");
         customUrl = tag.getString("CustomUrl");
+
+        if (tag.contains("Radius")) {
+            radius = clampRadius(tag.getInt("Radius"));
+        } else {
+            radius = clampRadius(CointRadioConfig.getRadius());
+        }
     }
 
     @Override
@@ -422,6 +503,7 @@ public class CointRadioBlockEntity extends BlockEntity {
         tag.putBoolean("Active", active);
         tag.putString("CustomUrl", getCustomUrl());
         tag.putString("StationName", CointRadioConfig.getStationName(getStationId()));
+        tag.putInt("Radius", getRadius());
 
         return tag;
     }
@@ -449,6 +531,10 @@ public class CointRadioBlockEntity extends BlockEntity {
 
         if (tag.contains("StationName")) {
             stationDisplayName = tag.getString("StationName");
+        }
+
+        if (tag.contains("Radius")) {
+            radius = clampRadius(tag.getInt("Radius"));
         }
     }
 

@@ -145,7 +145,7 @@ public class CointRadioBlock extends BaseEntityBlock {
             radio.setActive(true);
 
             player.displayClientMessage(
-                    Component.literal("§a[CointMusic] Радио включено. Радиус: §f" + CointRadioConfig.getRadius()),
+                    Component.literal("§a[CointMusic] Радио включено. Радиус: §f" + radio.getRadius()),
                     true
             );
         } else {

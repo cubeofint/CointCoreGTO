@@ -19,7 +19,7 @@ public class CointRadioScreen extends Screen {
     private final List<String> stations;
     private final String currentStation;
     private final boolean active;
-    private final int radius;
+    private int radius;
     private final String customUrl;
 
     private int volumePercent;
@@ -131,6 +131,39 @@ public class CointRadioScreen extends Screen {
                         startY + 150,
                         buttonWidth,
                         buttonHeight,
+                        Component.literal("§bРадиус: §f" + radius),
+                        radius / 32.0D
+                ) {
+                    @Override
+                    protected void updateMessage() {
+                        int newRadius = (int) Math.round(this.value * 32.0D);
+                        this.setMessage(Component.literal("§bРадиус: §f" + newRadius));
+                    }
+
+                    @Override
+                    protected void applyValue() {
+                        int newRadius = (int) Math.round(this.value * 32.0D);
+
+                        if (newRadius < 0) {
+                            newRadius = 0;
+                        }
+
+                        if (newRadius > 32) {
+                            newRadius = 32;
+                        }
+
+                        radius = newRadius;
+                        CointRadioNetwork.sendSetRadiusToServer(pos, newRadius);
+                    }
+                }
+        );
+
+        this.addRenderableWidget(
+                new AbstractSliderButton(
+                        this.width / 2 - buttonWidth / 2,
+                        startY + 174,
+                        buttonWidth,
+                        buttonHeight,
                         Component.literal("§eГромкость: §f" + volumePercent + "%"),
                         volumePercent / 100.0D
                 ) {
@@ -149,7 +182,7 @@ public class CointRadioScreen extends Screen {
                 }
         );
 
-        int stationStartY = startY + 184;
+        int stationStartY = startY + 208;
 
         for (int i = 0; i < stations.size(); i++) {
             String stationEntry = stations.get(i);
