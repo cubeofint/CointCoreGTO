@@ -673,6 +673,19 @@ public class CointCoreGTO {
                                             CointCoreGTODiscordProxy.sendToDiscordLog(stripColor(message));
                                             return 1;
                                         })))
+                        .then(Commands.literal("discordannounce")
+                                .requires(source -> source.hasPermission(2))
+                                .then(Commands.argument("message", StringArgumentType.greedyString())
+                                        .executes(ctx -> {
+                                            String message = StringArgumentType.getString(ctx, "message");
+
+                                            if (message == null || message.isBlank()) {
+                                                return 0;
+                                            }
+
+                                            CointCoreGTODiscordProxy.sendToDiscord(stripColor(message));
+                                            return 1;
+                                        })))
         );
 
 
@@ -3510,15 +3523,11 @@ public class CointCoreGTO {
             return false;
         }
 
-        if (player.isSpectator() || player.isInvisible()) {
-            return false;
-        }
-
+        // Скрываем только тех, кого специально спрятали от Discord-онлайна.
+        // Не используем player.isInvisible(), spectator, обычные теги vanished/hidden:
+        // в модпаках они часто появляются не из-за настоящего vanish и ломают онлайн-список.
         if (player.getTags().contains("cointcoregto_hide_online")
-                || player.getTags().contains("cointcoregto_hidden")
-                || player.getTags().contains("vanished")
-                || player.getTags().contains("vanish")
-                || player.getTags().contains("hidden")) {
+                || player.getTags().contains("cointcoregto_hidden")) {
             return false;
         }
 
@@ -3526,7 +3535,7 @@ public class CointCoreGTO {
             return false;
         }
 
-        return !isFtbEssentialsVanished(player);
+        return true;
     }
 
     private static boolean isFtbEssentialsVanished(ServerPlayer player) {

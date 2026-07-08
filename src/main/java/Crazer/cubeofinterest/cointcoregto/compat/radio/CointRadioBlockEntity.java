@@ -52,7 +52,7 @@ public class CointRadioBlockEntity extends BlockEntity {
 
     public String getStationDisplayName() {
         if (hasCustomUrl()) {
-            return "custom URL";
+            return "Своя ссылка";
         }
 
         if (stationDisplayName != null && !stationDisplayName.isBlank()) {
@@ -405,7 +405,7 @@ public class CointRadioBlockEntity extends BlockEntity {
             nearbyNow.add(uuid);
 
             if (!listeners.contains(uuid)) {
-                sendPlayToPlayer(player, getStationUrl(), getStationId(), radioId);
+                sendPlayToPlayer(player, getStationUrl(), getStationDisplayName(), radioId);
             }
         }
 
@@ -588,7 +588,7 @@ public class CointRadioBlockEntity extends BlockEntity {
         }
 
         String url = getStationUrl();
-        String station = getStationId();
+        String station = getStationDisplayName();
         String radioId = getRadioId();
 
         for (ServerPlayer player : getNearbyPlayers(serverLevel)) {
@@ -643,7 +643,7 @@ public class CointRadioBlockEntity extends BlockEntity {
 
         Set<UUID> nearbyNow = new HashSet<>();
         String url = radio.getStationUrl();
-        String station = radio.getStationId();
+        String station = radio.getStationDisplayName();
         String radioId = radio.getRadioId();
 
         for (ServerPlayer player : radio.getNearbyPlayers(serverLevel)) {

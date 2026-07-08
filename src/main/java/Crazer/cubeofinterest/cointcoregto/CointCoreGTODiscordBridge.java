@@ -302,6 +302,32 @@ public class CointCoreGTODiscordBridge {
         }
     }
 
+    private static boolean isMainDiscordChannel(MessageReceivedEvent event) {
+        if (event == null || textChannel == null || event.getChannel() == null) {
+            return false;
+        }
+
+        String targetId = textChannel.getId();
+        String channelId = event.getChannel().getId();
+
+        if (targetId.equals(channelId)) {
+            return true;
+        }
+
+        try {
+            Object channel = event.getChannel();
+            Object parentChannel = channel.getClass().getMethod("getParentChannel").invoke(channel);
+
+            if (parentChannel != null) {
+                Object parentId = parentChannel.getClass().getMethod("getId").invoke(parentChannel);
+                return targetId.equals(String.valueOf(parentId));
+            }
+        } catch (Throwable ignored) {
+        }
+
+        return false;
+    }
+
     private static void handleDiscordMessage(MessageReceivedEvent event) {
         if (!enabled) {
             return;
@@ -315,7 +341,7 @@ public class CointCoreGTODiscordBridge {
             return;
         }
 
-        if (!event.getChannel().getId().equals(textChannel.getId())) {
+        if (!isMainDiscordChannel(event)) {
             return;
         }
 
@@ -394,32 +420,39 @@ public class CointCoreGTODiscordBridge {
             return;
         }
 
-        TextChannel statusChannel = getOnlineStatusChannel();
-        if (statusChannel == null) {
-            return;
-        }
+        MinecraftServer minecraftServer = server;
+        minecraftServer.execute(() -> {
+            if (!enabled || !onlineStatusEnabled || jda == null || server == null) {
+                return;
+            }
 
-        String messageText = buildOnlineStatusMessage();
-        String messageId = loadOnlineStatusMessageId();
+            TextChannel statusChannel = getOnlineStatusChannel();
+            if (statusChannel == null) {
+                return;
+            }
 
-        if (messageId == null || messageId.isBlank()) {
-            sendNewOnlineStatusMessage(statusChannel, messageText);
-            return;
-        }
+            String messageText = buildOnlineStatusMessage();
+            String messageId = loadOnlineStatusMessageId();
 
-        statusChannel.retrieveMessageById(messageId).queue(
-                message -> message.editMessage(messageText).queue(
-                        success -> {},
-                        error -> {
-                            System.out.println("[CointDiscord] Failed to edit online status message: " + error.getMessage());
-                            sendNewOnlineStatusMessage(statusChannel, messageText);
-                        }
-                ),
-                error -> {
-                    System.out.println("[CointDiscord] Online status message not found, creating a new one.");
-                    sendNewOnlineStatusMessage(statusChannel, messageText);
-                }
-        );
+            if (messageId == null || messageId.isBlank()) {
+                sendNewOnlineStatusMessage(statusChannel, messageText);
+                return;
+            }
+
+            statusChannel.retrieveMessageById(messageId).queue(
+                    message -> message.editMessage(messageText).queue(
+                            success -> {},
+                            error -> {
+                                System.out.println("[CointDiscord] Failed to edit online status message: " + error.getMessage());
+                                sendNewOnlineStatusMessage(statusChannel, messageText);
+                            }
+                    ),
+                    error -> {
+                        System.out.println("[CointDiscord] Online status message not found, creating a new one.");
+                        sendNewOnlineStatusMessage(statusChannel, messageText);
+                    }
+            );
+        });
     }
 
     private static TextChannel getOnlineStatusChannel() {

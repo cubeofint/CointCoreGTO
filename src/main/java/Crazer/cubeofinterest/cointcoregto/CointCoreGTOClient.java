@@ -142,7 +142,7 @@ public class CointCoreGTOClient {
             return false;
         }
 
-        int colonIndex = cleanText.indexOf(':');
+        int colonIndex = cleanText.lastIndexOf(':');
         if (colonIndex < 0) {
             return false;
         }
@@ -153,7 +153,10 @@ public class CointCoreGTOClient {
             return false;
         }
 
-        return beforeColon.endsWith(playerName);
+        String loweredBeforeColon = beforeColon.toLowerCase(java.util.Locale.ROOT);
+        String loweredPlayerName = playerName.toLowerCase(java.util.Locale.ROOT);
+
+        return loweredBeforeColon.endsWith(loweredPlayerName);
     }
 
     private static String getMessageBodyAfterColon(String cleanText) {
@@ -161,7 +164,7 @@ public class CointCoreGTOClient {
             return "";
         }
 
-        int colonIndex = cleanText.indexOf(':');
+        int colonIndex = cleanText.lastIndexOf(':');
         if (colonIndex < 0 || colonIndex + 1 >= cleanText.length()) {
             return cleanText;
         }

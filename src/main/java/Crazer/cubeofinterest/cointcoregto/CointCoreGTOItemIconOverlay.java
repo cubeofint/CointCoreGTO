@@ -49,7 +49,7 @@ public final class CointCoreGTOItemIconOverlay {
 
     private static final Map<String, CachedIcon> ITEM_CACHE = new HashMap<>();
     private static final Map<String, Long> CLOSED_CHAT_LINE_FIRST_SEEN = new HashMap<>();
-    private static final Set<String> CLOSED_CHAT_EXPIRED_LINES = new HashSet<>();
+    private static final Map<String, Long> CLOSED_CHAT_LINE_EXPIRED_AT = new HashMap<>();
 
     private CointCoreGTOItemIconOverlay() {
     }
@@ -68,7 +68,7 @@ public final class CointCoreGTOItemIconOverlay {
         }
 
         CLOSED_CHAT_LINE_FIRST_SEEN.clear();
-        CLOSED_CHAT_EXPIRED_LINES.clear();
+        CLOSED_CHAT_LINE_EXPIRED_AT.clear();
     }
 
     public static void clearAllIconCache() {
@@ -78,6 +78,10 @@ public final class CointCoreGTOItemIconOverlay {
 
         synchronized (CLOSED_CHAT_LINE_FIRST_SEEN) {
             CLOSED_CHAT_LINE_FIRST_SEEN.clear();
+        }
+
+        synchronized (CLOSED_CHAT_LINE_EXPIRED_AT) {
+            CLOSED_CHAT_LINE_EXPIRED_AT.clear();
         }
     }
 
@@ -342,8 +346,17 @@ public final class CointCoreGTOItemIconOverlay {
 
         long now = System.currentTimeMillis();
 
-        if (CLOSED_CHAT_EXPIRED_LINES.contains(key)) {
-            return false;
+        cleanupClosedChatSeenLines(now);
+
+        Long expiredAt = CLOSED_CHAT_LINE_EXPIRED_AT.get(key);
+
+        if (expiredAt != null) {
+            // Same text may appear again later. Treat it as a new chat line after cleanup window.
+            if (now - expiredAt <= CLOSED_CHAT_SEEN_CLEANUP_MILLIS) {
+                return false;
+            }
+
+            CLOSED_CHAT_LINE_EXPIRED_AT.remove(key);
         }
 
         Long firstSeen = CLOSED_CHAT_LINE_FIRST_SEEN.get(key);
@@ -355,7 +368,7 @@ public final class CointCoreGTOItemIconOverlay {
 
         if (now - firstSeen > CLOSED_CHAT_VISIBLE_MILLIS) {
             CLOSED_CHAT_LINE_FIRST_SEEN.remove(key);
-            CLOSED_CHAT_EXPIRED_LINES.add(key);
+            CLOSED_CHAT_LINE_EXPIRED_AT.put(key, now);
             return false;
         }
 
@@ -363,13 +376,23 @@ public final class CointCoreGTOItemIconOverlay {
     }
 
     private static void cleanupClosedChatSeenLines(long now) {
-        Iterator<Map.Entry<String, Long>> iterator = CLOSED_CHAT_LINE_FIRST_SEEN.entrySet().iterator();
+        Iterator<Map.Entry<String, Long>> firstSeenIterator = CLOSED_CHAT_LINE_FIRST_SEEN.entrySet().iterator();
 
-        while (iterator.hasNext()) {
-            Map.Entry<String, Long> entry = iterator.next();
+        while (firstSeenIterator.hasNext()) {
+            Map.Entry<String, Long> entry = firstSeenIterator.next();
 
             if (entry.getValue() == null || now - entry.getValue() > CLOSED_CHAT_SEEN_CLEANUP_MILLIS) {
-                iterator.remove();
+                firstSeenIterator.remove();
+            }
+        }
+
+        Iterator<Map.Entry<String, Long>> expiredIterator = CLOSED_CHAT_LINE_EXPIRED_AT.entrySet().iterator();
+
+        while (expiredIterator.hasNext()) {
+            Map.Entry<String, Long> entry = expiredIterator.next();
+
+            if (entry.getValue() == null || now - entry.getValue() > CLOSED_CHAT_SEEN_CLEANUP_MILLIS) {
+                expiredIterator.remove();
             }
         }
     }
