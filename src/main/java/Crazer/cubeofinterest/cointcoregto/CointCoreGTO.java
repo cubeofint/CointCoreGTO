@@ -375,6 +375,7 @@ public class CointCoreGTO {
                 List.of(
                         "dorognoe|Дорожное радио|http://dorognoe.hostingradio.ru:8000/dorognoe",
                         "europa_plus|Европа Плюс|http://ep128.hostingradio.ru:8030/ep128",
+                        "shanson|Радио Шансон|http://chanson.hostingradio.ru:8041/chanson128.mp3",
 
                         "soma_groove|SomaFM Groove Salad|https://somafm.com/groovesalad.pls",
                         "soma_drone|SomaFM Drone Zone|https://somafm.com/dronezone.pls",

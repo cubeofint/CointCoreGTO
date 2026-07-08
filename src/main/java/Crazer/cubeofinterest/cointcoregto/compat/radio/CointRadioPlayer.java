@@ -249,13 +249,18 @@ public final class CointRadioPlayer {
     }
 
     private static boolean shouldUseStreaming(String url) {
-        String cleanPath = stripQuery(url.toLowerCase(Locale.ROOT));
-
-        if (cleanPath.endsWith(".ogg")) {
+        if (url == null || url.isBlank()) {
             return false;
         }
 
-        if (cleanPath.endsWith(".mp3")) {
+        String loweredUrl = url.toLowerCase(Locale.ROOT);
+        String cleanPath = stripQuery(loweredUrl);
+
+        if (loweredUrl.startsWith("file:/")) {
+            return false;
+        }
+
+        if (cleanPath.endsWith(".ogg")) {
             return false;
         }
 
@@ -271,7 +276,7 @@ public final class CointRadioPlayer {
             return false;
         }
 
-        return true;
+        return loweredUrl.startsWith("http://") || loweredUrl.startsWith("https://");
     }
 
     private static boolean isMp3Url(String url) {
@@ -387,13 +392,27 @@ public final class CointRadioPlayer {
         });
     }
 
+    private static URLConnection openRadioConnection(String url) throws Exception {
+        URLConnection connection = new URL(url).openConnection();
+
+        connection.setConnectTimeout(10_000);
+        connection.setReadTimeout(30_000);
+
+        connection.setRequestProperty(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        + "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+        );
+        connection.setRequestProperty("Accept", "audio/mpeg,audio/*;q=0.9,*/*;q=0.8");
+        connection.setRequestProperty("Icy-MetaData", "0");
+        connection.setRequestProperty("Connection", "close");
+
+        return connection;
+    }
+
     private static void runMp3StreamLoop(String streamUrl, Consumer<Component> feedback, int generation) {
         try {
-            URLConnection connection = new URL(streamUrl).openConnection();
-            connection.setConnectTimeout(10_000);
-            connection.setReadTimeout(30_000);
-            connection.setRequestProperty("User-Agent", "CointCoreGTO-MusicPlayer/1.0");
-            connection.setRequestProperty("Icy-MetaData", "0");
+            URLConnection connection = openRadioConnection(streamUrl);
 
             try (InputStream rawInput = new BufferedInputStream(connection.getInputStream())) {
                 Bitstream bitstream = new Bitstream(rawInput);
@@ -587,10 +606,7 @@ public final class CointRadioPlayer {
             }
         }
 
-        URLConnection connection = new URL(cleanUrl).openConnection();
-        connection.setConnectTimeout(10_000);
-        connection.setReadTimeout(30_000);
-        connection.setRequestProperty("User-Agent", "CointCoreGTO-MusicPlayer/1.0");
+        URLConnection connection = openRadioConnection(cleanUrl);
 
         byte[] data;
 
