@@ -61,7 +61,7 @@ public final class CointRadioHudOverlay {
             active = state.getValue(CointRadioBlock.ACTIVE);
         }
 
-        String station = radio.hasCustomUrl() ? "custom URL" : radio.getStationId();
+        String station = radio.getStationDisplayName();
         int radius = radio.getRadius();
 
         drawRadioInfo(
@@ -99,7 +99,7 @@ public final class CointRadioHudOverlay {
 
         graphics.drawString(
                 minecraft.font,
-                "§6Радиоблок",
+                "§6Радио",
                 textX,
                 textY,
                 0xFFFFFF,

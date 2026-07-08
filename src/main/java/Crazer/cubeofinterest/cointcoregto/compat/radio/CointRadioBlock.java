@@ -121,7 +121,7 @@ public class CointRadioBlock extends BaseEntityBlock {
 
         if (!(blockEntity instanceof CointRadioBlockEntity radio)) {
             player.displayClientMessage(
-                    Component.literal("§c[CointMusic] Ошибка радиоблока."),
+                    Component.literal("§c[CointMusic] Ошибка радио."),
                     true
             );
             return InteractionResult.SUCCESS;
@@ -141,16 +141,18 @@ public class CointRadioBlock extends BaseEntityBlock {
             return InteractionResult.SUCCESS;
         }
 
-        radio.toggleActive();
+        if (!radio.isActive()) {
+            radio.setActive(true);
 
-        if (radio.isActive()) {
             player.displayClientMessage(
-                    Component.literal("§a[CointMusic] Радиоблок включён. Радиус: §f" + CointRadioConfig.getRadius()),
+                    Component.literal("§a[CointMusic] Радио включено. Радиус: §f" + CointRadioConfig.getRadius()),
                     true
             );
         } else {
+            String nextStation = radio.nextStation();
+
             player.displayClientMessage(
-                    Component.literal("§c[CointMusic] Радиоблок выключен."),
+                    Component.literal("§e[CointMusic] Следующая станция: §f" + CointRadioConfig.getStationName(nextStation)),
                     true
             );
         }

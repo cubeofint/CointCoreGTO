@@ -42,23 +42,10 @@ public final class CointRadioNetwork {
         CHANNEL.registerMessage(nextId(), OpenRadioScreenPacket.class, OpenRadioScreenPacket::encode, OpenRadioScreenPacket::decode, OpenRadioScreenPacket::handle, Optional.of(NetworkDirection.PLAY_TO_CLIENT));
         CHANNEL.registerMessage(nextId(), SelectStationPacket.class, SelectStationPacket::encode, SelectStationPacket::decode, SelectStationPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
         CHANNEL.registerMessage(nextId(), ToggleActivePacket.class, ToggleActivePacket::encode, ToggleActivePacket::decode, ToggleActivePacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
-        CHANNEL.registerMessage(
-                nextId(),
-                SetCustomUrlPacket.class,
-                SetCustomUrlPacket::encode,
-                SetCustomUrlPacket::decode,
-                SetCustomUrlPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_SERVER)
-        );
-
-        CHANNEL.registerMessage(
-                nextId(),
-                ClearCustomUrlPacket.class,
-                ClearCustomUrlPacket::encode,
-                ClearCustomUrlPacket::decode,
-                ClearCustomUrlPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_SERVER)
-        );
+        CHANNEL.registerMessage(nextId(), SetCustomUrlPacket.class, SetCustomUrlPacket::encode, SetCustomUrlPacket::decode, SetCustomUrlPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(nextId(), ClearCustomUrlPacket.class, ClearCustomUrlPacket::encode, ClearCustomUrlPacket::decode, ClearCustomUrlPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(nextId(), NextStationPacket.class, NextStationPacket::encode, NextStationPacket::decode, NextStationPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(nextId(), RandomStationPacket.class, RandomStationPacket::encode, RandomStationPacket::decode, RandomStationPacket::handle, Optional.of(NetworkDirection.PLAY_TO_SERVER));
     }
 
     public static void sendPlay(ServerPlayer player, String url, String stationId, String radioId) {
@@ -106,6 +93,14 @@ public final class CointRadioNetwork {
 
     public static void sendToggleActiveToServer(BlockPos pos) {
         CHANNEL.sendToServer(new ToggleActivePacket(pos));
+    }
+
+    public static void sendNextStationToServer(BlockPos pos) {
+        CHANNEL.sendToServer(new NextStationPacket(pos));
+    }
+
+    public static void sendRandomStationToServer(BlockPos pos) {
+        CHANNEL.sendToServer(new RandomStationPacket(pos));
     }
 
     private static int nextId() {
@@ -326,7 +321,7 @@ public final class CointRadioNetwork {
                 radio.setStationId(packet.stationId);
 
                 player.displayClientMessage(
-                        Component.literal("§e[CointMusic] Станция выбрана: §f" + radio.getStationId()),
+                        Component.literal("§e[CointMusic] Станция выбрана: §f" + CointRadioConfig.getStationName(radio.getStationId())),
                         true
                 );
             });
@@ -364,12 +359,12 @@ public final class CointRadioNetwork {
 
                 if (radio.isActive()) {
                     player.displayClientMessage(
-                            Component.literal("§a[CointMusic] Радиоблок включён. Радиус: §f" + CointRadioConfig.getRadius()),
+                            Component.literal("§a[CointMusic] Радио включено. Радиус: §f" + CointRadioConfig.getRadius()),
                             true
                     );
                 } else {
                     player.displayClientMessage(
-                            Component.literal("§c[CointMusic] Радиоблок выключен."),
+                            Component.literal("§c[CointMusic] Радио выключено."),
                             true
                     );
                 }
@@ -421,7 +416,7 @@ public final class CointRadioNetwork {
                 radio.setCustomUrl(cleanUrl);
 
                 player.displayClientMessage(
-                        Component.literal("§a[CointMusic] URL радиоблока применён."),
+                        Component.literal("§a[CointMusic] URL радио применён."),
                         true
                 );
             });
@@ -458,7 +453,81 @@ public final class CointRadioNetwork {
                 radio.clearCustomUrl();
 
                 player.displayClientMessage(
-                        Component.literal("§e[CointMusic] URL радиоблока очищен. Используется станция: §f" + radio.getStationId()),
+                        Component.literal("§e[CointMusic] URL радио очищен. Используется станция: §f" + CointRadioConfig.getStationName(radio.getStationId())),
+                        true
+                );
+            });
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record NextStationPacket(BlockPos pos) {
+        public static void encode(NextStationPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeBlockPos(packet.pos);
+        }
+
+        public static NextStationPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new NextStationPacket(buffer.readBlockPos());
+        }
+
+        public static void handle(NextStationPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> {
+                ServerPlayer player = context.getSender();
+
+                if (!isValidRadioAccess(player, packet.pos)) {
+                    return;
+                }
+
+                BlockEntity blockEntity = player.level().getBlockEntity(packet.pos);
+
+                if (!(blockEntity instanceof CointRadioBlockEntity radio)) {
+                    return;
+                }
+
+                String nextStation = radio.nextStation();
+
+                player.displayClientMessage(
+                        Component.literal("§e[CointMusic] Следующая станция: §f" + CointRadioConfig.getStationName(nextStation)),
+                        true
+                );
+            });
+
+            context.setPacketHandled(true);
+        }
+    }
+
+    public record RandomStationPacket(BlockPos pos) {
+        public static void encode(RandomStationPacket packet, net.minecraft.network.FriendlyByteBuf buffer) {
+            buffer.writeBlockPos(packet.pos);
+        }
+
+        public static RandomStationPacket decode(net.minecraft.network.FriendlyByteBuf buffer) {
+            return new RandomStationPacket(buffer.readBlockPos());
+        }
+
+        public static void handle(RandomStationPacket packet, Supplier<net.minecraftforge.network.NetworkEvent.Context> contextSupplier) {
+            net.minecraftforge.network.NetworkEvent.Context context = contextSupplier.get();
+
+            context.enqueueWork(() -> {
+                ServerPlayer player = context.getSender();
+
+                if (!isValidRadioAccess(player, packet.pos)) {
+                    return;
+                }
+
+                BlockEntity blockEntity = player.level().getBlockEntity(packet.pos);
+
+                if (!(blockEntity instanceof CointRadioBlockEntity radio)) {
+                    return;
+                }
+
+                String randomStation = radio.randomStation();
+
+                player.displayClientMessage(
+                        Component.literal("§d[CointMusic] Случайная станция: §f" + CointRadioConfig.getStationName(randomStation)),
                         true
                 );
             });

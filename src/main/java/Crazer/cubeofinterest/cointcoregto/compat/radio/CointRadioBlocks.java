@@ -1,7 +1,6 @@
 package Crazer.cubeofinterest.cointcoregto.compat.radio;
 
 import Crazer.cubeofinterest.cointcoregto.CointCoreGTO;
-import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntityType;
@@ -26,17 +25,10 @@ public final class CointRadioBlocks {
     public static final RegistryObject<Item> COINT_RADIO_ITEM =
             ITEMS.register(
                     "coint_radio",
-                    () -> new BlockItem(COINT_RADIO.get(), new Item.Properties()) {
-                        @Override
-                        public net.minecraft.network.chat.Component getName(net.minecraft.world.item.ItemStack stack) {
-                            return net.minecraft.network.chat.Component.literal("Радио");
-                        }
-
-                        @Override
-                        public String getDescriptionId(net.minecraft.world.item.ItemStack stack) {
-                            return "Радио";
-                        }
-                    }
+                    () -> new CointRadioBlockItem(
+                            COINT_RADIO.get(),
+                            new Item.Properties()
+                    )
             );
 
     public static final RegistryObject<BlockEntityType<CointRadioBlockEntity>> COINT_RADIO_BLOCK_ENTITY =

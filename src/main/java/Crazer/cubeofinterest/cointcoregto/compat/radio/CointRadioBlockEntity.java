@@ -17,9 +17,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 public class CointRadioBlockEntity extends BlockEntity {
     private String stationId = "";
+    private String stationDisplayName = "";
     private boolean active = false;
     private String customUrl = "";
     private int tickCounter = 0;
@@ -35,6 +37,24 @@ public class CointRadioBlockEntity extends BlockEntity {
 
     public boolean hasCustomUrl() {
         return customUrl != null && !customUrl.isBlank();
+    }
+
+    public String getStationDisplayName() {
+        if (hasCustomUrl()) {
+            return "custom URL";
+        }
+
+        if (stationDisplayName != null && !stationDisplayName.isBlank()) {
+            return stationDisplayName;
+        }
+
+        String name = CointRadioConfig.getStationName(getStationId());
+
+        if (name == null || name.isBlank()) {
+            return getStationId();
+        }
+
+        return name;
     }
 
     public void setCustomUrl(String customUrl) {
@@ -101,6 +121,8 @@ public class CointRadioBlockEntity extends BlockEntity {
         }
 
         this.stationId = normalized;
+        this.stationDisplayName = CointRadioConfig.getStationName(normalized);
+
         setChanged();
         syncToClient();
 
@@ -128,24 +150,76 @@ public class CointRadioBlockEntity extends BlockEntity {
         List<String> stations = CointRadioConfig.getStationIds();
 
         if (stations.isEmpty()) {
-            stationId = CointRadioConfig.getDefaultStation();
-            setChanged();
-            syncToClient();
-            return stationId;
+            setStationId(CointRadioConfig.getDefaultStation());
+
+            if (!isActive()) {
+                setActive(true);
+            }
+
+            return getStationId();
         }
 
         String current = getStationId();
-        int index = stations.indexOf(current);
+        int currentIndex = -1;
 
-        if (index < 0) {
-            stationId = stations.get(0);
-        } else {
-            stationId = stations.get((index + 1) % stations.size());
+        for (int i = 0; i < stations.size(); i++) {
+            if (stations.get(i).equalsIgnoreCase(current)) {
+                currentIndex = i;
+                break;
+            }
         }
 
-        setChanged();
-        syncToClient();
-        return stationId;
+        int nextIndex = currentIndex + 1;
+
+        if (nextIndex >= stations.size()) {
+            nextIndex = 0;
+        }
+
+        this.customUrl = "";
+
+        setStationId(stations.get(nextIndex));
+
+        if (!isActive()) {
+            setActive(true);
+        }
+
+        return getStationId();
+    }
+
+    public String randomStation() {
+        List<String> stations = CointRadioConfig.getStationIds();
+
+        if (stations.isEmpty()) {
+            setStationId(CointRadioConfig.getDefaultStation());
+
+            if (!isActive()) {
+                setActive(true);
+            }
+
+            return getStationId();
+        }
+
+        String current = getStationId();
+        String selected = stations.get(ThreadLocalRandom.current().nextInt(stations.size()));
+
+        if (stations.size() > 1) {
+            int attempts = 0;
+
+            while (selected.equalsIgnoreCase(current) && attempts < 8) {
+                selected = stations.get(ThreadLocalRandom.current().nextInt(stations.size()));
+                attempts++;
+            }
+        }
+
+        this.customUrl = "";
+
+        setStationId(selected);
+
+        if (!isActive()) {
+            setActive(true);
+        }
+
+        return getStationId();
     }
 
     public boolean isActive() {
@@ -280,7 +354,6 @@ public class CointRadioBlockEntity extends BlockEntity {
 
     private List<ServerPlayer> getNearbyPlayers(ServerLevel serverLevel) {
         int radius = CointRadioConfig.getRadius();
-
         AABB box = new AABB(worldPosition).inflate(radius);
 
         return serverLevel.getEntitiesOfClass(ServerPlayer.class, box);
@@ -307,6 +380,8 @@ public class CointRadioBlockEntity extends BlockEntity {
         super.onLoad();
 
         if (level != null && !level.isClientSide) {
+            stationDisplayName = CointRadioConfig.getStationName(getStationId());
+
             BlockState state = level.getBlockState(worldPosition);
 
             if (state.hasProperty(CointRadioBlock.ACTIVE)) {
@@ -316,6 +391,8 @@ public class CointRadioBlockEntity extends BlockEntity {
                         3
                 );
             }
+
+            syncToClient();
         }
     }
 
@@ -344,17 +421,14 @@ public class CointRadioBlockEntity extends BlockEntity {
         tag.putString("StationId", getStationId());
         tag.putBoolean("Active", active);
         tag.putString("CustomUrl", getCustomUrl());
+        tag.putString("StationName", CointRadioConfig.getStationName(getStationId()));
 
         return tag;
     }
 
     @Override
-    public void onDataPacket(Connection connection, ClientboundBlockEntityDataPacket packet) {
-        CompoundTag tag = packet.getTag();
-
-        if (tag != null) {
-            handleUpdateTag(tag);
-        }
+    public void onDataPacket(Connection net, ClientboundBlockEntityDataPacket packet) {
+        handleUpdateTag(packet.getTag());
     }
 
     @Override
@@ -371,6 +445,10 @@ public class CointRadioBlockEntity extends BlockEntity {
 
         if (tag.contains("CustomUrl")) {
             customUrl = tag.getString("CustomUrl");
+        }
+
+        if (tag.contains("StationName")) {
+            stationDisplayName = tag.getString("StationName");
         }
     }
 

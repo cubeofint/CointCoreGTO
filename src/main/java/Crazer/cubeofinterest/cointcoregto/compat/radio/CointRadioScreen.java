@@ -91,7 +91,7 @@ public class CointRadioScreen extends Screen {
 
         this.addRenderableWidget(
                 Button.builder(
-                                Component.literal(active ? "§cВыключить радиоблок" : "§aВключить радиоблок"),
+                                Component.literal(active ? "§cВыключить радио" : "§aВключить радио"),
                                 button -> {
                                     CointRadioNetwork.sendToggleActiveToServer(pos);
                                     this.onClose();
@@ -102,9 +102,33 @@ public class CointRadioScreen extends Screen {
         );
 
         this.addRenderableWidget(
+                Button.builder(
+                                Component.literal("§eСледующая станция"),
+                                button -> {
+                                    CointRadioNetwork.sendNextStationToServer(pos);
+                                    this.onClose();
+                                }
+                        )
+                        .bounds(this.width / 2 - buttonWidth / 2, startY + 102, buttonWidth, buttonHeight)
+                        .build()
+        );
+
+        this.addRenderableWidget(
+                Button.builder(
+                                Component.literal("§dСлучайная станция"),
+                                button -> {
+                                    CointRadioNetwork.sendRandomStationToServer(pos);
+                                    this.onClose();
+                                }
+                        )
+                        .bounds(this.width / 2 - buttonWidth / 2, startY + 126, buttonWidth, buttonHeight)
+                        .build()
+        );
+
+        this.addRenderableWidget(
                 new AbstractSliderButton(
                         this.width / 2 - buttonWidth / 2,
-                        startY + 102,
+                        startY + 150,
                         buttonWidth,
                         buttonHeight,
                         Component.literal("§eГромкость: §f" + volumePercent + "%"),
@@ -125,7 +149,7 @@ public class CointRadioScreen extends Screen {
                 }
         );
 
-        int stationStartY = startY + 136;
+        int stationStartY = startY + 184;
 
         for (int i = 0; i < stations.size(); i++) {
             String stationEntry = stations.get(i);
