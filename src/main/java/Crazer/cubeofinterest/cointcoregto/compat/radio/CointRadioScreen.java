@@ -89,6 +89,52 @@ public class CointRadioScreen extends Screen {
 
         this.addRenderableWidget(
                 Button.builder(
+                                Component.literal("§6Добавить в закладки"),
+                                button -> {
+                                    CointRadioBookmarks.add(urlBox.getValue());
+
+                                    if (this.minecraft != null && this.minecraft.player != null) {
+                                        this.minecraft.player.displayClientMessage(
+                                                Component.literal("§a[CointMusic] Радио добавлено в закладки."),
+                                                true
+                                        );
+                                    }
+
+                                    this.onClose();
+                                }
+                        )
+                        .bounds(this.width / 2 + buttonWidth / 2 + 6, startY, 130, buttonHeight)
+                        .build()
+        );
+
+        int bookmarkX = this.width / 2 + buttonWidth / 2 + 6;
+        int bookmarkY = startY + 24;
+
+        List<CointRadioBookmarks.Bookmark> bookmarks = CointRadioBookmarks.getBookmarks();
+
+        for (int i = 0; i < Math.min(5, bookmarks.size()); i++) {
+            CointRadioBookmarks.Bookmark bookmark = bookmarks.get(i);
+
+            this.addRenderableWidget(
+                    Button.builder(
+                                    Component.literal("§b★ " + bookmark.name()),
+                                    button -> {
+                                        CointRadioNetwork.sendSetCustomUrlToServer(pos, bookmark.url());
+
+                                        if (!active) {
+                                            CointRadioNetwork.sendToggleActiveToServer(pos);
+                                        }
+
+                                        this.onClose();
+                                    }
+                            )
+                            .bounds(bookmarkX, bookmarkY + i * 24, 130, buttonHeight)
+                            .build()
+            );
+        }
+
+        this.addRenderableWidget(
+                Button.builder(
                                 Component.literal("§cОчистить URL"),
                                 button -> {
                                     CointRadioNetwork.sendClearCustomUrlToServer(pos);

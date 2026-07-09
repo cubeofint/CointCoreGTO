@@ -389,7 +389,7 @@ public class CointCoreGTODiscordBridge {
                     Thread.sleep(delaySeconds * 1000L);
                 }
 
-                updateOnlineStatusMessageNow();
+                safeUpdateOnlineStatusMessageNow("manual-" + delaySeconds);
             } catch (Throwable error) {
                 System.out.println("[CointDiscord] Online status manual update failed: " + error.getMessage());
             }
@@ -413,7 +413,7 @@ public class CointCoreGTODiscordBridge {
         });
 
         onlineStatusExecutor.scheduleAtFixedRate(
-                CointCoreGTODiscordBridge::updateOnlineStatusMessageNow,
+                () -> safeUpdateOnlineStatusMessageNow("timer"),
                 5L,
                 onlineStatusUpdateSeconds,
                 TimeUnit.SECONDS
@@ -429,6 +429,15 @@ public class CointCoreGTODiscordBridge {
         }
 
         onlineStatusExecutor = null;
+    }
+
+    private static void safeUpdateOnlineStatusMessageNow(String reason) {
+        try {
+            updateOnlineStatusMessageNow();
+        } catch (Throwable error) {
+            System.out.println("[CointDiscord] Online status update failed [" + reason + "]: " + error.getMessage());
+            error.printStackTrace();
+        }
     }
 
     private static void updateOnlineStatusMessageNow() {

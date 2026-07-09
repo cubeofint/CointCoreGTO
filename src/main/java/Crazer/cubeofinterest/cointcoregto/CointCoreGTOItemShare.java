@@ -1,6 +1,5 @@
 package Crazer.cubeofinterest.cointcoregto;
 
-import net.minecraft.client.Minecraft;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
@@ -37,12 +36,6 @@ public final class CointCoreGTOItemShare {
                 .consumerMainThread(ShareItemPacket::handle)
                 .add();
 
-        CHANNEL.messageBuilder(IconHintPacket.class, 1, NetworkDirection.PLAY_TO_CLIENT)
-                .encoder(IconHintPacket::encode)
-                .decoder(IconHintPacket::decode)
-                .consumerMainThread(IconHintPacket::handle)
-                .add();
-
         registered = true;
     }
 
@@ -60,15 +53,6 @@ public final class CointCoreGTOItemShare {
     }
 
     public static void sendIconHintToPlayer(ServerPlayer player, ItemStack stack, String prefixText, String itemText) {
-        if (player == null || stack == null || stack.isEmpty() || itemText == null || itemText.isBlank()) {
-            return;
-        }
-
-        CHANNEL.sendTo(
-                new IconHintPacket(stack.copy(), prefixText == null ? "" : prefixText, itemText),
-                player.connection.connection,
-                NetworkDirection.PLAY_TO_CLIENT
-        );
     }
 
     private record ShareItemPacket(ItemStack stack, String displayName) {
@@ -93,38 +77,6 @@ public final class CointCoreGTOItemShare {
                 }
 
                 CointCoreGTO.shareItemInCurrentChat(player, packet.stack.copy(), packet.displayName);
-            });
-
-            context.setPacketHandled(true);
-        }
-    }
-
-    private record IconHintPacket(ItemStack stack, String prefixText, String itemText) {
-        private static void encode(IconHintPacket packet, FriendlyByteBuf buffer) {
-            buffer.writeItem(packet.stack);
-            buffer.writeUtf(packet.prefixText == null ? "" : packet.prefixText, 512);
-            buffer.writeUtf(packet.itemText == null ? "" : packet.itemText, 256);
-        }
-
-        private static IconHintPacket decode(FriendlyByteBuf buffer) {
-            ItemStack stack = buffer.readItem();
-            String prefixText = buffer.readUtf(512);
-            String itemText = buffer.readUtf(256);
-            return new IconHintPacket(stack, prefixText, itemText);
-        }
-
-        private static void handle(IconHintPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
-            NetworkEvent.Context context = contextSupplier.get();
-
-            context.enqueueWork(() -> {
-                try {
-                    if (Minecraft.getInstance().player == null) {
-                        return;
-                    }
-
-                    CointCoreGTOItemIconOverlay.queueIcon(packet.stack.copy(), packet.prefixText, packet.itemText);
-                } catch (Throwable ignored) {
-                }
             });
 
             context.setPacketHandled(true);

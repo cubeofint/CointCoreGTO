@@ -20,13 +20,8 @@ import net.minecraftforge.fml.common.Mod;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 @Mod.EventBusSubscriber(
         modid = CointCoreGTO.MODID,
@@ -34,8 +29,8 @@ import java.util.Set;
         bus = Mod.EventBusSubscriber.Bus.FORGE
 )
 public final class CointCoreGTOItemIconOverlay {
-    private static final int MAX_CACHE = 600;
-    private static final long CACHE_TTL_MILLIS = 10L * 60L * 1000L;
+    private static final int MAX_CACHE = 300;
+    private static final long CACHE_TTL_MILLIS = 5L * 60L * 1000L;
 
     private static final float ICON_RENDER_Z = 5000.0F;
     private static final float ICON_SCALE = 0.50F;
@@ -43,45 +38,23 @@ public final class CointCoreGTOItemIconOverlay {
     private static final int ICON_X_OFFSET = -10;
     private static final int ICON_Y_OFFSET = -9;
 
-    private static final long CLOSED_CHAT_VISIBLE_MILLIS = 9_000L;
-    private static final long CLOSED_CHAT_SEEN_CLEANUP_MILLIS = 30_000L;
     private static final int CLOSED_CHAT_MAX_LINES = 10;
 
-    private static final Map<String, CachedIcon> ITEM_CACHE = new HashMap<>();
-    private static final Map<String, Long> CLOSED_CHAT_LINE_FIRST_SEEN = new HashMap<>();
-    private static final Map<String, Long> CLOSED_CHAT_LINE_EXPIRED_AT = new HashMap<>();
+    private static final List<CachedLineIcon> CACHED_LINES = new ArrayList<>();
 
     private CointCoreGTOItemIconOverlay() {
     }
 
     public static void queueIcon(ItemStack stack, String prefixText, String itemText) {
-        if (stack == null || stack.isEmpty() || itemText == null || itemText.isBlank()) {
-            return;
-        }
-
-        cacheIcon(itemText, stack);
     }
 
     public static void clearIcons() {
-        synchronized (ITEM_CACHE) {
-            ITEM_CACHE.clear();
-        }
-
-        CLOSED_CHAT_LINE_FIRST_SEEN.clear();
-        CLOSED_CHAT_LINE_EXPIRED_AT.clear();
+        clearAllIconCache();
     }
 
     public static void clearAllIconCache() {
-        synchronized (ITEM_CACHE) {
-            ITEM_CACHE.clear();
-        }
-
-        synchronized (CLOSED_CHAT_LINE_FIRST_SEEN) {
-            CLOSED_CHAT_LINE_FIRST_SEEN.clear();
-        }
-
-        synchronized (CLOSED_CHAT_LINE_EXPIRED_AT) {
-            CLOSED_CHAT_LINE_EXPIRED_AT.clear();
+        synchronized (CACHED_LINES) {
+            CACHED_LINES.clear();
         }
     }
 
@@ -92,7 +65,12 @@ public final class CointCoreGTOItemIconOverlay {
             return;
         }
 
-        cacheItemsFromComponent(message);
+        String fullMessageText = normalize(message.getString());
+        if (fullMessageText.isBlank()) {
+            return;
+        }
+
+        cacheItemsFromComponent(message, fullMessageText);
     }
 
     @SubscribeEvent
@@ -106,7 +84,9 @@ public final class CointCoreGTOItemIconOverlay {
             return;
         }
 
-        boolean chatOpen = minecraft.screen instanceof ChatScreen;
+        if (minecraft.gui == null) {
+            return;
+        }
 
         ChatComponent chat = minecraft.gui.getChat();
         if (chat == null) {
@@ -117,6 +97,8 @@ public final class CointCoreGTOItemIconOverlay {
         if (lines == null || lines.isEmpty()) {
             return;
         }
+
+        boolean chatOpen = minecraft.screen instanceof ChatScreen;
 
         Font font = minecraft.font;
         GuiGraphics graphics = event.getGuiGraphics();
@@ -139,6 +121,8 @@ public final class CointCoreGTOItemIconOverlay {
         graphics.pose().translate(4.0F, 0.0F, 0.0F);
         graphics.pose().scale((float) scale, (float) scale, 1.0F);
 
+        cleanupCache(System.currentTimeMillis());
+
         int renderedVisibleIndex = 0;
 
         for (int rawIndex = 0; rawIndex < lines.size(); rawIndex++) {
@@ -153,31 +137,31 @@ public final class CointCoreGTOItemIconOverlay {
             }
 
             String lineText = formattedCharSequenceToString(line.content());
-            if (lineText == null || lineText.isBlank()) {
+            String cleanLineText = normalize(lineText);
+
+            if (cleanLineText.isBlank()) {
                 renderedVisibleIndex++;
                 continue;
             }
 
-            if (!chatOpen && !isLineVisibleInClosedChat(lineText)) {
-                continue;
-            }
+
 
             if (renderedVisibleIndex >= shownLines) {
                 break;
             }
 
-            if (!lineText.contains("[") || !lineText.contains("]")) {
-                renderedVisibleIndex++;
-                continue;
-            }
-
-            ItemIconMatch match = findIconForLine(lineText);
+            ItemIconMatch match = findIconForLine(cleanLineText);
             if (match == null || match.stack() == null || match.stack().isEmpty()) {
                 renderedVisibleIndex++;
                 continue;
             }
 
-            int itemStart = match.itemStart();
+            if (!chatOpen && System.currentTimeMillis() - match.createdMillis() > 10_000L) {
+                renderedVisibleIndex++;
+                continue;
+            }
+
+            int itemStart = findOriginalIndex(lineText, match.itemText());
             if (itemStart < 0 || itemStart > lineText.length()) {
                 renderedVisibleIndex++;
                 continue;
@@ -200,123 +184,148 @@ public final class CointCoreGTOItemIconOverlay {
         graphics.pose().popPose();
     }
 
-    public static ItemIconMatch findIconForLine(String lineText) {
-        if (lineText == null || lineText.isBlank()) {
-            return null;
+    private static void cacheItemsFromComponent(Component component, String fullMessageText) {
+        if (component == null) {
+            return;
         }
 
-        String cleanLine = normalize(lineText);
-        if (cleanLine.isBlank()) {
-            return null;
+        cacheItemFromStyle(component.getStyle(), component.getString(), fullMessageText);
+
+        for (Component sibling : component.getSiblings()) {
+            cacheItemsFromComponent(sibling, fullMessageText);
         }
-        ArrayList<String> bracketTokens = extractBracketTokens(cleanLine);
-
-        for (int i = bracketTokens.size() - 1; i >= 0; i--) {
-            String token = bracketTokens.get(i);
-            if (!isItemToken(token)) {
-                continue;
-            }
-
-            CachedIcon cachedIcon;
-            synchronized (ITEM_CACHE) {
-                cleanupCache(System.currentTimeMillis());
-                cachedIcon = ITEM_CACHE.get(token);
-            }
-
-            if (cachedIcon != null && cachedIcon.stack() != null && !cachedIcon.stack().isEmpty()) {
-                int index = findOriginalIndex(lineText, token);
-                if (index >= 0) {
-                    return new ItemIconMatch(cachedIcon.stack().copy(), index);
-                }
-            }
-        }
-        return findWrappedItemStartForLine(lineText);
     }
 
-    private static ItemIconMatch findWrappedItemStartForLine(String lineText) {
-        if (lineText == null || lineText.isBlank()) {
+    private static void cacheItemFromStyle(Style style, String componentText, String fullMessageText) {
+        if (style == null || componentText == null || componentText.isBlank()) {
+            return;
+        }
+
+        HoverEvent hoverEvent = style.getHoverEvent();
+        if (hoverEvent == null) {
+            return;
+        }
+
+        try {
+            HoverEvent.ItemStackInfo itemInfo = hoverEvent.getValue(HoverEvent.Action.SHOW_ITEM);
+            if (itemInfo == null) {
+                return;
+            }
+
+            ItemStack stack = itemInfo.getItemStack();
+            if (stack == null || stack.isEmpty()) {
+                return;
+            }
+
+            String itemText = normalize(componentText);
+            if (!isItemToken(itemText)) {
+                return;
+            }
+
+            long now = System.currentTimeMillis();
+
+            synchronized (CACHED_LINES) {
+                CACHED_LINES.add(new CachedLineIcon(
+                        fullMessageText,
+                        itemText,
+                        stack.copy(),
+                        now
+                ));
+
+                while (CACHED_LINES.size() > MAX_CACHE) {
+                    CACHED_LINES.remove(0);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static ItemIconMatch findIconForLine(String cleanLineText) {
+        if (cleanLineText == null || cleanLineText.isBlank()) {
             return null;
         }
 
-        int searchFrom = lineText.length() - 1;
+        long now = System.currentTimeMillis();
 
-        while (searchFrom >= 0) {
-            int start = lineText.lastIndexOf('[', searchFrom);
-            if (start < 0) {
-                break;
-            }
+        synchronized (CACHED_LINES) {
+            for (int i = CACHED_LINES.size() - 1; i >= 0; i--) {
+                CachedLineIcon cached = CACHED_LINES.get(i);
 
-            String partialToken = lineText.substring(start).trim();
-            String cleanPartial = normalize(partialToken);
-
-            searchFrom = start - 1;
-
-            if (cleanPartial.length() < 3 || !cleanPartial.startsWith("[")) {
-                continue;
-            }
-
-            /*
-             * Если токен полный, он уже обработан выше через extractBracketTokens.
-             */
-            if (cleanPartial.endsWith("]")) {
-                continue;
-            }
-
-            if (isChatOrRankPrefixStart(cleanPartial)) {
-                continue;
-            }
-
-            List<CachedIcon> cachedIcons = snapshotCache();
-
-            for (CachedIcon icon : cachedIcons) {
-                if (icon == null || icon.stack() == null || icon.stack().isEmpty()) {
+                if (cached == null || now - cached.createdMillis() > CACHE_TTL_MILLIS) {
                     continue;
                 }
 
-                String fullToken = normalize(icon.itemText());
-                if (!isItemToken(fullToken)) {
+                if (cached.stack() == null || cached.stack().isEmpty()) {
                     continue;
                 }
 
-                /*
-                 * Пример:
-                 * fullToken    = [Везучести Шахтерский молот (Манасталь) Нефтяной радар]
-                 * cleanPartial = [Везучести Шахтерский молот (Манасталь)
-                 */
-                if (fullToken.startsWith(cleanPartial)) {
-                    return new ItemIconMatch(icon.stack().copy(), start);
+                if (!cleanLineText.contains(cached.itemText())) {
+                    continue;
                 }
+
+                if (!cached.fullMessageText().contains(cleanLineText)
+                        && !cleanLineText.contains(cached.fullMessageText())) {
+                    continue;
+                }
+
+                return new ItemIconMatch(cached.stack().copy(), cached.itemText(), cached.createdMillis());
             }
         }
 
         return null;
     }
 
-    private static boolean isChatOrRankPrefixStart(String tokenStart) {
-        if (tokenStart == null || tokenStart.isBlank()) {
-            return true;
+    private static void cleanupCache(long now) {
+        synchronized (CACHED_LINES) {
+            Iterator<CachedLineIcon> iterator = CACHED_LINES.iterator();
+
+            while (iterator.hasNext()) {
+                CachedLineIcon cached = iterator.next();
+
+                if (cached == null || now - cached.createdMillis() > CACHE_TTL_MILLIS) {
+                    iterator.remove();
+                }
+            }
         }
-
-        String lowered = normalize(tokenStart).toLowerCase(java.util.Locale.ROOT);
-
-        return lowered.startsWith("[l]")
-                || lowered.startsWith("[g]")
-                || lowered.startsWith("[pm]")
-                || lowered.startsWith("[all]")
-                || lowered.startsWith("[lv]")
-                || lowered.startsWith("[hv]")
-                || lowered.startsWith("[lp]")
-                || lowered.startsWith("[admin]")
-                || lowered.startsWith("[админ]")
-                || lowered.startsWith("[curator]")
-                || lowered.startsWith("[куратор]")
-                || lowered.startsWith("[модер]")
-                || lowered.startsWith("[moder]")
-                || lowered.startsWith("[system]")
-                || lowered.startsWith("[chat]");
     }
 
-    public static void drawChatItem(GuiGraphics graphics, ItemStack stack, int x, int y, float scale, float z) {
+    private static boolean isItemToken(String token) {
+        if (token == null) {
+            return false;
+        }
+
+        String clean = normalize(token);
+        if (clean.length() < 3) {
+            return false;
+        }
+
+        if (!clean.startsWith("[") || !clean.endsWith("]")) {
+            return false;
+        }
+
+        String inside = clean.substring(1, clean.length() - 1).trim();
+        if (inside.isBlank()) {
+            return false;
+        }
+
+        String lowered = inside.toLowerCase(java.util.Locale.ROOT);
+
+        return !lowered.equals("l")
+                && !lowered.equals("g")
+                && !lowered.equals("pm")
+                && !lowered.equals("all")
+                && !lowered.equals("system")
+                && !lowered.equals("chat")
+                && !lowered.equals("lv")
+                && !lowered.equals("hv")
+                && !lowered.equals("lp")
+                && !lowered.equals("admin")
+                && !lowered.equals("админ")
+                && !lowered.equals("куратор")
+                && !lowered.equals("curator");
+    }
+
+    private static void drawChatItem(GuiGraphics graphics, ItemStack stack, int x, int y, float scale, float z) {
         if (graphics == null || stack == null || stack.isEmpty()) {
             return;
         }
@@ -333,68 +342,38 @@ public final class CointCoreGTOItemIconOverlay {
         graphics.pose().popPose();
     }
 
-    private static boolean isLineVisibleInClosedChat(String lineText) {
-        if (lineText == null || lineText.isBlank()) {
-            return false;
+    private static int findOriginalIndex(String lineText, String itemText) {
+        if (lineText == null || lineText.isBlank() || itemText == null || itemText.isBlank()) {
+            return -1;
         }
 
-        String key = normalize(lineText);
-
-        if (key.isBlank()) {
-            return false;
+        int exact = lineText.indexOf(itemText);
+        if (exact >= 0) {
+            return exact;
         }
 
-        long now = System.currentTimeMillis();
+        String cleanLine = normalize(lineText);
+        String cleanItem = normalize(itemText);
 
-        cleanupClosedChatSeenLines(now);
-
-        Long expiredAt = CLOSED_CHAT_LINE_EXPIRED_AT.get(key);
-
-        if (expiredAt != null) {
-            // Same text may appear again later. Treat it as a new chat line after cleanup window.
-            if (now - expiredAt <= CLOSED_CHAT_SEEN_CLEANUP_MILLIS) {
-                return false;
-            }
-
-            CLOSED_CHAT_LINE_EXPIRED_AT.remove(key);
-        }
-
-        Long firstSeen = CLOSED_CHAT_LINE_FIRST_SEEN.get(key);
-
-        if (firstSeen == null) {
-            CLOSED_CHAT_LINE_FIRST_SEEN.put(key, now);
-            return true;
-        }
-
-        if (now - firstSeen > CLOSED_CHAT_VISIBLE_MILLIS) {
-            CLOSED_CHAT_LINE_FIRST_SEEN.remove(key);
-            CLOSED_CHAT_LINE_EXPIRED_AT.put(key, now);
-            return false;
-        }
-
-        return true;
+        return cleanLine.indexOf(cleanItem);
     }
 
-    private static void cleanupClosedChatSeenLines(long now) {
-        Iterator<Map.Entry<String, Long>> firstSeenIterator = CLOSED_CHAT_LINE_FIRST_SEEN.entrySet().iterator();
-
-        while (firstSeenIterator.hasNext()) {
-            Map.Entry<String, Long> entry = firstSeenIterator.next();
-
-            if (entry.getValue() == null || now - entry.getValue() > CLOSED_CHAT_SEEN_CLEANUP_MILLIS) {
-                firstSeenIterator.remove();
-            }
+    private static String formattedCharSequenceToString(FormattedCharSequence sequence) {
+        if (sequence == null) {
+            return "";
         }
 
-        Iterator<Map.Entry<String, Long>> expiredIterator = CLOSED_CHAT_LINE_EXPIRED_AT.entrySet().iterator();
+        StringBuilder builder = new StringBuilder();
 
-        while (expiredIterator.hasNext()) {
-            Map.Entry<String, Long> entry = expiredIterator.next();
-
-            if (entry.getValue() == null || now - entry.getValue() > CLOSED_CHAT_SEEN_CLEANUP_MILLIS) {
-                expiredIterator.remove();
-            }
+        try {
+            sequence.accept((int index, Style style, int codePoint) -> {
+                builder.appendCodePoint(codePoint);
+                return true;
+            });
+        } catch (Throwable ignored) {
         }
+
+        return builder.toString();
     }
 
     private static List<GuiMessage.Line> getTrimmedMessagesSafe(ChatComponent chat) {
@@ -535,233 +514,6 @@ public final class CointCoreGTOItemIconOverlay {
         return null;
     }
 
-    private static void cacheItemsFromComponent(Component component) {
-        if (component == null) {
-            return;
-        }
-
-        cacheItemFromStyle(component.getStyle(), component.getString());
-
-        for (Component sibling : component.getSiblings()) {
-            cacheItemsFromComponent(sibling);
-        }
-    }
-
-    private static void cacheItemFromStyle(Style style, String text) {
-        if (style == null || text == null || text.isBlank()) {
-            return;
-        }
-
-        HoverEvent hoverEvent = style.getHoverEvent();
-        if (hoverEvent == null) {
-            return;
-        }
-
-        try {
-            HoverEvent.ItemStackInfo itemInfo = hoverEvent.getValue(HoverEvent.Action.SHOW_ITEM);
-            if (itemInfo == null) {
-                return;
-            }
-
-            ItemStack stack = itemInfo.getItemStack();
-            if (stack == null || stack.isEmpty()) {
-                return;
-            }
-
-            cacheIcon(text, stack);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private static void cacheIcon(String itemText, ItemStack stack) {
-        if (itemText == null || itemText.isBlank() || stack == null || stack.isEmpty()) {
-            return;
-        }
-
-        String cleanItemText = normalize(itemText);
-        if (!isItemToken(cleanItemText)) {
-            return;
-        }
-
-        long now = System.currentTimeMillis();
-        ItemStack copy = stack.copy();
-
-        synchronized (ITEM_CACHE) {
-            ITEM_CACHE.put(cleanItemText, new CachedIcon(cleanItemText, copy, now));
-
-            String hoverName = stack.getHoverName().getString();
-            String hoverToken = normalize("[" + hoverName + "]");
-            if (isItemToken(hoverToken)) {
-                ITEM_CACHE.put(hoverToken, new CachedIcon(hoverToken, copy.copy(), now));
-            }
-
-            String descriptionName = stack.getItem().getDescription().getString();
-            String descriptionToken = normalize("[" + descriptionName + "]");
-            if (isItemToken(descriptionToken)) {
-                ITEM_CACHE.put(descriptionToken, new CachedIcon(descriptionToken, copy.copy(), now));
-            }
-
-            cleanupCache(now);
-
-            if (ITEM_CACHE.size() > MAX_CACHE) {
-                Iterator<String> iterator = ITEM_CACHE.keySet().iterator();
-                while (ITEM_CACHE.size() > MAX_CACHE && iterator.hasNext()) {
-                    iterator.next();
-                    iterator.remove();
-                }
-            }
-        }
-    }
-
-    private static List<CachedIcon> snapshotCache() {
-        long now = System.currentTimeMillis();
-
-        synchronized (ITEM_CACHE) {
-            cleanupCache(now);
-
-            ArrayList<CachedIcon> snapshot = new ArrayList<>(ITEM_CACHE.values());
-            snapshot.sort(Comparator.comparingInt((CachedIcon icon) -> icon.itemText().length()).reversed());
-            return snapshot;
-        }
-    }
-
-    private static void cleanupCache(long now) {
-        Iterator<Map.Entry<String, CachedIcon>> iterator = ITEM_CACHE.entrySet().iterator();
-
-        while (iterator.hasNext()) {
-            Map.Entry<String, CachedIcon> entry = iterator.next();
-
-            if (entry.getValue() == null || now - entry.getValue().createdMillis() > CACHE_TTL_MILLIS) {
-                iterator.remove();
-            }
-        }
-    }
-
-    private static int findOriginalIndex(String lineText, String normalizedItemText) {
-        if (lineText == null || lineText.isBlank() || normalizedItemText == null || normalizedItemText.isBlank()) {
-            return -1;
-        }
-
-        String cleanNeedle = normalize(normalizedItemText);
-        if (cleanNeedle.isBlank()) {
-            return -1;
-        }
-
-        int exactIndex = lineText.indexOf(cleanNeedle);
-        if (exactIndex >= 0) {
-            return exactIndex;
-        }
-
-        String withoutBrackets = cleanNeedle;
-        if (withoutBrackets.startsWith("[") && withoutBrackets.endsWith("]") && withoutBrackets.length() >= 2) {
-            withoutBrackets = withoutBrackets.substring(1, withoutBrackets.length() - 1);
-        }
-
-        exactIndex = lineText.indexOf("[" + withoutBrackets + "]");
-        if (exactIndex >= 0) {
-            return exactIndex;
-        }
-
-        exactIndex = lineText.indexOf(withoutBrackets);
-        if (exactIndex >= 0) {
-            return exactIndex;
-        }
-
-        return normalize(lineText).indexOf(cleanNeedle);
-    }
-
-    private static ArrayList<String> extractBracketTokens(String text) {
-        ArrayList<String> tokens = new ArrayList<>();
-
-        if (text == null || text.isBlank()) {
-            return tokens;
-        }
-
-        int index = 0;
-        while (index < text.length()) {
-            int start = text.indexOf('[', index);
-            if (start < 0) {
-                break;
-            }
-
-            int end = text.indexOf(']', start + 1);
-            if (end < 0) {
-                break;
-            }
-
-            String token = text.substring(start, end + 1).trim();
-            if (!token.isBlank()) {
-                tokens.add(token);
-            }
-
-            index = end + 1;
-        }
-
-        return tokens;
-    }
-
-    private static boolean isItemToken(String token) {
-        if (token == null) {
-            return false;
-        }
-
-        String clean = normalize(token);
-        if (clean.length() < 3) {
-            return false;
-        }
-
-        if (!clean.startsWith("[") || !clean.endsWith("]")) {
-            return false;
-        }
-
-        String inside = clean.substring(1, clean.length() - 1).trim();
-        if (inside.isBlank()) {
-            return false;
-        }
-
-        String lowered = inside.toLowerCase(java.util.Locale.ROOT);
-
-        if (lowered.equals("l")
-                || lowered.equals("g")
-                || lowered.equals("pm")
-                || lowered.equals("all")
-                || lowered.equals("system")
-                || lowered.equals("chat")
-                || lowered.equals("lv")
-                || lowered.equals("hv")
-                || lowered.equals("lp")
-                || lowered.equals("admin")
-                || lowered.equals("админ")
-                || lowered.equals("куратор")
-                || lowered.equals("curator")) {
-            return false;
-        }
-
-        if (lowered.matches("\\d{1,2}:\\d{2}.*")) {
-            return false;
-        }
-
-        return true;
-    }
-
-    private static String formattedCharSequenceToString(FormattedCharSequence sequence) {
-        if (sequence == null) {
-            return "";
-        }
-
-        StringBuilder builder = new StringBuilder();
-
-        try {
-            sequence.accept((int index, Style style, int codePoint) -> {
-                builder.appendCodePoint(codePoint);
-                return true;
-            });
-        } catch (Throwable ignored) {
-        }
-
-        return builder.toString();
-    }
-
     private static String normalize(String text) {
         if (text == null) {
             return "";
@@ -774,9 +526,9 @@ public final class CointCoreGTOItemIconOverlay {
                 .trim();
     }
 
-    private record CachedIcon(String itemText, ItemStack stack, long createdMillis) {
+    private record CachedLineIcon(String fullMessageText, String itemText, ItemStack stack, long createdMillis) {
     }
 
-    public record ItemIconMatch(ItemStack stack, int itemStart) {
+    private record ItemIconMatch(ItemStack stack, String itemText, long createdMillis) {
     }
 }

@@ -12,6 +12,8 @@ import net.minecraftforge.fml.common.Mod;
         bus = Mod.EventBusSubscriber.Bus.FORGE
 )
 public final class ReservedSlots {
+    private static boolean displaySlotsLogged = false;
+
     private ReservedSlots() {
     }
 
@@ -54,12 +56,27 @@ public final class ReservedSlots {
     public static int getPublicSlotsForDisplay(int originalMaxPlayers) {
         int publicSlots = getPublicSlots();
 
+        if (!displaySlotsLogged) {
+            displaySlotsLogged = true;
+
+            System.out.println("[CointCoreGTO] Server list slots: originalMaxPlayers="
+                    + originalMaxPlayers
+                    + ", publicSlots="
+                    + publicSlots);
+        }
+
         if (publicSlots <= 0) {
             return originalMaxPlayers;
         }
 
-        return publicSlots;
+        if (originalMaxPlayers <= 0) {
+            return publicSlots;
+        }
+
+        return Math.min(publicSlots, originalMaxPlayers);
     }
+
+
 
     private static boolean hasReservedSlotPermission(ServerPlayer player) {
         if (player == null) {
