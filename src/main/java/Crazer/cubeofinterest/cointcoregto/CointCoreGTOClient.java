@@ -105,14 +105,46 @@ public class CointCoreGTOClient {
                 || cleanText.contains("[ЛС]")
                 || cleanText.toLowerCase(java.util.Locale.ROOT).contains("private");
 
+        if (privateMessage && isOutgoingPrivateMessage(cleanText)) {
+            return;
+        }
+
+        boolean incomingPrivateMessage = privateMessage && isIncomingPrivateMessage(cleanText);
+
         String messageBody = getMessageBodyAfterColon(cleanText);
         boolean mentionedByName = containsIgnoreCase(messageBody, playerName);
 
-        if (!privateMessage && !mentionedByName) {
+        if (!incomingPrivateMessage && !mentionedByName) {
             return;
         }
 
         playMentionSound();
+    }
+
+    private static boolean isOutgoingPrivateMessage(String cleanText) {
+        if (cleanText == null || cleanText.isBlank()) {
+            return false;
+        }
+
+        String lowered = cleanText.toLowerCase(java.util.Locale.ROOT);
+
+        return lowered.contains("вы ->")
+                || lowered.contains("you ->")
+                || lowered.contains("я ->")
+                || lowered.contains("me ->");
+    }
+
+    private static boolean isIncomingPrivateMessage(String cleanText) {
+        if (cleanText == null || cleanText.isBlank()) {
+            return false;
+        }
+
+        String lowered = cleanText.toLowerCase(java.util.Locale.ROOT);
+
+        return lowered.contains("-> вы")
+                || lowered.contains("-> you")
+                || lowered.contains("-> мне")
+                || lowered.contains("-> me");
     }
 
     private static void playMentionSound() {

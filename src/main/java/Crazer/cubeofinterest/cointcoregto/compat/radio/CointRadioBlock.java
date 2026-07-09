@@ -128,34 +128,25 @@ public class CointRadioBlock extends BaseEntityBlock {
         }
 
         if (player.isShiftKeyDown()) {
-            CointRadioNetwork.sendOpenScreen(
-                    serverPlayer,
-                    pos,
-                    CointRadioConfig.getStationScreenEntries(),
-                    radio.getStationId(),
-                    radio.isActive(),
-                    radio.getRadius(),
-                    radio.getCustomUrl()
-            );
-
-            return InteractionResult.SUCCESS;
-        }
-
-        if (!radio.isActive()) {
-            radio.setActive(true);
-
-            player.displayClientMessage(
-                    Component.literal("§a[CointMusic] Радио включено. Радиус: §f" + radio.getRadius()),
-                    true
-            );
-        } else {
             String nextStation = radio.nextStation();
 
             player.displayClientMessage(
                     Component.literal("§e[CointMusic] Следующая станция: §f" + CointRadioConfig.getStationName(nextStation)),
                     true
             );
+
+            return InteractionResult.SUCCESS;
         }
+
+        CointRadioNetwork.sendOpenScreen(
+                serverPlayer,
+                pos,
+                CointRadioConfig.getStationScreenEntries(),
+                radio.getStationId(),
+                radio.isActive(),
+                radio.getRadius(),
+                radio.getCustomUrl()
+        );
 
         return InteractionResult.SUCCESS;
     }

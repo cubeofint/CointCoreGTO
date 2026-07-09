@@ -30,8 +30,9 @@ public class CointRadioBlockItem extends BlockItem {
             TooltipFlag flag
     ) {
         tooltip.add(Component.literal("Онлайн-радио GTO").withStyle(ChatFormatting.GOLD));
-        tooltip.add(Component.literal("ПКМ по радио: включить / следующая станция").withStyle(ChatFormatting.GRAY));
-        tooltip.add(Component.literal("Shift + ПКМ по радио: открыть меню").withStyle(ChatFormatting.GRAY));
+        tooltip.add(Component.literal("ПКМ по радио: открыть меню").withStyle(ChatFormatting.GRAY));
+        tooltip.add(Component.literal("Shift + ПКМ по радио: следующая станция").withStyle(ChatFormatting.GRAY));
+        tooltip.add(Component.literal("Включение/выключение: через меню").withStyle(ChatFormatting.GRAY));
         tooltip.add(Component.literal("Поддержка: OGG, MP3, M3U/PLS, online stream").withStyle(ChatFormatting.DARK_AQUA));
         tooltip.add(Component.literal("Создание: Shift + ПКМ по воздуху с проигрывателем").withStyle(ChatFormatting.YELLOW));
         tooltip.add(Component.literal("Нужно: проигрыватель + нотный блок + редстоун").withStyle(ChatFormatting.DARK_GRAY));

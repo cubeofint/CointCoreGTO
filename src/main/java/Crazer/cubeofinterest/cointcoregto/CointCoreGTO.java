@@ -3522,20 +3522,8 @@ public class CointCoreGTO {
         if (player == null) {
             return false;
         }
-
-        // Скрываем только тех, кого специально спрятали от Discord-онлайна.
-        // Не используем player.isInvisible(), spectator, обычные теги vanished/hidden:
-        // в модпаках они часто появляются не из-за настоящего vanish и ломают онлайн-список.
-        if (player.getTags().contains("cointcoregto_hide_online")
-                || player.getTags().contains("cointcoregto_hidden")) {
-            return false;
-        }
-
-        if (hasPermissionNode(player, "cointcoregto.discord.hideonline")) {
-            return false;
-        }
-
-        return true;
+        return !player.getTags().contains("cointcoregto_hide_online")
+                && !player.getTags().contains("cointcoregto_hidden");
     }
 
     private static boolean isFtbEssentialsVanished(ServerPlayer player) {

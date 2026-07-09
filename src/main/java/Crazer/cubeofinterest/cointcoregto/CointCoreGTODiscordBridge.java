@@ -313,7 +313,6 @@ public class CointCoreGTODiscordBridge {
         if (targetId.equals(channelId)) {
             return true;
         }
-
         try {
             Object channel = event.getChannel();
             Object parentChannel = channel.getClass().getMethod("getParentChannel").invoke(channel);
@@ -378,7 +377,24 @@ public class CointCoreGTODiscordBridge {
             return;
         }
 
-        Thread thread = new Thread(CointCoreGTODiscordBridge::updateOnlineStatusMessageNow, "CointDiscord-OnlineStatus-Manual");
+        scheduleOnlineStatusUpdate(0L);
+        scheduleOnlineStatusUpdate(3L);
+        scheduleOnlineStatusUpdate(10L);
+    }
+
+    private static void scheduleOnlineStatusUpdate(long delaySeconds) {
+        Thread thread = new Thread(() -> {
+            try {
+                if (delaySeconds > 0L) {
+                    Thread.sleep(delaySeconds * 1000L);
+                }
+
+                updateOnlineStatusMessageNow();
+            } catch (Throwable error) {
+                System.out.println("[CointDiscord] Online status manual update failed: " + error.getMessage());
+            }
+        }, "CointDiscord-OnlineStatus-Manual-" + delaySeconds);
+
         thread.setDaemon(true);
         thread.start();
     }
