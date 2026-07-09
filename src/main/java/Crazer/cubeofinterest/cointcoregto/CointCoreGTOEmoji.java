@@ -235,15 +235,20 @@ public final class CointCoreGTOEmoji {
             String id = matcher.group(2);
             boolean animated = matcher.group(0).startsWith("<a:");
 
-            if (name != null && id != null && !id.isBlank()) {
-                if (!SERVER_EMOJIS_BY_NAME.containsKey(name)) {
-                    putServerEmoji(new EmojiInfo(name, id, animated));
-                    changedRegistry = true;
-                    System.out.println("[CointCoreGTOEmoji] discordToMinecraft: learned emoji name=\"" + name + "\" id=" + id + " animated=" + animated);
-                }
-
-                matcher.appendReplacement(buffer, Matcher.quoteReplacement(":" + name + ":"));
+            if (name == null || id == null || id.isBlank()) {
+                matcher.appendReplacement(buffer, "");
+                continue;
             }
+
+            if (!SERVER_EMOJIS_BY_NAME.containsKey(name)
+                    && !SERVER_EMOJIS_BY_NAME.containsKey(name.toLowerCase(Locale.ROOT))) {
+                putServerEmoji(new EmojiInfo(name, id, animated));
+                changedRegistry = true;
+                System.out.println("[CointCoreGTOEmoji] discordToMinecraft: learned emoji name=\"" + name + "\" id=" + id + " animated=" + animated);
+            }
+
+            String minecraftEmojiName = name.toLowerCase(Locale.ROOT);
+            matcher.appendReplacement(buffer, Matcher.quoteReplacement(":" + minecraftEmojiName + ":"));
         }
 
         matcher.appendTail(buffer);
@@ -341,10 +346,24 @@ public final class CointCoreGTOEmoji {
     private static List<EmojiMatch> findEmojiMatches(String lineText) {
         ArrayList<EmojiMatch> result = new ArrayList<>();
 
+        if (lineText == null || lineText.isBlank()) {
+            return result;
+        }
+
         Matcher matcher = MINECRAFT_EMOJI_TOKEN_PATTERN.matcher(lineText);
         while (matcher.find()) {
-            String name = sanitizeEmojiName(matcher.group(1));
-            EmojiInfo info = name == null ? null : findClientEmoji(name);
+            String rawName = matcher.group(1);
+            String name = sanitizeEmojiName(rawName);
+
+            if (name == null) {
+                continue;
+            }
+
+            EmojiInfo info = findClientEmoji(name);
+
+            if (info == null) {
+                info = findClientEmoji(name.toLowerCase(Locale.ROOT));
+            }
 
             if (info != null) {
                 result.add(new EmojiMatch(info, matcher.start(), matcher.end()));

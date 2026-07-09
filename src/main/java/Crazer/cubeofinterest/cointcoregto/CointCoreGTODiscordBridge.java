@@ -30,9 +30,11 @@ public class CointCoreGTODiscordBridge {
     private static JDA jda;
     private static TextChannel textChannel;
     private static TextChannel logChannel;
+    private static String botToken = "";
     private static MinecraftServer server;
     private static boolean enabled = false;
     private static boolean sendServerStatus = true;
+    private static long lastOnlineStatusErrorLogMillis = 0L;
 
     private static String webhookUrl = "";
     private static String avatarUrlTemplate = "https://mawlee.org/api/skin-api/skins/%username%.png";
@@ -58,6 +60,7 @@ public class CointCoreGTODiscordBridge {
         server = minecraftServer;
         enabled = bridgeEnabled;
         sendServerStatus = statusMessages;
+        botToken = token == null ? "" : token.trim();
         webhookUrl = configuredWebhookUrl == null ? "" : configuredWebhookUrl.trim();
         avatarUrlTemplate = configuredAvatarUrlTemplate == null || configuredAvatarUrlTemplate.isBlank()
                 ? ""
@@ -182,6 +185,7 @@ public class CointCoreGTODiscordBridge {
         textChannel = null;
         logChannel = null;
         server = null;
+        botToken = "";
 
         if (sendServerStatus && oldTextChannel != null) {
             try {
@@ -348,6 +352,10 @@ public class CointCoreGTODiscordBridge {
 
         String message = event.getMessage().getContentRaw();
 
+        if (message == null || message.isBlank()) {
+            message = event.getMessage().getContentDisplay();
+        }
+
         message = removeBotMention(event, message);
         message = CointCoreGTOEmoji.discordToMinecraft(message);
 
@@ -464,19 +472,7 @@ public class CointCoreGTODiscordBridge {
                 return;
             }
 
-            statusChannel.retrieveMessageById(messageId).queue(
-                    message -> message.editMessage(messageText).queue(
-                            success -> {},
-                            error -> {
-                                System.out.println("[CointDiscord] Failed to edit online status message: " + error.getMessage());
-                                sendNewOnlineStatusMessage(statusChannel, messageText);
-                            }
-                    ),
-                    error -> {
-                        System.out.println("[CointDiscord] Online status message not found, creating a new one.");
-                        sendNewOnlineStatusMessage(statusChannel, messageText);
-                    }
-            );
+            editOnlineStatusMessageRaw(statusChannel, messageId, messageText);
         });
     }
 
@@ -493,6 +489,72 @@ public class CointCoreGTODiscordBridge {
         }
 
         return textChannel;
+    }
+
+    private static void editOnlineStatusMessageRaw(TextChannel channel, String messageId, String messageText) {
+        if (channel == null || messageId == null || messageId.isBlank()) {
+            return;
+        }
+
+        if (botToken == null || botToken.isBlank()) {
+            logOnlineStatusError("[CointDiscord] Cannot edit online status message: bot token is empty.");
+            sendNewOnlineStatusMessage(channel, messageText);
+            return;
+        }
+
+        String payload = "{"
+                + "\"content\":\"" + jsonEscape(messageText == null ? "" : messageText) + "\","
+                + "\"allowed_mentions\":{\"parse\":[]}"
+                + "}";
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://discord.com/api/v10/channels/"
+                            + channel.getId()
+                            + "/messages/"
+                            + messageId.trim()))
+                    .header("Authorization", "Bot " + botToken)
+                    .header("Content-Type", "application/json; charset=utf-8")
+                    .method("PATCH", HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                    .build();
+
+            HTTP_CLIENT.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+                    .thenAccept(response -> {
+                        int code = response.statusCode();
+
+                        if (code >= 200 && code < 300) {
+                            return;
+                        }
+
+                        logOnlineStatusError("[CointDiscord] Failed to edit online status message via HTTP. Code: "
+                                + code
+                                + ", body: "
+                                + response.body());
+
+                        if (code == 404) {
+                            logOnlineStatusError("[CointDiscord] Online status message not found, creating a new one.");
+                            sendNewOnlineStatusMessage(channel, messageText);
+                        }
+                    })
+                    .exceptionally(error -> {
+                        logOnlineStatusError("[CointDiscord] Failed to edit online status message via HTTP: "
+                                + error.getMessage());
+                        return null;
+                    });
+        } catch (Throwable e) {
+            logOnlineStatusError("[CointDiscord] Failed to build online status edit request: " + e.getMessage());
+        }
+    }
+
+    private static void logOnlineStatusError(String message) {
+        long now = System.currentTimeMillis();
+
+        if (now - lastOnlineStatusErrorLogMillis < 60_000L) {
+            return;
+        }
+
+        lastOnlineStatusErrorLogMillis = now;
+        System.out.println(message);
     }
 
     private static void sendNewOnlineStatusMessage(TextChannel channel, String messageText) {

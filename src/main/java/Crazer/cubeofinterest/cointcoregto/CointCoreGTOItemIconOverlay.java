@@ -151,6 +151,11 @@ public final class CointCoreGTOItemIconOverlay {
             }
 
             ItemIconMatch match = findIconForLine(cleanLineText);
+
+            if (match == null) {
+                match = findWrappedIconForLine(cleanLineText);
+            }
+
             if (match == null || match.stack() == null || match.stack().isEmpty()) {
                 renderedVisibleIndex++;
                 continue;
@@ -161,7 +166,7 @@ public final class CointCoreGTOItemIconOverlay {
                 continue;
             }
 
-            int itemStart = findOriginalIndex(lineText, match.itemText());
+            int itemStart = findOriginalIndex(lineText, match.searchText());
             if (itemStart < 0 || itemStart > lineText.length()) {
                 renderedVisibleIndex++;
                 continue;
@@ -268,7 +273,68 @@ public final class CointCoreGTOItemIconOverlay {
                     continue;
                 }
 
-                return new ItemIconMatch(cached.stack().copy(), cached.itemText(), cached.createdMillis());
+                return new ItemIconMatch(cached.stack().copy(), cached.itemText(), cached.itemText(), cached.createdMillis());
+            }
+        }
+
+        return null;
+    }
+
+    private static ItemIconMatch findWrappedIconForLine(String cleanLineText) {
+        if (cleanLineText == null || cleanLineText.isBlank()) {
+            return null;
+        }
+
+        int bracketStart = cleanLineText.lastIndexOf('[');
+        if (bracketStart < 0) {
+            return null;
+        }
+
+        String partialToken = cleanLineText.substring(bracketStart).trim();
+
+        if (partialToken.length() < 4) {
+            return null;
+        }
+
+        if (partialToken.endsWith("]")) {
+            return null;
+        }
+
+        if (isChatPrefixTokenStart(partialToken)) {
+            return null;
+        }
+
+        long now = System.currentTimeMillis();
+
+        synchronized (CACHED_LINES) {
+            for (int i = CACHED_LINES.size() - 1; i >= 0; i--) {
+                CachedLineIcon cached = CACHED_LINES.get(i);
+
+                if (cached == null || now - cached.createdMillis() > CACHE_TTL_MILLIS) {
+                    continue;
+                }
+
+                if (cached.stack() == null || cached.stack().isEmpty()) {
+                    continue;
+                }
+
+                String cachedItemText = normalize(cached.itemText());
+
+                if (!cachedItemText.startsWith(partialToken)) {
+                    continue;
+                }
+
+                if (!cached.fullMessageText().contains(partialToken)
+                        && !cached.fullMessageText().contains(cachedItemText)) {
+                    continue;
+                }
+
+                return new ItemIconMatch(
+                        cached.stack().copy(),
+                        cached.itemText(),
+                        partialToken,
+                        cached.createdMillis()
+                );
             }
         }
 
@@ -287,6 +353,30 @@ public final class CointCoreGTOItemIconOverlay {
                 }
             }
         }
+    }
+
+    private static boolean isChatPrefixTokenStart(String tokenStart) {
+        if (tokenStart == null || tokenStart.isBlank()) {
+            return true;
+        }
+
+        String lowered = normalize(tokenStart).toLowerCase(java.util.Locale.ROOT);
+
+        return lowered.startsWith("[l]")
+                || lowered.startsWith("[g]")
+                || lowered.startsWith("[pm]")
+                || lowered.startsWith("[all]")
+                || lowered.startsWith("[lv]")
+                || lowered.startsWith("[hv]")
+                || lowered.startsWith("[lp]")
+                || lowered.startsWith("[admin]")
+                || lowered.startsWith("[админ]")
+                || lowered.startsWith("[curator]")
+                || lowered.startsWith("[куратор]")
+                || lowered.startsWith("[модер]")
+                || lowered.startsWith("[moder]")
+                || lowered.startsWith("[system]")
+                || lowered.startsWith("[chat]");
     }
 
     private static boolean isItemToken(String token) {
@@ -529,6 +619,6 @@ public final class CointCoreGTOItemIconOverlay {
     private record CachedLineIcon(String fullMessageText, String itemText, ItemStack stack, long createdMillis) {
     }
 
-    private record ItemIconMatch(ItemStack stack, String itemText, long createdMillis) {
+    private record ItemIconMatch(ItemStack stack, String itemText, String searchText, long createdMillis) {
     }
 }

@@ -7,7 +7,8 @@
     "ServerStatusPlayersMixin"
   ],
   "client": [
-    "CointCoreGTOChatComponentMixin"
+    "CointCoreGTOChatComponentMixin",
+    "CointHideForgeServerListStatusMixin"
   ],
   "injectors": {
     "defaultRequire": 0
