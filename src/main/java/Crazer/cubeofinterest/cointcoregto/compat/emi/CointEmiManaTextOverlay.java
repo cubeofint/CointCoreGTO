@@ -201,7 +201,9 @@ public final class CointEmiManaTextOverlay {
                     + ")";
         }
 
-        drawManaText(event.getGuiGraphics(), minecraft.font, screen, text);
+        CointManaOverlayDragMode.Target target = resolveSingleTarget(screen, info);
+
+        drawManaText(event.getGuiGraphics(), minecraft.font, screen, target, text);
     }
 
     private static boolean tryRenderManaPoolRecipes(GuiGraphics graphics, Font font, Screen screen) {
@@ -218,7 +220,6 @@ public final class CointEmiManaTextOverlay {
         boolean isManaPoolPage =
                 containsClassOrString(currentPage, "mana_infusion", new IdentityHashMap<>(), 0)
                         || containsClassOrString(currentPage, "manainfusion", new IdentityHashMap<>(), 0)
-                        || containsClassOrString(currentPage, "mana_pool", new IdentityHashMap<>(), 0)
                         || containsClassOrString(currentPage, "Наполнение маной", new IdentityHashMap<>(), 0);
 
         if (!isManaPoolPage) {
@@ -229,7 +230,7 @@ public final class CointEmiManaTextOverlay {
             return false;
         }
 
-        int index = 0;
+        int renderedIndex = 0;
         boolean rendered = false;
 
         for (Object recipeEntry : recipes) {
@@ -240,20 +241,17 @@ public final class CointEmiManaTextOverlay {
             Integer mana = readManaFromObject(recipeEntry, new IdentityHashMap<>(), 0);
 
             if (mana == null || mana < 0) {
-                index++;
                 continue;
             }
 
-            drawManaPoolRecipeText(
-                    graphics,
-                    font,
-                    screen,
-                    index,
-                    mana
-            );
+            drawManaPoolRecipeText(graphics, font, screen, renderedIndex, mana);
 
             rendered = true;
-            index++;
+            renderedIndex++;
+
+            if (renderedIndex >= 2) {
+                break;
+            }
         }
 
         return rendered;
@@ -270,22 +268,41 @@ public final class CointEmiManaTextOverlay {
             return;
         }
 
-        String text;
-
-        if (mana == 0) {
-            text = "§bМана: §fне требуется";
-        } else {
-            text = "§bМана: §f" + formatNumber(mana);
-        }
-
-
-        int barCenterX = screen.width / 2;
-
-
-        int y = screen.height / 2 - 36 + recipeIndex * 112;
+        String text = mana == 0
+                ? "§bМана: §fне требуется"
+                : "§bМана: §f" + formatNumber(mana);
 
         int textWidth = font.width(stripColors(text));
-        int x = barCenterX - textWidth / 2;
+
+        int x;
+        int y;
+        CointManaOverlayDragMode.Target target;
+
+        if (recipeIndex == 0) {
+            x = screen.width / 2 - textWidth / 2
+                    + CointManaOverlayClientSettings.getEmiPoolXOffset();
+
+            y = screen.height / 2 - 36
+                    + CointManaOverlayClientSettings.getEmiPoolYOffset();
+
+            target = CointManaOverlayDragMode.Target.EMI_POOL_FIRST;
+        } else {
+            x = screen.width / 2 - textWidth / 2
+                    + CointManaOverlayClientSettings.getEmiPoolSecondXOffset();
+
+            y = screen.height / 2 + 76
+                    + CointManaOverlayClientSettings.getEmiPoolSecondYOffset();
+
+            target = CointManaOverlayDragMode.Target.EMI_POOL_SECOND;
+        }
+
+        CointManaOverlayDragMode.updateBounds(
+                target,
+                x - 4,
+                y - 3,
+                textWidth + 8,
+                14
+        );
 
         graphics.pose().pushPose();
         graphics.pose().translate(0.0F, 0.0F, 600.0F);
@@ -932,6 +949,20 @@ public final class CointEmiManaTextOverlay {
             return string.toLowerCase(Locale.ROOT).contains(loweredNeedle);
         }
 
+        if (object instanceof ResourceLocation resourceLocation) {
+            return resourceLocation.toString().toLowerCase(Locale.ROOT).contains(loweredNeedle);
+        }
+
+        if (object instanceof ItemStack stack && !stack.isEmpty()) {
+            ResourceLocation id = ForgeRegistries.ITEMS.getKey(stack.getItem());
+            return id != null && id.toString().toLowerCase(Locale.ROOT).contains(loweredNeedle);
+        }
+
+        if (object instanceof Item item) {
+            ResourceLocation id = ForgeRegistries.ITEMS.getKey(item);
+            return id != null && id.toString().toLowerCase(Locale.ROOT).contains(loweredNeedle);
+        }
+
         if (object instanceof Optional<?> optional) {
             return optional
                     .map(value -> containsClassOrString(value, needle, visited, depth + 1))
@@ -1267,27 +1298,36 @@ public final class CointEmiManaTextOverlay {
                 && className.contains("recipescreen");
     }
 
-    private static void drawManaText(GuiGraphics graphics, Font font, Screen screen, String text) {
+    private static void drawManaText(
+            GuiGraphics graphics,
+            Font font,
+            Screen screen,
+            CointManaOverlayDragMode.Target target,
+            String text
+    ) {
         if (graphics == null || font == null || screen == null || text == null || text.isBlank()) {
             return;
         }
 
-        int cleanWidth = font.width(stripColors(text));
-        int boxWidth = Math.max(230, cleanWidth + 14);
+        if (target == null) {
+            target = CointManaOverlayDragMode.Target.EMI_TERRA_PLATE;
+        }
 
-        int x = screen.width / 2 - boxWidth / 2;
-        int y = screen.height / 2 + 124;
+        int cleanWidth = font.width(stripColors(text));
+
+        int x = screen.width / 2 - cleanWidth / 2 + getSingleOffsetX(target);
+        int y = screen.height / 2 + 84 + getSingleOffsetY(target);
+
+        CointManaOverlayDragMode.updateBounds(
+                target,
+                x - 4,
+                y - 3,
+                cleanWidth + 8,
+                14
+        );
 
         graphics.pose().pushPose();
         graphics.pose().translate(0.0F, 0.0F, 500.0F);
-
-        graphics.fill(
-                x - 4,
-                y - 3,
-                x + boxWidth,
-                y + 12,
-                BACKGROUND_COLOR
-        );
 
         graphics.drawString(
                 font,
@@ -1299,6 +1339,84 @@ public final class CointEmiManaTextOverlay {
         );
 
         graphics.pose().popPose();
+    }
+
+    private static CointManaOverlayDragMode.Target resolveSingleTarget(Screen screen, ManaRecipeInfo info) {
+        Object currentPage = readObjectField(screen, "currentPage");
+
+        if (isRuneRitualPage(currentPage)) {
+            return CointManaOverlayDragMode.Target.EMI_RUNE_RITUAL;
+        }
+
+        if (isRunicAltarPage(currentPage)) {
+            return CointManaOverlayDragMode.Target.EMI_RUNIC_ALTAR;
+        }
+
+        if (isManaInfuserPage(currentPage)) {
+            return CointManaOverlayDragMode.Target.EMI_MANA_INFUSER;
+        }
+
+        if (isTerraPlatePage(currentPage)) {
+            return CointManaOverlayDragMode.Target.EMI_TERRA_PLATE;
+        }
+
+        if (info != null && info.name() != null) {
+            String name = info.name().toLowerCase(Locale.ROOT);
+
+            if (name.contains("ритуал")) {
+                return CointManaOverlayDragMode.Target.EMI_RUNE_RITUAL;
+            }
+
+            if (name.contains("альфстал")) {
+                return CointManaOverlayDragMode.Target.EMI_MANA_INFUSER;
+            }
+        }
+
+        return CointManaOverlayDragMode.Target.EMI_TERRA_PLATE;
+    }
+
+    private static boolean isRuneRitualPage(Object currentPage) {
+        return currentPage != null
+                && (containsClassOrString(currentPage, "rune_ritual", new IdentityHashMap<>(), 0)
+                || containsClassOrString(currentPage, "runeritual", new IdentityHashMap<>(), 0)
+                || containsClassOrString(currentPage, "Рунический ритуал", new IdentityHashMap<>(), 0));
+    }
+
+    private static boolean isManaInfuserPage(Object currentPage) {
+        return currentPage != null
+                && (containsClassOrString(currentPage, "mythicbotany:mana_infuser", new IdentityHashMap<>(), 0)
+                || containsClassOrString(currentPage, "mana_infuser", new IdentityHashMap<>(), 0)
+                || containsClassOrString(currentPage, "manainfuser", new IdentityHashMap<>(), 0)
+                || containsClassOrString(currentPage, "Мана-инфузер", new IdentityHashMap<>(), 0));
+    }
+
+    private static boolean isTerraPlatePage(Object currentPage) {
+        return currentPage != null
+                && (containsClassOrString(currentPage, "botania:terra_plate", new IdentityHashMap<>(), 0)
+                || containsClassOrString(currentPage, "terrestrial", new IdentityHashMap<>(), 0)
+                || containsClassOrString(currentPage, "agglomeration", new IdentityHashMap<>(), 0)
+                || containsClassOrString(currentPage, "terra_plate", new IdentityHashMap<>(), 0)
+                || containsClassOrString(currentPage, "Теллурическая агломерация", new IdentityHashMap<>(), 0));
+    }
+
+    private static int getSingleOffsetX(CointManaOverlayDragMode.Target target) {
+        return switch (target) {
+            case EMI_RUNIC_ALTAR -> CointManaOverlayClientSettings.getEmiRunicAltarXOffset();
+            case EMI_TERRA_PLATE -> CointManaOverlayClientSettings.getEmiTerraPlateXOffset();
+            case EMI_MANA_INFUSER -> CointManaOverlayClientSettings.getEmiManaInfuserXOffset();
+            case EMI_RUNE_RITUAL -> CointManaOverlayClientSettings.getEmiRuneRitualXOffset();
+            default -> 0;
+        };
+    }
+
+    private static int getSingleOffsetY(CointManaOverlayDragMode.Target target) {
+        return switch (target) {
+            case EMI_RUNIC_ALTAR -> CointManaOverlayClientSettings.getEmiRunicAltarYOffset();
+            case EMI_TERRA_PLATE -> CointManaOverlayClientSettings.getEmiTerraPlateYOffset();
+            case EMI_MANA_INFUSER -> CointManaOverlayClientSettings.getEmiManaInfuserYOffset();
+            case EMI_RUNE_RITUAL -> CointManaOverlayClientSettings.getEmiRuneRitualYOffset();
+            default -> 0;
+        };
     }
 
     private static String formatNumber(int value) {

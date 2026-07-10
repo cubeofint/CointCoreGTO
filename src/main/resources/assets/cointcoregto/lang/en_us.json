@@ -1,8 +1,9 @@
 {
   "key.categories.cointcoregto": "CointCoreGTO",
   "key.cointcoregto.share_item_to_chat": "Show item in chat",
+  "key.cointcoregto.open_mana_overlay_settings": "Mana GUI settings",
+
   "subtitles.cointcoregto.mention": "Chat message",
   "block.cointcoregto.coint_radio": "Radio",
-  "config.jade.plugin_cointcoregto.radio_station": "Radio station",
-  "config.jade.plugin_cointcoregto.botania_mana_numbers": "Botania Mana Numbers"
+  "config.jade.plugin_cointcoregto.radio_station": "Radio station"
 }

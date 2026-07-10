@@ -1,6 +1,7 @@
 package Crazer.cubeofinterest.cointcoregto.compat.jade;
 
 import Crazer.cubeofinterest.cointcoregto.CointCoreGTO;
+import Crazer.cubeofinterest.cointcoregto.compat.emi.CointManaOverlayClientSettings;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
@@ -673,42 +674,33 @@ public final class CointBotaniaManaHudOverlay {
             return;
         }
 
-        int textWidth = font.width(stripColors(info.text()));
-        int boxWidth = Math.max(290, textWidth + 34);
-
         int screenWidth = minecraft.getWindow().getGuiScaledWidth();
+        int centerX = screenWidth / 2 + CointManaOverlayClientSettings.getWorldManaXOffset();
+        int y = Y_UNDER_JADE + CointManaOverlayClientSettings.getWorldManaYOffset();
 
-        int x = screenWidth / 2 - boxWidth / 2;
-        int y = Y_UNDER_JADE;
-
-        int boxHeight = info.hasBar() ? 24 : 13;
-
-        guiGraphics.fill(
-                x - 4,
-                y - 3,
-                x + boxWidth,
-                y + boxHeight,
-                BACKGROUND_COLOR
-        );
+        int textWidth = font.width(stripColors(info.text()));
+        int textX = centerX - textWidth / 2;
 
         guiGraphics.drawString(
                 font,
                 info.text(),
-                x,
+                textX,
                 y,
                 0xFFFFFFFF,
                 true
         );
 
         if (info.hasBar() && info.max() > 0) {
-            int barWidth = info.showReadyMark() ? boxWidth - 22 : boxWidth - 4;
+            int barWidth = Math.max(180, textWidth + 20);
+            int drawBarWidth = info.showReadyMark() ? barWidth - 18 : barWidth;
+            int barX = centerX - drawBarWidth / 2;
 
             drawProgressBar(
                     guiGraphics,
                     font,
-                    x,
+                    barX,
                     y + 13,
-                    barWidth,
+                    drawBarWidth,
                     info.current(),
                     info.max(),
                     info.ready(),
