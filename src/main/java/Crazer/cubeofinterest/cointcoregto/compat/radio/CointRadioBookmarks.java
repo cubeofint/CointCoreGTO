@@ -1,17 +1,22 @@
 package Crazer.cubeofinterest.cointcoregto.compat.radio;
 
-import net.minecraft.client.Minecraft;
+import net.minecraftforge.fml.loading.FMLPaths;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 
 public final class CointRadioBookmarks {
+    private static final char SEPARATOR = '\u001F';
+    private static final int MAX_BOOKMARKS = 64;
 
-    private static final List<Bookmark> BOOKMARKS = new ArrayList<>();
+    private static final ArrayList<Bookmark> BOOKMARKS = new ArrayList<>();
     private static boolean loaded = false;
 
     private CointRadioBookmarks() {
@@ -19,38 +24,109 @@ public final class CointRadioBookmarks {
 
     public static List<Bookmark> getBookmarks() {
         load();
-        return new ArrayList<>(BOOKMARKS);
+        return List.copyOf(BOOKMARKS);
     }
 
     public static void add(String url) {
+        add(createName(url), url);
+    }
+
+    public static void add(String name, String url) {
         load();
 
-        String cleanUrl = url == null ? "" : url.trim();
+        String cleanUrl = cleanUrl(url);
         if (cleanUrl.isBlank()) {
             return;
         }
 
-        for (Bookmark bookmark : BOOKMARKS) {
+        String cleanName = cleanName(name);
+        if (cleanName.isBlank()) {
+            cleanName = createName(cleanUrl);
+        }
+
+        removeInternal(cleanUrl);
+
+        BOOKMARKS.add(0, new Bookmark(cleanName, cleanUrl));
+
+        while (BOOKMARKS.size() > MAX_BOOKMARKS) {
+            BOOKMARKS.remove(BOOKMARKS.size() - 1);
+        }
+
+        save();
+    }
+
+    public static void rename(String url, String newName) {
+        load();
+
+        String cleanUrl = cleanUrl(url);
+        String cleanName = cleanName(newName);
+
+        if (cleanUrl.isBlank() || cleanName.isBlank()) {
+            return;
+        }
+
+        for (int i = 0; i < BOOKMARKS.size(); i++) {
+            Bookmark bookmark = BOOKMARKS.get(i);
+
             if (bookmark.url().equalsIgnoreCase(cleanUrl)) {
+                BOOKMARKS.set(i, new Bookmark(cleanName, bookmark.url()));
+                save();
                 return;
             }
         }
-
-        String name = createName(cleanUrl);
-        BOOKMARKS.add(new Bookmark(name, cleanUrl));
-        save();
     }
 
     public static void remove(String url) {
         load();
 
-        String cleanUrl = url == null ? "" : url.trim();
+        if (removeInternal(cleanUrl(url))) {
+            save();
+        }
+    }
+
+    public static String createName(String url) {
+        String cleanUrl = cleanUrl(url);
+
         if (cleanUrl.isBlank()) {
-            return;
+            return "Радио";
         }
 
-        BOOKMARKS.removeIf(bookmark -> bookmark.url().equalsIgnoreCase(cleanUrl));
-        save();
+        try {
+            URI uri = URI.create(cleanUrl);
+            String host = uri.getHost();
+
+            if (host != null && !host.isBlank()) {
+                host = host.toLowerCase(Locale.ROOT);
+
+                if (host.startsWith("www.")) {
+                    host = host.substring(4);
+                }
+
+                return cleanName(host);
+            }
+        } catch (Throwable ignored) {
+        }
+
+        String result = cleanUrl
+                .replace("https://", "")
+                .replace("http://", "");
+
+        int slashIndex = result.indexOf('/');
+        if (slashIndex >= 0) {
+            result = result.substring(0, slashIndex);
+        }
+
+        result = cleanName(result);
+
+        return result.isBlank() ? "Радио" : result;
+    }
+
+    private static boolean removeInternal(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+
+        return BOOKMARKS.removeIf(bookmark -> bookmark.url().equalsIgnoreCase(url));
     }
 
     private static void load() {
@@ -62,71 +138,108 @@ public final class CointRadioBookmarks {
         BOOKMARKS.clear();
 
         Path path = getPath();
+
         if (!Files.exists(path)) {
             return;
         }
 
         try {
             List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
+            LinkedHashMap<String, Bookmark> unique = new LinkedHashMap<>();
 
             for (String line : lines) {
-                String cleanLine = line == null ? "" : line.trim();
-                if (cleanLine.isBlank()) {
+                if (line == null || line.isBlank()) {
                     continue;
                 }
 
-                int separator = cleanLine.indexOf('\u001F');
-                if (separator > 0 && separator < cleanLine.length() - 1) {
-                    String name = cleanLine.substring(0, separator).trim();
-                    String url = cleanLine.substring(separator + 1).trim();
+                String name;
+                String url;
 
-                    if (!url.isBlank()) {
-                        BOOKMARKS.add(new Bookmark(name.isBlank() ? createName(url) : name, url));
-                    }
+                int separatorIndex = line.indexOf(SEPARATOR);
+
+                if (separatorIndex >= 0) {
+                    name = line.substring(0, separatorIndex);
+                    url = line.substring(separatorIndex + 1);
                 } else {
-                    BOOKMARKS.add(new Bookmark(createName(cleanLine), cleanLine));
+                    url = line;
+                    name = createName(url);
                 }
+
+                url = cleanUrl(url);
+                name = cleanName(name);
+
+                if (url.isBlank()) {
+                    continue;
+                }
+
+                if (name.isBlank()) {
+                    name = createName(url);
+                }
+
+                unique.put(url.toLowerCase(Locale.ROOT), new Bookmark(name, url));
             }
-        } catch (IOException ignored) {
+
+            BOOKMARKS.addAll(unique.values());
+
+            while (BOOKMARKS.size() > MAX_BOOKMARKS) {
+                BOOKMARKS.remove(BOOKMARKS.size() - 1);
+            }
+        } catch (Throwable e) {
+            System.out.println("[CointRadioBookmarks] Failed to load bookmarks: " + e.getMessage());
         }
     }
 
     private static void save() {
-        Path path = getPath();
-
         try {
+            Path path = getPath();
             Files.createDirectories(path.getParent());
 
-            List<String> lines = new ArrayList<>();
+            ArrayList<String> lines = new ArrayList<>();
+
             for (Bookmark bookmark : BOOKMARKS) {
-                lines.add(bookmark.name() + "\u001F" + bookmark.url());
+                if (bookmark == null || bookmark.url().isBlank()) {
+                    continue;
+                }
+
+                lines.add(cleanName(bookmark.name()) + SEPARATOR + cleanUrl(bookmark.url()));
             }
 
             Files.write(path, lines, StandardCharsets.UTF_8);
-        } catch (IOException ignored) {
+        } catch (IOException e) {
+            System.out.println("[CointRadioBookmarks] Failed to save bookmarks: " + e.getMessage());
         }
     }
 
     private static Path getPath() {
-        Minecraft minecraft = Minecraft.getInstance();
-        return minecraft.gameDirectory.toPath()
-                .resolve("config")
-                .resolve("cointcoregto_radio_bookmarks.txt");
+        return FMLPaths.CONFIGDIR.get().resolve("cointcoregto_radio_bookmarks.txt");
     }
 
-    private static String createName(String url) {
-        String clean = url;
-
-        clean = clean.replace("https://", "");
-        clean = clean.replace("http://", "");
-
-        int slash = clean.indexOf('/');
-        if (slash > 0) {
-            clean = clean.substring(0, slash);
+    private static String cleanUrl(String url) {
+        if (url == null) {
+            return "";
         }
 
-        if (clean.length() > 28) {
-            clean = clean.substring(0, 28) + "...";
+        return url.trim()
+                .replace("\r", "")
+                .replace("\n", "");
+    }
+
+    private static String cleanName(String name) {
+        if (name == null) {
+            return "";
+        }
+
+        String clean = name.trim()
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .replace(String.valueOf(SEPARATOR), " ");
+
+        while (clean.contains("  ")) {
+            clean = clean.replace("  ", " ");
+        }
+
+        if (clean.length() > 40) {
+            clean = clean.substring(0, 40).trim();
         }
 
         return clean;

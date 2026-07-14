@@ -28,9 +28,12 @@ public class CointRadioScreen extends Screen {
     private int volumePercent;
     private EditBox urlBox;
     private EditBox searchBox;
+    private EditBox bookmarkNameBox;
 
     private int stationPage = 0;
     private final List<Button> stationButtons = new ArrayList<>();
+    private final List<Button> bookmarkButtons = new ArrayList<>();
+
     private Button prevPageButton;
     private Button nextPageButton;
     private Component pageLabel = Component.empty();
@@ -87,51 +90,58 @@ public class CointRadioScreen extends Screen {
                         .build()
         );
 
+        int bookmarkX = this.width / 2 + buttonWidth / 2 + 6;
+
         this.addRenderableWidget(
                 Button.builder(
-                                Component.literal("§6Добавить в закладки"),
+                                Component.literal("§6Сохранить"),
                                 button -> {
-                                    CointRadioBookmarks.add(urlBox.getValue());
+                                    String url = urlBox == null ? "" : urlBox.getValue();
+
+                                    if (url == null || url.trim().isBlank()) {
+                                        if (this.minecraft != null && this.minecraft.player != null) {
+                                            this.minecraft.player.displayClientMessage(
+                                                    Component.literal("§c[CointMusic] Введите ссылку радио."),
+                                                    true
+                                            );
+                                        }
+
+                                        return;
+                                    }
+
+                                    String name = bookmarkNameBox == null ? "" : bookmarkNameBox.getValue();
+
+                                    CointRadioBookmarks.add(name, url);
 
                                     if (this.minecraft != null && this.minecraft.player != null) {
                                         this.minecraft.player.displayClientMessage(
-                                                Component.literal("§a[CointMusic] Радио добавлено в закладки."),
+                                                Component.literal("§a[CointMusic] Закладка сохранена."),
                                                 true
                                         );
                                     }
 
-                                    this.onClose();
+                                    rebuildBookmarkButtons(startY, buttonHeight);
                                 }
                         )
-                        .bounds(this.width / 2 + buttonWidth / 2 + 6, startY, 130, buttonHeight)
+                        .bounds(bookmarkX, startY, 130, buttonHeight)
                         .build()
         );
 
-        int bookmarkX = this.width / 2 + buttonWidth / 2 + 6;
-        int bookmarkY = startY + 24;
+        this.bookmarkNameBox = new EditBox(
+                this.font,
+                bookmarkX,
+                startY + 24,
+                130,
+                buttonHeight,
+                Component.literal("Название закладки")
+        );
 
-        List<CointRadioBookmarks.Bookmark> bookmarks = CointRadioBookmarks.getBookmarks();
+        this.bookmarkNameBox.setMaxLength(40);
+        this.bookmarkNameBox.setHint(Component.literal("Название"));
+        this.bookmarkNameBox.setValue(customUrl.isBlank() ? "" : CointRadioBookmarks.createName(customUrl));
+        this.addRenderableWidget(this.bookmarkNameBox);
 
-        for (int i = 0; i < Math.min(5, bookmarks.size()); i++) {
-            CointRadioBookmarks.Bookmark bookmark = bookmarks.get(i);
-
-            this.addRenderableWidget(
-                    Button.builder(
-                                    Component.literal("§b★ " + bookmark.name()),
-                                    button -> {
-                                        CointRadioNetwork.sendSetCustomUrlToServer(pos, bookmark.url());
-
-                                        if (!active) {
-                                            CointRadioNetwork.sendToggleActiveToServer(pos);
-                                        }
-
-                                        this.onClose();
-                                    }
-                            )
-                            .bounds(bookmarkX, bookmarkY + i * 24, 130, buttonHeight)
-                            .build()
-            );
-        }
+        rebuildBookmarkButtons(startY, buttonHeight);
 
         this.addRenderableWidget(
                 Button.builder(
@@ -321,6 +331,86 @@ public class CointRadioScreen extends Screen {
         );
     }
 
+    private void rebuildBookmarkButtons(int startY, int buttonHeight) {
+        for (Button button : bookmarkButtons) {
+            this.removeWidget(button);
+        }
+
+        bookmarkButtons.clear();
+
+        int buttonWidth = 220;
+        int bookmarkX = this.width / 2 + buttonWidth / 2 + 6;
+        int firstY = startY + 54;
+
+        List<CointRadioBookmarks.Bookmark> bookmarks = CointRadioBookmarks.getBookmarks();
+        int max = Math.min(5, bookmarks.size());
+
+        for (int i = 0; i < max; i++) {
+            CointRadioBookmarks.Bookmark bookmark = bookmarks.get(i);
+
+            if (bookmark == null || bookmark.url() == null || bookmark.url().isBlank()) {
+                continue;
+            }
+
+            int y = firstY + i * 24;
+
+            Button playButton = Button.builder(
+                            Component.literal("§b★ " + shortenBookmarkName(bookmark.name(), 11)),
+                            button -> {
+                                CointRadioNetwork.sendSetCustomUrlToServer(pos, bookmark.url());
+
+                                if (!active) {
+                                    CointRadioNetwork.sendToggleActiveToServer(pos);
+                                }
+
+                                this.onClose();
+                            }
+                    )
+                    .bounds(bookmarkX, y, 84, buttonHeight)
+                    .build();
+
+            Button editButton = Button.builder(
+                            Component.literal("§e✎"),
+                            button -> {
+                                if (urlBox != null) {
+                                    urlBox.setValue(bookmark.url());
+                                }
+
+                                if (bookmarkNameBox != null) {
+                                    bookmarkNameBox.setValue(bookmark.name());
+                                }
+
+                                if (this.minecraft != null && this.minecraft.player != null) {
+                                    this.minecraft.player.displayClientMessage(
+                                            Component.literal("§e[CointMusic] Измени название и нажми §6Сохранить§e."),
+                                            true
+                                    );
+                                }
+                            }
+                    )
+                    .bounds(bookmarkX + 88, y, 20, buttonHeight)
+                    .build();
+
+            Button deleteButton = Button.builder(
+                            Component.literal("§c×"),
+                            button -> {
+                                CointRadioBookmarks.remove(bookmark.url());
+                                rebuildBookmarkButtons(startY, buttonHeight);
+                            }
+                    )
+                    .bounds(bookmarkX + 112, y, 18, buttonHeight)
+                    .build();
+
+            bookmarkButtons.add(playButton);
+            bookmarkButtons.add(editButton);
+            bookmarkButtons.add(deleteButton);
+
+            this.addRenderableWidget(playButton);
+            this.addRenderableWidget(editButton);
+            this.addRenderableWidget(deleteButton);
+        }
+    }
+
     private void rebuildStationButtons() {
         for (Button button : stationButtons) {
             this.removeWidget(button);
@@ -481,6 +571,20 @@ public class CointRadioScreen extends Screen {
         }
 
         return currentStation;
+    }
+
+    private static String shortenBookmarkName(String text, int maxLength) {
+        if (text == null || text.isBlank()) {
+            return "Радио";
+        }
+
+        String clean = text.trim();
+
+        if (clean.length() <= maxLength) {
+            return clean;
+        }
+
+        return clean.substring(0, Math.max(0, maxLength - 1)) + "…";
     }
 
     @Override
