@@ -27,12 +27,45 @@ public final class CointCoreGTOKeyMappings {
     public static final String CATEGORY_CUBECHAT = "key.categories.cointcoregto";
 
     public static final KeyMapping SHARE_ITEM_TO_CHAT = new KeyMapping(
-            "key.cointcoregto.share_item_to_chat",
+            "Показать предмет в выбранный чат",
             KeyConflictContext.GUI,
             InputConstants.Type.KEYSYM,
             GLFW.GLFW_KEY_T,
             CATEGORY_CUBECHAT
     );
+
+    public static final KeyMapping SHARE_ITEM_TO_LOCAL_CHAT = new KeyMapping(
+            "Показать предмет в локальный чат",
+            KeyConflictContext.GUI,
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_UNKNOWN,
+            CATEGORY_CUBECHAT
+    );
+
+    public static final KeyMapping SHARE_ITEM_TO_GLOBAL_CHAT = new KeyMapping(
+            "Показать предмет в глобальный чат",
+            KeyConflictContext.GUI,
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_UNKNOWN,
+            CATEGORY_CUBECHAT
+    );
+
+    public static final KeyMapping SHARE_ITEM_TO_TRADE_CHAT = new KeyMapping(
+            "Показать предмет в торговый чат",
+            KeyConflictContext.GUI,
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_UNKNOWN,
+            CATEGORY_CUBECHAT
+    );
+
+    public static final KeyMapping SHARE_ITEM_TO_PRIVATE_CHAT = new KeyMapping(
+            "Показать предмет в личный чат",
+            KeyConflictContext.GUI,
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_UNKNOWN,
+            CATEGORY_CUBECHAT
+    );
+
     public static final KeyMapping OPEN_MANA_OVERLAY_SETTINGS = new KeyMapping(
             "Настроить GUI маны",
             KeyConflictContext.UNIVERSAL,
@@ -47,20 +80,43 @@ public final class CointCoreGTOKeyMappings {
     @SubscribeEvent
     public static void onRegisterKeyMappings(RegisterKeyMappingsEvent event) {
         event.register(SHARE_ITEM_TO_CHAT);
+        event.register(SHARE_ITEM_TO_LOCAL_CHAT);
+        event.register(SHARE_ITEM_TO_GLOBAL_CHAT);
+        event.register(SHARE_ITEM_TO_TRADE_CHAT);
+        event.register(SHARE_ITEM_TO_PRIVATE_CHAT);
         event.register(OPEN_MANA_OVERLAY_SETTINGS);
     }
 
-    public static boolean isShareItemKey(int keyCode, int scanCode) {
-        try {
-            return SHARE_ITEM_TO_CHAT.matches(keyCode, scanCode);
-        } catch (Throwable ignored) {
-            return false;
+    public static ItemShareChannel getItemShareChannel(int keyCode, int scanCode) {
+        if (matches(SHARE_ITEM_TO_LOCAL_CHAT, keyCode, scanCode)) {
+            return ItemShareChannel.LOCAL;
         }
+        if (matches(SHARE_ITEM_TO_GLOBAL_CHAT, keyCode, scanCode)) {
+            return ItemShareChannel.GLOBAL;
+        }
+        if (matches(SHARE_ITEM_TO_TRADE_CHAT, keyCode, scanCode)) {
+            return ItemShareChannel.TRADE;
+        }
+        if (matches(SHARE_ITEM_TO_PRIVATE_CHAT, keyCode, scanCode)) {
+            return ItemShareChannel.PRIVATE;
+        }
+        if (matches(SHARE_ITEM_TO_CHAT, keyCode, scanCode)) {
+            return ItemShareChannel.CURRENT;
+        }
+        return null;
+    }
+
+    public static boolean isShareItemKey(int keyCode, int scanCode) {
+        return getItemShareChannel(keyCode, scanCode) != null;
     }
 
     public static boolean isManaOverlaySettingsKey(int keyCode, int scanCode) {
+        return matches(OPEN_MANA_OVERLAY_SETTINGS, keyCode, scanCode);
+    }
+
+    private static boolean matches(KeyMapping mapping, int keyCode, int scanCode) {
         try {
-            return OPEN_MANA_OVERLAY_SETTINGS.matches(keyCode, scanCode);
+            return mapping.matches(keyCode, scanCode);
         } catch (Throwable ignored) {
             return false;
         }
@@ -107,10 +163,7 @@ public final class CointCoreGTOKeyMappings {
         public static void onScreenKeyPressed(ScreenEvent.KeyPressed.Pre event) {
             Screen screen = event.getScreen();
 
-            if (screen == null) {
-                return;
-            }
-            if (isKeybindSettingsScreen(screen)) {
+            if (screen == null || isKeybindSettingsScreen(screen)) {
                 return;
             }
 

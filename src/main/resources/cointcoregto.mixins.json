@@ -4,7 +4,8 @@
   "package": "Crazer.cubeofinterest.cointcoregto.mixin",
   "compatibilityLevel": "JAVA_17",
   "mixins": [
-    "ServerStatusPlayersMixin"
+    "ServerStatusPlayersMixin",
+    "ServerStatusDescriptionMixin"
   ],
   "client": [
     "CointCoreGTOChatComponentMixin",

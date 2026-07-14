@@ -115,24 +115,25 @@ configurations {
 }
 
 dependencies {
-    minecraft 'net.minecraftforge:forge:1.20.1-47.2.0'
+    minecraft 'net.minecraftforge:forge:1.20.1-47.4.20'
 
     compileOnly 'net.luckperms:api:5.4'
 
     minecraftLibrary "javazoom:jlayer:1.0.1"
 
     implementation fg.deobf('curse.maven:architectury-api-419699:5137938')
-    implementation fg.deobf('curse.maven:ftb-library-forge-404465:6807424')
-    implementation fg.deobf('curse.maven:ftb-essentials-410811:6555287')
+    implementation fg.deobf("curse.maven:ftb-library-forge-404465:7296748")
+    implementation fg.deobf("curse.maven:ftb-essentials-410811:7609948")
+    implementation fg.deobf("curse.maven:ftb-quests-forge-289412:7909594")
     implementation "javazoom:jlayer:1.0.1"
 
     // Optional Jade integration for dev/build. Do not shade Jade.
     compileOnly fg.deobf('maven.modrinth:jade:11.13.2+forge')
     runtimeOnly fg.deobf('maven.modrinth:jade:11.13.2+forge')
-    compileOnly fg.deobf("curse.maven:ftb-teams-forge-404468:6130786")
-    runtimeOnly fg.deobf("curse.maven:ftb-teams-forge-404468:6130786")
-    compileOnly fg.deobf("curse.maven:ftb-chunks-forge-314906:5267364")
-    runtimeOnly fg.deobf("curse.maven:ftb-chunks-forge-314906:5267364")
+    compileOnly fg.deobf("curse.maven:ftb-teams-forge-404468:7499810")
+    runtimeOnly fg.deobf("curse.maven:ftb-teams-forge-404468:7499810")
+    compileOnly fg.deobf("curse.maven:ftb-chunks-forge-314906:8216874")
+    runtimeOnly fg.deobf("curse.maven:ftb-chunks-forge-314906:8216874")
     runtimeOnly fg.deobf("vazkii.botania:Botania:1.20.1-454-FORGE")
     runtimeOnly fg.deobf("vazkii.patchouli:Patchouli:1.20.1-85-FORGE")
     runtimeOnly fg.deobf("top.theillusivec4.curios:curios-forge:5.14.1+1.20.1")

@@ -81,6 +81,7 @@ public class CointCoreGTO {
 
     private static final Logger LOCAL_CHAT_LOGGER = LogManager.getLogger("CuBe:LocalChat");
     private static final Logger GLOBAL_CHAT_LOGGER = LogManager.getLogger("CuBe:GlobalChat");
+    private static final Logger TRADE_CHAT_LOGGER = LogManager.getLogger("CuBe:TradeChat");
     private static final Logger PRIVATE_CHAT_LOGGER = LogManager.getLogger("CuBe:PrivateChat");
     private static final Logger DISCORD_CHAT_LOGGER = LogManager.getLogger("CuBe:DiscordChat");
 
@@ -98,9 +99,16 @@ public class CointCoreGTO {
     private static final ForgeConfigSpec.DoubleValue LOCAL_RADIUS;
     private static final ForgeConfigSpec.ConfigValue<String> LOCAL_PREFIX;
     private static final ForgeConfigSpec.ConfigValue<String> GLOBAL_PREFIX;
+    private static final ForgeConfigSpec.ConfigValue<String> TRADE_PREFIX;
     private static final ForgeConfigSpec.ConfigValue<String> PRIVATE_PREFIX;
     private static final ForgeConfigSpec.ConfigValue<String> DISCORD_PREFIX;
     private static final ForgeConfigSpec.BooleanValue USE_EXCLAMATION_FOR_GLOBAL;
+    private static final ForgeConfigSpec.BooleanValue USE_DOLLAR_FOR_TRADE;
+    private static final ForgeConfigSpec.IntValue TRADE_COOLDOWN_SECONDS;
+    private static final ForgeConfigSpec.BooleanValue ITEM_PING_LOCAL_ENABLED;
+    private static final ForgeConfigSpec.BooleanValue ITEM_PING_GLOBAL_ENABLED;
+    private static final ForgeConfigSpec.BooleanValue ITEM_PING_TRADE_ENABLED;
+    private static final ForgeConfigSpec.BooleanValue ITEM_PING_PRIVATE_ENABLED;
     private static final ForgeConfigSpec.BooleanValue SHOW_CHAT_PANEL_ON_JOIN;
     private static final ForgeConfigSpec.BooleanValue HIDE_JOIN_LEAVE_MESSAGES;
     public static ForgeConfigSpec.BooleanValue RADIO_ENABLED;
@@ -148,6 +156,7 @@ public class CointCoreGTO {
     private static final Map<UUID, UUID> LAST_PRIVATE = new HashMap<>();
     private static final Map<UUID, Boolean> SHOW_TIME = new HashMap<>();
     private static final Map<UUID, Long> LAST_ITEM_SHARE_MILLIS = new ConcurrentHashMap<>();
+    private static final Map<UUID, Long> LAST_TRADE_MESSAGE_MILLIS = new ConcurrentHashMap<>();
     private static final long ITEM_SHARE_COOLDOWN_MILLIS = 3000L;
     private static final Map<UUID, Deque<ChatHistoryMessage>> CHAT_HISTORY = new ConcurrentHashMap<>();
     private static final AtomicLong CHAT_HISTORY_COUNTER = new AtomicLong();
@@ -175,6 +184,7 @@ public class CointCoreGTO {
         ALL,
         LOCAL,
         GLOBAL,
+        TRADE,
         PRIVATE
     }
 
@@ -195,6 +205,10 @@ public class CointCoreGTO {
                 .comment("Prefix for global chat. Supports & color codes and §.")
                 .define("global_prefix", "&6[G] ");
 
+        TRADE_PREFIX = builder
+                .comment("Prefix for trade chat. Supports & color codes and §.")
+                .define("trade_prefix", "&b[$] ");
+
         PRIVATE_PREFIX = builder
                 .comment("Prefix for private messages. Supports & color codes and §.")
                 .define("private_prefix", "&d[PM] ");
@@ -206,6 +220,19 @@ public class CointCoreGTO {
         USE_EXCLAMATION_FOR_GLOBAL = builder
                 .comment("If true, messages starting with ! will be sent to global chat.")
                 .define("use_exclamation_for_global", true);
+
+        USE_DOLLAR_FOR_TRADE = builder
+                .comment("If true, messages starting with $ will be sent to trade chat.")
+                .define("use_dollar_for_trade", true);
+
+        TRADE_COOLDOWN_SECONDS = builder
+                .comment("Cooldown between trade chat messages in seconds. 0 disables cooldown.")
+                .defineInRange("trade_cooldown_seconds", 10, 0, 3600);
+
+        ITEM_PING_LOCAL_ENABLED = builder.define("item_ping_local_enabled", true);
+        ITEM_PING_GLOBAL_ENABLED = builder.define("item_ping_global_enabled", true);
+        ITEM_PING_TRADE_ENABLED = builder.define("item_ping_trade_enabled", true);
+        ITEM_PING_PRIVATE_ENABLED = builder.define("item_ping_private_enabled", true);
 
         SHOW_CHAT_PANEL_ON_JOIN = builder
                 .comment("If true, short chat hint will be shown when player joins.")
@@ -440,6 +467,7 @@ public class CointCoreGTO {
         CointRadioNetwork.register();
 
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC, "cubechat-common.toml");
+        ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, DimensionQuestLockConfig.SPEC, "CointCoreGTO-FTBQuest-Dimension-Locking.toml");
         MinecraftForge.EVENT_BUS.register(this);
     }
 
@@ -588,7 +616,7 @@ public class CointCoreGTO {
         CHAT_VIEWS.putIfAbsent(player.getUUID(), ChatView.ALL);
 
         if (SHOW_CHAT_PANEL_ON_JOIN.get()) {
-            player.displayClientMessage(Component.literal("§7Откройте чат, чтобы выбрать канал: §f[ALL] §a[L] §6[G] §d[PM]"), true);
+            player.displayClientMessage(Component.literal("§7Откройте чат, чтобы выбрать канал: §f[ALL] §a[L] §6[G] §b[$] §d[PM]"), true);
         }
 
         CointCoreGTODiscordProxy.requestOnlineStatusUpdate();
@@ -694,7 +722,7 @@ public class CointCoreGTO {
                 Commands.literal("chat")
                         .executes(ctx -> {
                             ServerPlayer player = ctx.getSource().getPlayerOrException();
-                            player.displayClientMessage(Component.literal("§7Откройте чат и выберите канал сверху: §f[ALL] §a[L] §6[G] §d[PM]"), true);
+                            player.displayClientMessage(Component.literal("§7Откройте чат и выберите канал сверху: §f[ALL] §a[L] §6[G] §b[$] §d[PM]"), true);
                             return 1;
                         })
 
@@ -730,6 +758,20 @@ public class CointCoreGTO {
                                 .executes(ctx -> {
                                     ServerPlayer player = ctx.getSource().getPlayerOrException();
                                     setChatView(player, ChatView.GLOBAL);
+                                    return 1;
+                                }))
+
+                        .then(Commands.literal("trade")
+                                .executes(ctx -> {
+                                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                                    setChatView(player, ChatView.TRADE);
+                                    return 1;
+                                }))
+
+                        .then(Commands.literal("t")
+                                .executes(ctx -> {
+                                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                                    setChatView(player, ChatView.TRADE);
                                     return 1;
                                 }))
 
@@ -1570,6 +1612,23 @@ public class CointCoreGTO {
         );
 
         event.getDispatcher().register(
+                Commands.literal("trade")
+                        .then(Commands.argument("message", StringArgumentType.greedyString())
+                                .executes(ctx -> {
+                                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                                    String message = StringArgumentType.getString(ctx, "message");
+
+                                    if (isMuted(player)) {
+                                        sendMutedMessage(player);
+                                        return 0;
+                                    }
+
+                                    sendTradeChat(player, message);
+                                    return 1;
+                                }))
+        );
+
+        event.getDispatcher().register(
                 Commands.literal("pm")
                         .then(Commands.argument("target", EntityArgument.player())
                                 .then(Commands.argument("message", StringArgumentType.greedyString())
@@ -1938,10 +1997,27 @@ public class CointCoreGTO {
             return;
         }
 
+        if (USE_DOLLAR_FOR_TRADE.get() && message.startsWith("$")) {
+            String tradeMessage = message.substring(1).trim();
+
+            if (tradeMessage.isEmpty()) {
+                player.displayClientMessage(Component.literal("§cВведите сообщение после $"), true);
+                return;
+            }
+
+            sendTradeChat(player, tradeMessage);
+            return;
+        }
+
         ChatView view = getChatView(player);
 
         if (view == ChatView.GLOBAL) {
             sendGlobalChat(player, message);
+            return;
+        }
+
+        if (view == ChatView.TRADE) {
+            sendTradeChat(player, message);
             return;
         }
 
@@ -1987,6 +2063,10 @@ public class CointCoreGTO {
             player.displayClientMessage(Component.literal("§6Теперь вы видите только глобальный чат."), true);
         }
 
+        if (view == ChatView.TRADE) {
+            player.displayClientMessage(Component.literal("§bТеперь вы видите только торговый чат."), true);
+        }
+
         if (view == ChatView.PRIVATE) {
             player.displayClientMessage(Component.literal("§dТеперь вы видите только личные сообщения."), true);
         }
@@ -2026,7 +2106,6 @@ public class CointCoreGTO {
     }
 
     private static void replayChatHistory(ServerPlayer player, ChatView view) {
-        // Always preserve non-CointCoreGTO/system messages, including KubeJS cleanup warnings.
         clearClientChat(player, true);
 
         Deque<ChatHistoryMessage> history = CHAT_HISTORY.get(player.getUUID());
@@ -2148,6 +2227,49 @@ public class CointCoreGTO {
         GLOBAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
     }
 
+    private static boolean checkTradeCooldown(ServerPlayer player) {
+        int seconds = TRADE_COOLDOWN_SECONDS.get();
+        if (seconds <= 0) {
+            return true;
+        }
+
+        long now = System.currentTimeMillis();
+        long cooldown = seconds * 1000L;
+        long last = LAST_TRADE_MESSAGE_MILLIS.getOrDefault(player.getUUID(), 0L);
+
+        if (now - last < cooldown) {
+            long left = (cooldown - (now - last) + 999L) / 1000L;
+            player.displayClientMessage(Component.literal("§cПодождите " + left + " сек. перед следующим сообщением в торговый чат."), true);
+            return false;
+        }
+
+        LAST_TRADE_MESSAGE_MILLIS.put(player.getUUID(), now);
+        return true;
+    }
+
+    private static void sendTradeChat(ServerPlayer player, String message) {
+        if (!checkTradeCooldown(player)) {
+            return;
+        }
+
+        String plainMessage = CointCoreGTOItemPreview.toPlainMessage(player, message);
+        String withoutTimePrefix = color(TRADE_PREFIX.get())
+                + getLuckPermsPrefix(player)
+                + getStaffTag(player)
+                + "§f" + player.getGameProfile().getName()
+                + "§7: §f";
+        String withoutTime = withoutTimePrefix + plainMessage;
+
+        for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
+            String fullPrefix = timePrefix(target) + withoutTimePrefix;
+            String fullPlain = fullPrefix + plainMessage;
+            Component liveMessage = CointCoreGTOItemPreview.buildMessage(player, fullPrefix, message);
+            sendFilteredChatMessage(target, ChatView.TRADE, fullPlain, liveMessage);
+        }
+
+        TRADE_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
+    }
+
     private static void sendPrivateMessage(ServerPlayer sender, ServerPlayer target, String message) {
         if (sender.getUUID().equals(target.getUUID())) {
             sender.displayClientMessage(Component.literal("§cНельзя написать самому себе."), true);
@@ -2226,6 +2348,10 @@ public class CointCoreGTO {
     }
 
     public static void shareItemInCurrentChat(ServerPlayer player, ItemStack stack, String clientDisplayName) {
+        shareItem(player, stack, clientDisplayName, ItemShareChannel.CURRENT);
+    }
+
+    public static void shareItem(ServerPlayer player, ItemStack stack, String clientDisplayName, ItemShareChannel requestedChannel) {
         if (player == null || stack == null || stack.isEmpty()) {
             return;
         }
@@ -2240,19 +2366,36 @@ public class CointCoreGTO {
         }
 
         String itemText = normalizeSharedItemName(clientDisplayName, stack);
+        ItemShareChannel channel = requestedChannel == null ? ItemShareChannel.CURRENT : requestedChannel;
 
-        ChatView view = getChatView(player);
-        if (view == ChatView.GLOBAL) {
-            sendGlobalItemShare(player, stack, itemText);
-            return;
+        if (channel == ItemShareChannel.CURRENT) {
+            channel = switch (getChatView(player)) {
+                case GLOBAL -> ItemShareChannel.GLOBAL;
+                case TRADE -> ItemShareChannel.TRADE;
+                case PRIVATE -> ItemShareChannel.PRIVATE;
+                default -> ItemShareChannel.LOCAL;
+            };
         }
 
-        if (view == ChatView.PRIVATE) {
-            player.displayClientMessage(Component.literal("§cПредмет кнопкой можно отправить только в локальный или глобальный чат."), true);
-            return;
+        switch (channel) {
+            case LOCAL -> {
+                if (ITEM_PING_LOCAL_ENABLED.get()) sendLocalItemShare(player, stack, itemText);
+                else player.displayClientMessage(Component.literal("§cПинг предметов в локальный чат отключён."), true);
+            }
+            case GLOBAL -> {
+                if (ITEM_PING_GLOBAL_ENABLED.get()) sendGlobalItemShare(player, stack, itemText);
+                else player.displayClientMessage(Component.literal("§cПинг предметов в глобальный чат отключён."), true);
+            }
+            case TRADE -> {
+                if (ITEM_PING_TRADE_ENABLED.get()) sendTradeItemShare(player, stack, itemText);
+                else player.displayClientMessage(Component.literal("§cПинг предметов в торговый чат отключён."), true);
+            }
+            case PRIVATE -> {
+                if (ITEM_PING_PRIVATE_ENABLED.get()) sendPrivateItemShare(player, stack, itemText);
+                else player.displayClientMessage(Component.literal("§cПинг предметов в личный чат отключён."), true);
+            }
+            default -> { }
         }
-
-        sendLocalItemShare(player, stack, itemText);
     }
 
     private static String normalizeSharedItemName(String clientDisplayName, ItemStack stack) {
@@ -2339,6 +2482,66 @@ public class CointCoreGTO {
         }
 
         GLOBAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
+    }
+
+    private static void sendTradeItemShare(ServerPlayer player, ItemStack stack, String itemText) {
+        if (!checkTradeCooldown(player)) {
+            return;
+        }
+
+        String cleanItemText = normalizeSharedItemName(itemText, stack);
+        String plainItemText = "    " + cleanItemText;
+        String withoutTimePrefix = color(TRADE_PREFIX.get())
+                + getLuckPermsPrefix(player)
+                + getStaffTag(player)
+                + "§f" + player.getGameProfile().getName()
+                + "§7: §f";
+        String withoutTime = withoutTimePrefix + plainItemText;
+
+        for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
+            String fullPrefix = timePrefix(target) + withoutTimePrefix;
+            String fullPlain = fullPrefix + plainItemText;
+            Component liveMessage = Component.literal(fullPrefix + "    ")
+                    .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText));
+            sendFilteredChatMessage(target, ChatView.TRADE, fullPlain, liveMessage);
+        }
+
+        TRADE_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
+    }
+
+    private static void sendPrivateItemShare(ServerPlayer sender, ItemStack stack, String itemText) {
+        UUID targetUuid = LAST_PRIVATE.get(sender.getUUID());
+        if (targetUuid == null) {
+            sender.displayClientMessage(Component.literal("§cНекому отправить предмет. Сначала напишите игроку через /pm."), true);
+            return;
+        }
+
+        ServerPlayer target = sender.server.getPlayerList().getPlayer(targetUuid);
+        if (target == null) {
+            sender.displayClientMessage(Component.literal("§cИгрок уже не в сети."), true);
+            return;
+        }
+
+        String cleanItemText = normalizeSharedItemName(itemText, stack);
+        String plainItemText = "    " + cleanItemText;
+        String senderName = sender.getGameProfile().getName();
+        String targetName = target.getGameProfile().getName();
+
+        String senderPrefix = timePrefix(sender) + color(PRIVATE_PREFIX.get()) + "§7Вы -> §d" + targetName + "§7: §f";
+        String targetPrefix = timePrefix(target) + color(PRIVATE_PREFIX.get()) + "§d" + senderName + " §7-> Вы: §f";
+
+        Component senderMessage = Component.literal(senderPrefix + "    ")
+                .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText));
+        Component targetMessage = Component.literal(targetPrefix + "    ")
+                .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText));
+
+        rememberChatMessage(sender, ChatView.PRIVATE, senderPrefix + plainItemText, senderMessage);
+        rememberChatMessage(target, ChatView.PRIVATE, targetPrefix + plainItemText, targetMessage);
+        sender.sendSystemMessage(senderMessage);
+        target.sendSystemMessage(targetMessage);
+        LAST_PRIVATE.put(sender.getUUID(), target.getUUID());
+        LAST_PRIVATE.put(target.getUUID(), sender.getUUID());
+        PRIVATE_CHAT_LOGGER.info(senderName + " -> " + targetName + ": " + stripColor(plainItemText));
     }
 
     public static void broadcastDiscordMessage(String author, String message, String replyToMinecraftPlayer) {
@@ -2807,8 +3010,6 @@ public class CointCoreGTO {
 
             Object data = opt.get();
 
-            // Для оффлайн-игроков FTB хранит хомы в playerdata/<uuid>.snbt.
-            // getOrCreate(GameProfile) создаёт объект в памяти, а load() подгружает сохранённые хомы из файла.
             try {
                 Object exists = dataClass.getMethod("playerExists", UUID.class).invoke(null, targetUuid);
                 if (!(exists instanceof Boolean value) || !value) {

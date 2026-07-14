@@ -186,7 +186,8 @@ public final class ReservedSlots {
 
         String originalText = safeOriginal.getString();
 
-        if (originalText != null && originalText.contains("Обычные:") && originalText.contains("Резерв:")) {
+        if (originalText != null
+                && originalText.contains("Резерв:")) {
             return safeOriginal;
         }
 
@@ -200,11 +201,7 @@ public final class ReservedSlots {
         result.append(Component.literal("\n"));
         result.append(
                 Component.literal(
-                        "Обычные: "
-                                + regularOnline
-                                + "/"
-                                + publicSlots
-                                + " | Резерв: "
+                        "Резерв: "
                                 + reservedOnline
                                 + "/"
                                 + reservedSlots

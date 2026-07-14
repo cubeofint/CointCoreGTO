@@ -38,7 +38,12 @@ public final class CointCoreGTOItemKeyShare {
 
     @SubscribeEvent
     public static void onKeyPressed(ScreenEvent.KeyPressed.Pre event) {
-        if (!CointCoreGTOKeyMappings.isShareItemKey(event.getKeyCode(), event.getScanCode())) {
+        ItemShareChannel channel = CointCoreGTOKeyMappings.getItemShareChannel(
+                event.getKeyCode(),
+                event.getScanCode()
+        );
+
+        if (channel == null) {
             return;
         }
 
@@ -52,7 +57,7 @@ public final class CointCoreGTOItemKeyShare {
             return;
         }
 
-        CointCoreGTOItemShare.sendToServer(stack.copy());
+        CointCoreGTOItemShare.sendToServer(stack.copy(), channel);
         event.setCanceled(true);
     }
 

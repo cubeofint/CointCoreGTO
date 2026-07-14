@@ -43,6 +43,7 @@ public class CointCoreGTOClient {
     private static final ButtonArea allButton = new ButtonArea();
     private static final ButtonArea localButton = new ButtonArea();
     private static final ButtonArea globalButton = new ButtonArea();
+    private static final ButtonArea tradeButton = new ButtonArea();
     private static final ButtonArea privateButton = new ButtonArea();
 
     private static long lastChatButtonClickMillis = 0L;
@@ -248,6 +249,7 @@ public class CointCoreGTOClient {
         String allText = "[ALL]";
         String localText = "[L]";
         String globalText = "[G]";
+        String tradeText = "[$]";
         String privateText = "[PM]";
 
         int buttonsWidth = mc.font.width(allText)
@@ -255,6 +257,8 @@ public class CointCoreGTOClient {
                 + mc.font.width(localText)
                 + BUTTON_GAP
                 + mc.font.width(globalText)
+                + BUTTON_GAP
+                + mc.font.width(tradeText)
                 + BUTTON_GAP
                 + mc.font.width(privateText);
 
@@ -279,6 +283,8 @@ public class CointCoreGTOClient {
         x = drawButton(graphics, mc, x, y, localText, 0xFF55FF55, localButton);
         x += BUTTON_GAP;
         x = drawButton(graphics, mc, x, y, globalText, 0xFFFFAA00, globalButton);
+        x += BUTTON_GAP;
+        x = drawButton(graphics, mc, x, y, tradeText, 0xFF55FFFF, tradeButton);
         x += BUTTON_GAP;
         drawButton(graphics, mc, x, y, privateText, 0xFFFF55FF, privateButton);
 
@@ -322,6 +328,13 @@ public class CointCoreGTOClient {
         if (globalButton.contains(mouseX, mouseY)) {
             lastChatButtonClickMillis = now;
             mc.player.connection.sendCommand("chat global");
+            event.setCanceled(true);
+            return;
+        }
+
+        if (tradeButton.contains(mouseX, mouseY)) {
+            lastChatButtonClickMillis = now;
+            mc.player.connection.sendCommand("chat trade");
             event.setCanceled(true);
             return;
         }
@@ -472,11 +485,13 @@ public class CointCoreGTOClient {
         String clean = text.replaceAll("§.", "").trim();
         return clean.contains("[L]")
                 || clean.contains("[G]")
+                || clean.contains("[$]")
                 || clean.contains("[PM]")
                 || clean.contains("[D]")
                 || clean.startsWith("Теперь вы видите все чаты")
                 || clean.startsWith("Теперь вы видите только локальный чат")
                 || clean.startsWith("Теперь вы видите только глобальный чат")
+                || clean.startsWith("Теперь вы видите только торговый чат")
                 || clean.startsWith("Теперь вы видите только личные сообщения")
                 || clean.startsWith("Время в чате включено")
                 || clean.startsWith("Время в чате выключено")
