@@ -11,7 +11,7 @@ base {
 }
 
 java {
-    toolchain.languageVersion = JavaLanguageVersion.of(17)
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
 }
 
 minecraft {
@@ -141,6 +141,16 @@ dependencies {
     runtimeOnly fg.deobf("local:MythicBotany:1.20.1-4.0.4")
     runtimeOnly fg.deobf("local:eventwrapper-forge:1.20.1-1.1.4")
     runtimeOnly fg.deobf("local:LibX:1.20.1-5.0.14")
+
+
+    compileOnly fg.deobf("local:appliedenergistics2-forge:15.5.0")
+    runtimeOnly fg.deobf("local:appliedenergistics2-forge:15.5.0")
+    compileOnly fg.deobf("local:guideme:20.1.14")
+    runtimeOnly fg.deobf("local:guideme:20.1.14")
+    compileOnly fg.deobf("local:fastcollection:1.0")
+    runtimeOnly fg.deobf("local:fastcollection:1.0")
+    compileOnly fg.deobf("local:emi:1.1.22+1.20.1+forge")
+    runtimeOnly fg.deobf("local:emi:1.1.22+1.20.1+forge")
 
     // JDA is visible in dev through implementation.extendsFrom(shade),
     // and packed into release jar through shadowJar + relocations.

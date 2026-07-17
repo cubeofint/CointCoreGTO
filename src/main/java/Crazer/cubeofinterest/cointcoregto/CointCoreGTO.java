@@ -2,6 +2,9 @@ package Crazer.cubeofinterest.cointcoregto;
 
 import Crazer.cubeofinterest.cointcoregto.compat.radio.CointRadioBlocks;
 import Crazer.cubeofinterest.cointcoregto.compat.radio.CointRadioNetwork;
+import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerClient;
+import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerNetwork;
+import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerRegistry;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
@@ -40,6 +43,7 @@ import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import net.minecraftforge.network.NetworkEvent;
 import net.minecraftforge.network.NetworkRegistry;
@@ -460,15 +464,23 @@ public class CointCoreGTO {
         IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
 
         CointRadioBlocks.register(modEventBus);
+        CointExchangerRegistry.register(modEventBus);
+
+        modEventBus.addListener(this::onClientSetup);
 
         registerNetwork();
         CointCoreGTOItemShare.registerNetwork();
         CointCoreGTOEmoji.registerNetwork();
         CointRadioNetwork.register();
+        CointExchangerNetwork.register();
 
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC, "cubechat-common.toml");
         ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, DimensionQuestLockConfig.SPEC, "CointCoreGTO-FTBQuest-Dimension-Locking.toml");
         MinecraftForge.EVENT_BUS.register(this);
+    }
+
+    private void onClientSetup(FMLClientSetupEvent event) {
+        event.enqueueWork(CointExchangerClient::registerScreens);
     }
 
 

@@ -9,7 +9,8 @@
   ],
   "client": [
     "CointCoreGTOChatComponentMixin",
-    "CointHideForgeServerListStatusMixin"
+    "CointHideForgeServerListStatusMixin",
+    "BotaniaClientConfigMixin"
   ],
   "injectors": {
     "defaultRequire": 0
