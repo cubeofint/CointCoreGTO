@@ -10,6 +10,7 @@ run-data/
 
 logs/
 crash-reports/
+libs/
 
 *.log
 *.hprof

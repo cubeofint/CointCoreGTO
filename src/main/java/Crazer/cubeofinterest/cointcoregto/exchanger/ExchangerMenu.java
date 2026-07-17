@@ -4,6 +4,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
+import net.minecraft.world.inventory.SimpleContainerData;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -16,6 +17,7 @@ public class ExchangerMenu extends AbstractContainerMenu {
     private final ExchangerBlockEntity exchanger;
     private final BlockPos blockPos;
     private final boolean canEdit;
+    private final SimpleContainerData syncedData = new SimpleContainerData(2);
 
     public ExchangerMenu(int windowId, Inventory playerInventory, BlockPos pos, boolean canEdit) {
         this(windowId, playerInventory, getBlockEntity(playerInventory, pos), canEdit);
@@ -32,22 +34,23 @@ public class ExchangerMenu extends AbstractContainerMenu {
         this.exchanger = exchanger;
         this.blockPos = exchanger.getBlockPos();
         this.canEdit = canEdit;
+        addDataSlots(this.syncedData);
 
         BooleanSupplier editSupplier = () -> this.canEdit;
 
         addSlot(new LockedSlotItemHandler(
                 exchanger.getItems(),
                 ExchangerBlockEntity.SLOT_PRODUCT,
-                82,
-                56,
+                66,
+                52,
                 editSupplier
         ));
 
         addSlot(new LockedSlotItemHandler(
                 exchanger.getItems(),
                 ExchangerBlockEntity.SLOT_PRICE,
-                176,
-                56,
+                154,
+                52,
                 editSupplier
         ));
 
@@ -75,6 +78,22 @@ public class ExchangerMenu extends AbstractContainerMenu {
 
     public ExchangerBlockEntity getExchanger() {
         return exchanger;
+    }
+
+    public long getAvailableProductCount() {
+        long low = Integer.toUnsignedLong(this.syncedData.get(0));
+        long high = Integer.toUnsignedLong(this.syncedData.get(1));
+        return (high << 32) | low;
+    }
+
+    @Override
+    public void broadcastChanges() {
+        if (this.exchanger.getLevel() != null && !this.exchanger.getLevel().isClientSide) {
+            long available = this.exchanger.getAvailableProductCount();
+            this.syncedData.set(0, (int) available);
+            this.syncedData.set(1, (int) (available >>> 32));
+        }
+        super.broadcastChanges();
     }
 
     @Override
@@ -135,8 +154,8 @@ public class ExchangerMenu extends AbstractContainerMenu {
                 addSlot(new Slot(
                         playerInventory,
                         column + row * 9 + 9,
-                        49 + column * 18,
-                        156 + row * 18
+                        37 + column * 18,
+                        170 + row * 18
                 ));
             }
         }
@@ -147,8 +166,8 @@ public class ExchangerMenu extends AbstractContainerMenu {
             addSlot(new Slot(
                     playerInventory,
                     column,
-                    49 + column * 18,
-                    214
+                    37 + column * 18,
+                    228
             ));
         }
     }

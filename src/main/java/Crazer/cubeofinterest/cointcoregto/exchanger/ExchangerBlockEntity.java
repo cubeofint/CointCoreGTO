@@ -1,5 +1,18 @@
 package Crazer.cubeofinterest.cointcoregto.exchanger;
 
+import appeng.api.config.Actionable;
+import appeng.api.networking.GridHelper;
+import appeng.api.networking.IGrid;
+import appeng.api.networking.IGridNode;
+import appeng.api.networking.IGridNodeListener;
+import appeng.api.networking.IInWorldGridNodeHost;
+import appeng.api.networking.IManagedGridNode;
+import appeng.api.networking.security.IActionHost;
+import appeng.api.networking.security.IActionSource;
+import appeng.api.stacks.AEItemKey;
+import appeng.api.storage.MEStorage;
+import appeng.api.util.AECableType;
+import appeng.items.tools.powered.WirelessTerminalItem;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.nbt.CompoundTag;
@@ -13,22 +26,28 @@ import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraftforge.common.capabilities.Capability;
-import net.minecraftforge.common.capabilities.ForgeCapabilities;
-import net.minecraftforge.common.util.LazyOptional;
-import net.minecraftforge.items.IItemHandler;
 import net.minecraftforge.items.ItemStackHandler;
-import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.lang.reflect.Method;
+import java.util.EnumSet;
+import java.util.Optional;
 import java.util.UUID;
 
-public class ExchangerBlockEntity extends BlockEntity implements MenuProvider {
+public class ExchangerBlockEntity extends BlockEntity implements MenuProvider, IInWorldGridNodeHost, IActionHost {
     public static final int SLOT_PRODUCT = 0;
     public static final int SLOT_PRICE = 1;
     public static final int SLOT_PAYMENT = 2;
 
     private static final int MAX_DEALS = 64;
+
+    private static final IGridNodeListener<ExchangerBlockEntity> NODE_LISTENER =
+            new IGridNodeListener<>() {
+                @Override
+                public void onSaveChanges(ExchangerBlockEntity owner, IGridNode node) {
+                    owner.setChangedAndSync();
+                }
+            };
 
     private final ItemStackHandler items = new ItemStackHandler(3) {
         @Override
@@ -41,6 +60,13 @@ public class ExchangerBlockEntity extends BlockEntity implements MenuProvider {
             return 64;
         }
     };
+
+    private final IManagedGridNode mainNode = GridHelper.createManagedNode(this, NODE_LISTENER)
+            .setTagName("mainNode")
+            .setInWorldNode(true)
+            .setExposedOnSides(EnumSet.allOf(Direction.class))
+            .setIdlePowerUsage(1.0)
+            .setVisualRepresentation(CointExchangerRegistry.EXCHANGER_ITEM.get());
 
     private UUID ownerUuid;
     private String ownerName = "";
@@ -64,6 +90,7 @@ public class ExchangerBlockEntity extends BlockEntity implements MenuProvider {
 
         ownerUuid = player.getUUID();
         ownerName = player.getGameProfile().getName();
+        mainNode.setOwningPlayer(player);
         setChangedAndSync();
     }
 
@@ -83,285 +110,371 @@ public class ExchangerBlockEntity extends BlockEntity implements MenuProvider {
         return ownerName == null ? "" : ownerName;
     }
 
-    public boolean buy(ServerPlayer player, int requestedDeals) {
+    public boolean buy(ServerPlayer player, int requestedDeals, boolean buyerAeMode) {
         if (player == null) {
             return false;
         }
 
         int deals = Math.max(1, Math.min(MAX_DEALS, requestedDeals));
-
         ItemStack productTemplate = items.getStackInSlot(SLOT_PRODUCT);
         ItemStack priceTemplate = items.getStackInSlot(SLOT_PRICE);
 
         if (productTemplate.isEmpty() || priceTemplate.isEmpty()) {
-            player.displayClientMessage(Component.literal("§cОбменник не настроен."), true);
+            fail(player, "Обменник не настроен.");
             return false;
         }
 
-        IItemHandler storage = findNeighborItemHandler();
-
-        if (storage == null) {
-            player.displayClientMessage(Component.literal("§cРядом нет сундука, интерфейса или другого хранилища."), true);
+        MEStorage sellerStorage = getSellerStorage();
+        if (sellerStorage == null) {
+            fail(player, "Обменник не подключён к активной ME-сети.");
             return false;
         }
 
-        int productPerDeal = Math.max(1, productTemplate.getCount());
-        int pricePerDeal = Math.max(1, priceTemplate.getCount());
+        long totalProduct = (long) Math.max(1, productTemplate.getCount()) * deals;
+        long totalPrice = (long) Math.max(1, priceTemplate.getCount()) * deals;
 
-        long totalProductLong = (long) productPerDeal * deals;
-        long totalPriceLong = (long) pricePerDeal * deals;
+        AEItemKey productKey = AEItemKey.of(productTemplate);
+        AEItemKey priceKey = AEItemKey.of(priceTemplate);
+        IActionSource source = IActionSource.ofPlayer(player, this);
 
-        if (totalProductLong > Integer.MAX_VALUE || totalPriceLong > Integer.MAX_VALUE) {
-            player.displayClientMessage(Component.literal("§cСлишком большое количество сделок."), true);
+        if (sellerStorage.extract(productKey, totalProduct, Actionable.SIMULATE, source) != totalProduct) {
+            fail(player, "В ME-сети продавца недостаточно товара.");
             return false;
         }
 
-        int totalProduct = (int) totalProductLong;
-        int totalPrice = (int) totalPriceLong;
-
-        if (countPlayerItems(player, priceTemplate) < totalPrice) {
-            player.displayClientMessage(Component.literal("§cУ тебя недостаточно предметов для оплаты."), true);
+        if (sellerStorage.insert(priceKey, totalPrice, Actionable.SIMULATE, source) != totalPrice) {
+            fail(player, "В ME-сети продавца нет места для оплаты.");
             return false;
         }
 
-        if (!canExtractItemsFromHandler(storage, productTemplate, totalProduct)) {
-            player.displayClientMessage(Component.literal("§cВ подключённом хранилище недостаточно товара."), true);
+        if (buyerAeMode) {
+            return buyWithBuyerAe(player, deals, productKey, priceKey, totalProduct, totalPrice, sellerStorage, source);
+        }
+
+        return buyWithInventory(player, deals, productTemplate, priceTemplate, productKey, priceKey,
+                totalProduct, totalPrice, sellerStorage, source);
+    }
+
+    private boolean buyWithInventory(
+            ServerPlayer player,
+            int deals,
+            ItemStack productTemplate,
+            ItemStack priceTemplate,
+            AEItemKey productKey,
+            AEItemKey priceKey,
+            long totalProduct,
+            long totalPrice,
+            MEStorage sellerStorage,
+            IActionSource source
+    ) {
+        if (totalProduct > Integer.MAX_VALUE || totalPrice > Integer.MAX_VALUE) {
+            fail(player, "Слишком большое количество сделок.");
             return false;
         }
 
-        if (!canInsertItemsIntoHandler(storage, priceTemplate, totalPrice)) {
-            player.displayClientMessage(Component.literal("§cВ подключённом хранилище нет места для оплаты."), true);
+        int productAmount = (int) totalProduct;
+        int priceAmount = (int) totalPrice;
+
+        if (countPlayerItems(player, priceTemplate) < priceAmount) {
+            fail(player, "У вас недостаточно предметов для оплаты.");
             return false;
         }
 
-        removePlayerItems(player, priceTemplate, totalPrice);
-
-        if (!extractItemsFromHandler(storage, productTemplate, totalProduct)) {
-            refundPlayer(player, priceTemplate, totalPrice);
-            player.displayClientMessage(Component.literal("§cНе удалось забрать товар из хранилища."), true);
+        if (!canFitPlayerInventory(player, productTemplate, productAmount, priceTemplate, priceAmount)) {
+            fail(player, "В инвентаре недостаточно места для товара.");
             return false;
         }
 
-        if (!insertItemsIntoHandler(storage, priceTemplate, totalPrice)) {
-            ItemStack productRefund = productTemplate.copy();
-            productRefund.setCount(totalProduct);
-            insertItemsIntoHandler(storage, productRefund, totalProduct);
+        removePlayerItems(player, priceTemplate, priceAmount);
 
-            refundPlayer(player, priceTemplate, totalPrice);
-            player.displayClientMessage(Component.literal("§cНе удалось положить оплату в хранилище."), true);
+        long extractedProduct = sellerStorage.extract(productKey, totalProduct, Actionable.MODULATE, source);
+        if (extractedProduct != totalProduct) {
+            refundPlayer(player, priceTemplate, priceAmount);
+            if (extractedProduct > 0) {
+                sellerStorage.insert(productKey, extractedProduct, Actionable.MODULATE, source);
+            }
+            fail(player, "Не удалось забрать товар из ME-сети.");
             return false;
         }
 
-        ItemStack productToGive = productTemplate.copy();
-        productToGive.setCount(totalProduct);
+        long insertedPayment = sellerStorage.insert(priceKey, totalPrice, Actionable.MODULATE, source);
+        if (insertedPayment != totalPrice) {
+            if (insertedPayment > 0) {
+                sellerStorage.extract(priceKey, insertedPayment, Actionable.MODULATE, source);
+            }
+            sellerStorage.insert(productKey, totalProduct, Actionable.MODULATE, source);
+            refundPlayer(player, priceTemplate, priceAmount);
+            fail(player, "Не удалось положить оплату в ME-сеть.");
+            return false;
+        }
 
-        giveLargeStack(player, productToGive);
-
-        player.displayClientMessage(
-                Component.literal("§aСделок: §e" + deals + "§a. Получено: §e" + totalProduct + " шт."),
-                true
-        );
-
-        setChangedAndSync();
+        giveLargeStack(player, productTemplate, productAmount);
+        success(player, deals, totalProduct, false);
         return true;
     }
 
+    private boolean buyWithBuyerAe(
+            ServerPlayer player,
+            int deals,
+            AEItemKey productKey,
+            AEItemKey priceKey,
+            long totalProduct,
+            long totalPrice,
+            MEStorage sellerStorage,
+            IActionSource source
+    ) {
+        IGrid buyerGrid = findBuyerWirelessGrid(player);
+        if (buyerGrid == null) {
+            fail(player, "Рабочий беспроводной ME-терминал не найден в инвентаре или Curios.");
+            return false;
+        }
+
+        MEStorage buyerStorage = buyerGrid.getStorageService().getInventory();
+
+        if (buyerStorage.extract(priceKey, totalPrice, Actionable.SIMULATE, source) != totalPrice) {
+            fail(player, "В вашей ME-сети недостаточно предметов для оплаты.");
+            return false;
+        }
+
+        if (buyerStorage.insert(productKey, totalProduct, Actionable.SIMULATE, source) != totalProduct) {
+            fail(player, "В вашей ME-сети нет места для товара.");
+            return false;
+        }
+
+        long extractedPayment = buyerStorage.extract(priceKey, totalPrice, Actionable.MODULATE, source);
+        if (extractedPayment != totalPrice) {
+            if (extractedPayment > 0) {
+                buyerStorage.insert(priceKey, extractedPayment, Actionable.MODULATE, source);
+            }
+            fail(player, "Не удалось забрать оплату из вашей ME-сети.");
+            return false;
+        }
+
+        long extractedProduct = sellerStorage.extract(productKey, totalProduct, Actionable.MODULATE, source);
+        if (extractedProduct != totalProduct) {
+            buyerStorage.insert(priceKey, totalPrice, Actionable.MODULATE, source);
+            if (extractedProduct > 0) {
+                sellerStorage.insert(productKey, extractedProduct, Actionable.MODULATE, source);
+            }
+            fail(player, "Не удалось забрать товар из ME-сети продавца.");
+            return false;
+        }
+
+        long insertedPayment = sellerStorage.insert(priceKey, totalPrice, Actionable.MODULATE, source);
+        if (insertedPayment != totalPrice) {
+            if (insertedPayment > 0) {
+                sellerStorage.extract(priceKey, insertedPayment, Actionable.MODULATE, source);
+            }
+            sellerStorage.insert(productKey, totalProduct, Actionable.MODULATE, source);
+            buyerStorage.insert(priceKey, totalPrice, Actionable.MODULATE, source);
+            fail(player, "Не удалось положить оплату в ME-сеть продавца.");
+            return false;
+        }
+
+        long insertedProduct = buyerStorage.insert(productKey, totalProduct, Actionable.MODULATE, source);
+        if (insertedProduct != totalProduct) {
+            if (insertedProduct > 0) {
+                buyerStorage.extract(productKey, insertedProduct, Actionable.MODULATE, source);
+            }
+            sellerStorage.extract(priceKey, totalPrice, Actionable.MODULATE, source);
+            sellerStorage.insert(productKey, totalProduct, Actionable.MODULATE, source);
+            buyerStorage.insert(priceKey, totalPrice, Actionable.MODULATE, source);
+            fail(player, "Не удалось положить товар в вашу ME-сеть.");
+            return false;
+        }
+
+        success(player, deals, totalProduct, true);
+        return true;
+    }
+
+    public long getAvailableProductCount() {
+        ItemStack productTemplate = items.getStackInSlot(SLOT_PRODUCT);
+        if (productTemplate.isEmpty()) {
+            return 0L;
+        }
+
+        MEStorage sellerStorage = getSellerStorage();
+        if (sellerStorage == null) {
+            return 0L;
+        }
+
+        AEItemKey productKey = AEItemKey.of(productTemplate);
+        return sellerStorage.extract(
+                productKey,
+                Long.MAX_VALUE,
+                Actionable.SIMULATE,
+                IActionSource.ofMachine(this)
+        );
+    }
+
     @Nullable
-    private IItemHandler findNeighborItemHandler() {
-        if (level == null) {
+    private MEStorage getSellerStorage() {
+        if (!mainNode.isOnline()) {
             return null;
         }
 
-        for (Direction direction : Direction.values()) {
-            BlockEntity neighbor = level.getBlockEntity(worldPosition.relative(direction));
+        IGrid grid = mainNode.getGrid();
+        return grid == null ? null : grid.getStorageService().getInventory();
+    }
 
-            if (neighbor == null) {
-                continue;
+    @Nullable
+    private static IGrid findBuyerWirelessGrid(ServerPlayer player) {
+        for (ItemStack stack : player.getInventory().items) {
+            IGrid grid = getWirelessGrid(stack, player);
+            if (grid != null) {
+                return grid;
+            }
+        }
+
+        for (ItemStack stack : player.getInventory().offhand) {
+            IGrid grid = getWirelessGrid(stack, player);
+            if (grid != null) {
+                return grid;
+            }
+        }
+
+        for (ItemStack stack : player.getInventory().armor) {
+            IGrid grid = getWirelessGrid(stack, player);
+            if (grid != null) {
+                return grid;
+            }
+        }
+
+        return findWirelessGridInCurios(player);
+    }
+
+    @Nullable
+    private static IGrid getWirelessGrid(ItemStack stack, ServerPlayer player) {
+        if (stack.isEmpty() || !(stack.getItem() instanceof WirelessTerminalItem terminal)) {
+            return null;
+        }
+
+        try {
+            return terminal.getLinkedGrid(stack, player.level(), player);
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    @Nullable
+    private static IGrid findWirelessGridInCurios(ServerPlayer player) {
+        try {
+            Class<?> curiosApi = Class.forName("top.theillusivec4.curios.api.CuriosApi");
+            Method getCuriosInventory = curiosApi.getMethod("getCuriosInventory", net.minecraft.world.entity.LivingEntity.class);
+            Object lazyOptional = getCuriosInventory.invoke(null, player);
+            Method resolve = lazyOptional.getClass().getMethod("resolve");
+            Optional<?> optional = (Optional<?>) resolve.invoke(lazyOptional);
+
+            if (optional.isEmpty()) {
+                return null;
             }
 
-            LazyOptional<IItemHandler> capability = neighbor.getCapability(
-                    ForgeCapabilities.ITEM_HANDLER,
-                    direction.getOpposite()
-            );
+            Object curiosHandler = optional.get();
+            Method getEquippedCurios = curiosHandler.getClass().getMethod("getEquippedCurios");
+            Object equipped = getEquippedCurios.invoke(curiosHandler);
+            Method getSlots = equipped.getClass().getMethod("getSlots");
+            Method getStackInSlot = equipped.getClass().getMethod("getStackInSlot", int.class);
+            int slots = (int) getSlots.invoke(equipped);
 
-            if (capability.isPresent()) {
-                return capability.orElse(null);
+            for (int slot = 0; slot < slots; slot++) {
+                ItemStack stack = (ItemStack) getStackInSlot.invoke(equipped, slot);
+                IGrid grid = getWirelessGrid(stack, player);
+                if (grid != null) {
+                    return grid;
+                }
             }
+        } catch (ReflectiveOperationException | LinkageError ignored) {
         }
 
         return null;
     }
 
-    private static int countItemsInHandler(IItemHandler handler, ItemStack template) {
-        int count = 0;
-
-        for (int slot = 0; slot < handler.getSlots(); slot++) {
-            ItemStack stack = handler.getStackInSlot(slot);
-
-            if (!ItemStack.isSameItemSameTags(stack, template)) {
-                continue;
-            }
-
-            long nextCount = (long) count + stack.getCount();
-
-            if (nextCount > Integer.MAX_VALUE) {
-                return Integer.MAX_VALUE;
-            }
-
-            count = (int) nextCount;
-        }
-
-        return count;
-    }
-
-    private static boolean canExtractItemsFromHandler(IItemHandler handler, ItemStack template, int amount) {
-        return countItemsInHandler(handler, template) >= amount;
-    }
-
-    private static boolean extractItemsFromHandler(IItemHandler handler, ItemStack template, int amount) {
-        int remaining = amount;
-
-        for (int slot = 0; slot < handler.getSlots(); slot++) {
-            if (remaining <= 0) {
-                break;
-            }
-
-            ItemStack stack = handler.getStackInSlot(slot);
-
-            if (!ItemStack.isSameItemSameTags(stack, template)) {
-                continue;
-            }
-
-            int toExtract = Math.min(remaining, stack.getCount());
-            ItemStack extracted = handler.extractItem(slot, toExtract, false);
-
-            remaining -= extracted.getCount();
-        }
-
-        return remaining <= 0;
-    }
-
-    private static boolean canInsertItemsIntoHandler(IItemHandler handler, ItemStack template, int amount) {
-        int remaining = amount;
-
-        while (remaining > 0) {
-            ItemStack part = template.copy();
-            part.setCount(Math.min(template.getMaxStackSize(), remaining));
-
-            ItemStack remainder = insertIntoHandler(handler, part, true);
-            int inserted = part.getCount() - remainder.getCount();
-
-            if (inserted <= 0) {
-                return false;
-            }
-
-            remaining -= inserted;
-        }
-
-        return true;
-    }
-
-    private static boolean insertItemsIntoHandler(IItemHandler handler, ItemStack template, int amount) {
-        int remaining = amount;
-
-        while (remaining > 0) {
-            ItemStack part = template.copy();
-            part.setCount(Math.min(template.getMaxStackSize(), remaining));
-
-            ItemStack remainder = insertIntoHandler(handler, part, false);
-            int inserted = part.getCount() - remainder.getCount();
-
-            if (inserted <= 0) {
-                return false;
-            }
-
-            remaining -= inserted;
-        }
-
-        return true;
-    }
-
-    private static ItemStack insertIntoHandler(IItemHandler handler, ItemStack stack, boolean simulate) {
-        ItemStack remaining = stack.copy();
-
-        for (int slot = 0; slot < handler.getSlots(); slot++) {
-            if (remaining.isEmpty()) {
-                break;
-            }
-
-            remaining = handler.insertItem(slot, remaining, simulate);
-        }
-
-        return remaining;
-    }
-
     private static int countPlayerItems(ServerPlayer player, ItemStack template) {
         int count = 0;
-
         for (ItemStack stack : player.getInventory().items) {
-            if (!ItemStack.isSameItemSameTags(stack, template)) {
-                continue;
+            if (ItemStack.isSameItemSameTags(stack, template)) {
+                count += stack.getCount();
             }
-
-            long nextCount = (long) count + stack.getCount();
-
-            if (nextCount > Integer.MAX_VALUE) {
-                return Integer.MAX_VALUE;
-            }
-
-            count = (int) nextCount;
         }
-
         return count;
     }
 
     private static void removePlayerItems(ServerPlayer player, ItemStack template, int amount) {
         int remaining = amount;
-
         for (ItemStack stack : player.getInventory().items) {
             if (remaining <= 0) {
                 break;
             }
+            if (ItemStack.isSameItemSameTags(stack, template)) {
+                int removed = Math.min(remaining, stack.getCount());
+                stack.shrink(removed);
+                remaining -= removed;
+            }
+        }
+        player.getInventory().setChanged();
+    }
 
-            if (!ItemStack.isSameItemSameTags(stack, template)) {
-                continue;
+    private static boolean canFitPlayerInventory(
+            ServerPlayer player,
+            ItemStack productTemplate,
+            int productAmount,
+            ItemStack paymentTemplate,
+            int paymentAmount
+    ) {
+        int remainingPayment = paymentAmount;
+        int capacity = 0;
+
+        for (ItemStack current : player.getInventory().items) {
+            int resultingCount = current.getCount();
+            if (remainingPayment > 0 && ItemStack.isSameItemSameTags(current, paymentTemplate)) {
+                int removed = Math.min(remainingPayment, resultingCount);
+                resultingCount -= removed;
+                remainingPayment -= removed;
             }
 
-            int removed = Math.min(remaining, stack.getCount());
-            stack.shrink(removed);
-            remaining -= removed;
+            if (resultingCount == 0) {
+                capacity += productTemplate.getMaxStackSize();
+            } else if (ItemStack.isSameItemSameTags(current, productTemplate)) {
+                capacity += Math.max(0, Math.min(current.getMaxStackSize(), productTemplate.getMaxStackSize()) - resultingCount);
+            }
+
+            if (capacity >= productAmount) {
+                return true;
+            }
         }
 
-        player.getInventory().setChanged();
+        return capacity >= productAmount;
     }
 
     private static void refundPlayer(ServerPlayer player, ItemStack template, int amount) {
-        ItemStack refund = template.copy();
-        refund.setCount(amount);
-
-        giveLargeStack(player, refund);
+        giveLargeStack(player, template, amount);
     }
 
-    private static void giveLargeStack(ServerPlayer player, ItemStack stack) {
-        int remaining = stack.getCount();
-        int maxStackSize = Math.max(1, stack.getMaxStackSize());
+    private static void giveLargeStack(ServerPlayer player, ItemStack template, int amount) {
+        int remaining = amount;
+        int maxStackSize = Math.max(1, template.getMaxStackSize());
 
         while (remaining > 0) {
-            int amountToGive = Math.min(maxStackSize, remaining);
-
-            ItemStack part = stack.copy();
-            part.setCount(amountToGive);
-
-            if (!player.getInventory().add(part)) {
-                player.drop(part, false);
-            } else if (!part.isEmpty()) {
+            ItemStack part = template.copy();
+            part.setCount(Math.min(maxStackSize, remaining));
+            if (!player.getInventory().add(part) || !part.isEmpty()) {
                 player.drop(part, false);
             }
-
-            remaining -= amountToGive;
+            remaining -= Math.min(maxStackSize, remaining);
         }
 
         player.getInventory().setChanged();
+    }
+
+    private static void fail(ServerPlayer player, String message) {
+        player.displayClientMessage(Component.literal("§c" + message), true);
+    }
+
+    private static void success(ServerPlayer player, int deals, long totalProduct, boolean aeMode) {
+        player.displayClientMessage(Component.literal(
+                "§aСделок: §e" + deals + "§a. Получено: §e" + totalProduct + " шт.§a Режим: "
+                        + (aeMode ? "§bME" : "§fинвентарь")
+        ), true);
     }
 
     public void dropContents() {
@@ -370,11 +483,9 @@ public class ExchangerBlockEntity extends BlockEntity implements MenuProvider {
         }
 
         SimpleContainer container = new SimpleContainer(items.getSlots());
-
         for (int slot = 0; slot < items.getSlots(); slot++) {
             container.setItem(slot, items.getStackInSlot(slot));
         }
-
         net.minecraft.world.Containers.dropContents(level, worldPosition, container);
     }
 
@@ -390,51 +501,60 @@ public class ExchangerBlockEntity extends BlockEntity implements MenuProvider {
     }
 
     @Override
+    public void onLoad() {
+        super.onLoad();
+        if (level != null && !level.isClientSide) {
+            mainNode.create(level, worldPosition);
+        }
+    }
+
+    @Override
+    public void setRemoved() {
+        mainNode.destroy();
+        super.setRemoved();
+    }
+
+    @Override
+    public IGridNode getGridNode(Direction direction) {
+        return mainNode.getNode();
+    }
+
+    @Override
+    public IGridNode getActionableNode() {
+        return mainNode.getNode();
+    }
+
+    @Override
+    public AECableType getCableConnectionType(Direction direction) {
+        return AECableType.SMART;
+    }
+
+    @Override
     protected void saveAdditional(CompoundTag tag) {
         super.saveAdditional(tag);
-
         tag.put("Items", items.serializeNBT());
+        mainNode.saveToNBT(tag);
 
         if (ownerUuid != null) {
             tag.putUUID("OwnerUuid", ownerUuid);
         }
-
         tag.putString("OwnerName", ownerName == null ? "" : ownerName);
     }
 
     @Override
     public void load(CompoundTag tag) {
         super.load(tag);
-
         items.deserializeNBT(tag.getCompound("Items"));
+        mainNode.loadFromNBT(tag);
 
-        if (tag.hasUUID("OwnerUuid")) {
-            ownerUuid = tag.getUUID("OwnerUuid");
-        } else {
-            ownerUuid = null;
-        }
-
+        ownerUuid = tag.hasUUID("OwnerUuid") ? tag.getUUID("OwnerUuid") : null;
         ownerName = tag.getString("OwnerName");
     }
 
     private void setChangedAndSync() {
         setChanged();
-
         if (level != null && !level.isClientSide) {
             level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), 3);
         }
-    }
-
-    @Override
-    public @NotNull <T> LazyOptional<T> getCapability(
-            @NotNull Capability<T> capability,
-            @Nullable Direction side
-    ) {
-        return super.getCapability(capability, side);
-    }
-
-    @Override
-    public void invalidateCaps() {
-        super.invalidateCaps();
     }
 }

@@ -29,10 +29,87 @@ public class ExchangerBlockItem extends BlockItem {
             List<Component> tooltip,
             TooltipFlag flag
     ) {
-        tooltip.add(Component.literal("Обменник для торговли между игроками").withStyle(ChatFormatting.GOLD));
-        tooltip.add(Component.literal("Игрок покупает один предмет за другой").withStyle(ChatFormatting.GRAY));
-        tooltip.add(Component.literal("Товар: левый слот").withStyle(ChatFormatting.YELLOW));
-        tooltip.add(Component.literal("Цена: правый слот").withStyle(ChatFormatting.YELLOW));
-        tooltip.add(Component.literal("Только владелец и OP могут менять слоты").withStyle(ChatFormatting.RED));
+        tooltip.add(Component.literal("Безопасная торговля между игроками")
+                .withStyle(ChatFormatting.GOLD));
+
+        if (!net.minecraft.client.gui.screens.Screen.hasShiftDown()) {
+            tooltip.add(
+                    Component.literal("Зажмите ")
+                            .withStyle(ChatFormatting.DARK_GRAY)
+                            .append(Component.literal("Shift")
+                                    .withStyle(ChatFormatting.YELLOW))
+                            .append(Component.literal(", чтобы узнать подробнее")
+                                    .withStyle(ChatFormatting.DARK_GRAY))
+            );
+            return;
+        }
+
+        tooltip.add(Component.empty());
+
+        tooltip.add(Component.literal("Настройка продавца:")
+                .withStyle(ChatFormatting.AQUA));
+
+        tooltip.add(
+                Component.literal(" • ")
+                        .withStyle(ChatFormatting.DARK_GRAY)
+                        .append(Component.literal("Левый слот")
+                                .withStyle(ChatFormatting.YELLOW))
+                        .append(Component.literal(" — продаваемый товар")
+                                .withStyle(ChatFormatting.GRAY))
+        );
+
+        tooltip.add(
+                Component.literal(" • ")
+                        .withStyle(ChatFormatting.DARK_GRAY)
+                        .append(Component.literal("Правый слот")
+                                .withStyle(ChatFormatting.YELLOW))
+                        .append(Component.literal(" — цена за одну сделку")
+                                .withStyle(ChatFormatting.GRAY))
+        );
+
+        tooltip.add(Component.empty());
+
+        tooltip.add(Component.literal("Работа с ME-сетью:")
+                .withStyle(ChatFormatting.AQUA));
+
+        tooltip.add(Component.literal(" • Подключите к блоку ME-кабель")
+                .withStyle(ChatFormatting.GRAY));
+
+        tooltip.add(Component.literal(" • Товар берётся из сети продавца")
+                .withStyle(ChatFormatting.GRAY));
+
+        tooltip.add(Component.literal(" • Оплата возвращается в эту же сеть")
+                .withStyle(ChatFormatting.GRAY));
+
+        tooltip.add(Component.empty());
+
+        tooltip.add(Component.literal("AE-режим покупателя:")
+                .withStyle(ChatFormatting.LIGHT_PURPLE));
+
+        tooltip.add(Component.literal(" • Оплата берётся из беспроводной ME-сети")
+                .withStyle(ChatFormatting.GRAY));
+
+        tooltip.add(Component.literal(" • Купленный товар отправляется туда же")
+                .withStyle(ChatFormatting.GRAY));
+
+        tooltip.add(Component.literal(" • Требуется доступный привязанный терминал")
+                .withStyle(ChatFormatting.GRAY));
+
+        tooltip.add(Component.empty());
+
+        tooltip.add(Component.empty());
+
+        tooltip.add(
+                Component.literal("Крафт временно недоступен")
+                        .withStyle(ChatFormatting.YELLOW)
+        );
+
+        tooltip.add(
+                Component.literal("Будет открыт после баланса экономики")
+                        .withStyle(ChatFormatting.DARK_GRAY)
+        );
+
+        tooltip.add(Component.literal("Настройки доступны только владельцу и OP")
+                .withStyle(ChatFormatting.RED));
     }
 }

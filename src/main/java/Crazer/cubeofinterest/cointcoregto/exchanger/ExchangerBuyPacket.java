@@ -11,21 +11,25 @@ import java.util.function.Supplier;
 public final class ExchangerBuyPacket {
     private final BlockPos pos;
     private final int amount;
+    private final boolean buyerAeMode;
 
-    public ExchangerBuyPacket(BlockPos pos, int amount) {
+    public ExchangerBuyPacket(BlockPos pos, int amount, boolean buyerAeMode) {
         this.pos = pos;
         this.amount = amount;
+        this.buyerAeMode = buyerAeMode;
     }
 
     public static void encode(ExchangerBuyPacket packet, FriendlyByteBuf buffer) {
         buffer.writeBlockPos(packet.pos);
         buffer.writeVarInt(packet.amount);
+        buffer.writeBoolean(packet.buyerAeMode);
     }
 
     public static ExchangerBuyPacket decode(FriendlyByteBuf buffer) {
         return new ExchangerBuyPacket(
                 buffer.readBlockPos(),
-                buffer.readVarInt()
+                buffer.readVarInt(),
+                buffer.readBoolean()
         );
     }
 
@@ -50,7 +54,7 @@ public final class ExchangerBuyPacket {
             BlockEntity blockEntity = player.level().getBlockEntity(packet.pos);
 
             if (blockEntity instanceof ExchangerBlockEntity exchanger) {
-                exchanger.buy(player, packet.amount);
+                exchanger.buy(player, packet.amount, packet.buyerAeMode);
             }
         });
 
