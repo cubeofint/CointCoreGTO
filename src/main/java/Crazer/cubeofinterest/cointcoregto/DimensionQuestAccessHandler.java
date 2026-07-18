@@ -74,6 +74,39 @@ public final class DimensionQuestAccessHandler {
         );
     }
 
+    public static boolean canLandOnDimension(
+            ServerPlayer player,
+            ResourceLocation dimensionId
+    ) {
+        if (!DimensionQuestLockConfig.ENABLED.get()) {
+            return true;
+        }
+
+        if (hasBypassPermission(player)) {
+            return true;
+        }
+
+        String requiredQuestId = getRequiredQuestId(dimensionId);
+
+        if (requiredQuestId == null) {
+            return true;
+        }
+
+        return FTBQuestAccess.isQuestCompleted(
+                player,
+                requiredQuestId
+        );
+    }
+
+    public static void sendLandingDeniedMessage(
+            ServerPlayer player
+    ) {
+        player.displayClientMessage(
+                message(DimensionQuestLockConfig.DENY_MESSAGE.get()),
+                true
+        );
+    }
+
     @SubscribeEvent
     public static void onPlayerTick(
             TickEvent.PlayerTickEvent event

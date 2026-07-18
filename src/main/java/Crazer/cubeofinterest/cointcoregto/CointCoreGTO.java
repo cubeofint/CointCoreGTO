@@ -473,6 +473,7 @@ public class CointCoreGTO {
         CointCoreGTOEmoji.registerNetwork();
         CointRadioNetwork.register();
         CointExchangerNetwork.register();
+        CointCoreGTONetwork.register();
 
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC, "cubechat-common.toml");
         ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, DimensionQuestLockConfig.SPEC, "CointCoreGTO-FTBQuest-Dimension-Locking.toml");
