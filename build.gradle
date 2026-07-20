@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'Crazer.cubeofinterest'
-version = '1.0.4'
+version = '1.0.5-cluster-test1'
 
 base {
     archivesName = 'CointCoreGTO'
@@ -158,6 +158,9 @@ dependencies {
     // and packed into release jar through shadowJar + relocations.
     shade 'net.dv8tion:JDA:5.0.0'
     shade 'javazoom:jlayer:1.0.1'
+    shade('com.mysql:mysql-connector-j:9.7.0') {
+        exclude group: 'com.google.protobuf', module: 'protobuf-java'
+    }
     runtimeOnly 'net.dv8tion:JDA:5.0.0'
 }
 
@@ -218,6 +221,7 @@ shadowJar {
     relocate 'org.intellij', 'crazer.cubeofinterest.cointcoregto.shadow.intellij'
     relocate 'com.sun.jna', 'crazer.cubeofinterest.cointcoregto.shadow.jna'
     relocate 'javazoom', 'crazer.cubeofinterest.cointcoregto.shadow.javazoom'
+    relocate 'com.mysql', 'crazer.cubeofinterest.cointcoregto.shadow.mysql'
 
     mergeServiceFiles()
 }
