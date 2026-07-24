@@ -6,7 +6,8 @@
   "mixins": [
     "ServerStatusPlayersMixin",
     "ServerStatusDescriptionMixin",
-    "AdAstraLandPacketMixin"
+    "AdAstraLandPacketMixin",
+    "FtbEssentialsTeleportPosMixin"
   ],
   "client": [
     "CointCoreGTOChatComponentMixin",

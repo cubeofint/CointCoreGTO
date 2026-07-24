@@ -6,6 +6,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.ResourceLocationArgument;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
@@ -24,7 +25,9 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -45,6 +48,9 @@ public final class ClusterTestModule {
 
     private static final int HEARTBEAT_INTERVAL_TICKS =
             100;
+
+    private static volatile Map<String, String>
+            DIMENSION_OWNER_CACHE = Map.of();
 
     private static final ExecutorService DATABASE_EXECUTOR =
             Executors.newSingleThreadExecutor(task -> {
@@ -75,6 +81,170 @@ public final class ClusterTestModule {
         if (REGISTERED.compareAndSet(false, true)) {
             MinecraftForge.EVENT_BUS.register(INSTANCE);
         }
+    }
+
+    public static boolean routeFtbEssentialsTeleport(
+            ServerPlayer player,
+            ResourceKey<Level> dimension,
+            BlockPos pos,
+            Float yRot,
+            Float xRot
+    ) {
+        return INSTANCE.tryRouteFtbEssentialsTeleport(
+                player,
+                dimension,
+                pos,
+                yRot,
+                xRot
+        );
+    }
+
+    private boolean tryRouteFtbEssentialsTeleport(
+            ServerPlayer player,
+            ResourceKey<Level> dimension,
+            BlockPos pos,
+            Float yRot,
+            Float xRot
+    ) {
+        ClusterConfig currentConfig = config;
+
+        if (currentConfig == null
+                || !currentConfig.enabled()
+                || player == null
+                || dimension == null
+                || pos == null) {
+            return false;
+        }
+
+        String dimensionId =
+                dimension.location().toString();
+
+        String cachedOwner =
+                DIMENSION_OWNER_CACHE.get(dimensionId);
+
+        if (cachedOwner == null
+                || cachedOwner.equalsIgnoreCase(
+                currentConfig.nodeId()
+        )) {
+            return false;
+        }
+
+        MinecraftServer server = player.getServer();
+
+        if (server == null) {
+            return false;
+        }
+
+        UUID playerUuid = player.getUUID();
+        String playerName =
+                player.getGameProfile().getName();
+
+        double targetX = pos.getX() + 0.5D;
+        double targetY = pos.getY() + 0.1D;
+        double targetZ = pos.getZ() + 0.5D;
+
+        float targetYaw = yRot == null
+                ? player.getYRot()
+                : yRot;
+
+        float targetPitch = xRot == null
+                ? player.getXRot()
+                : xRot;
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig =
+                        ClusterConfig.load();
+
+                config = latestConfig;
+
+                if (!latestConfig.enabled()) {
+                    scheduleRouteFailure(
+                            server,
+                            playerUuid,
+                            "Кластерная маршрутизация отключена."
+                    );
+
+                    return;
+                }
+
+                String latestOwner =
+                        ClusterDatabase.findDimensionOwner(
+                                latestConfig,
+                                dimensionId
+                        );
+
+                if (latestOwner == null) {
+                    removeCachedDimensionOwner(
+                            dimensionId
+                    );
+
+                    scheduleRouteFailure(
+                            server,
+                            playerUuid,
+                            "Для dimension "
+                                    + dimensionId
+                                    + " владелец больше не назначен."
+                    );
+
+                    return;
+                }
+
+                updateCachedDimensionOwner(
+                        dimensionId,
+                        latestOwner
+                );
+
+                if (latestOwner.equalsIgnoreCase(
+                        latestConfig.nodeId()
+                )) {
+                    server.execute(
+                            () -> applyFtbTeleportLocally(
+                                    server,
+                                    latestConfig,
+                                    playerUuid,
+                                    dimensionId,
+                                    targetX,
+                                    targetY,
+                                    targetZ,
+                                    targetYaw,
+                                    targetPitch
+                            )
+                    );
+
+                    return;
+                }
+
+                createTransferAndScheduleRedirect(
+                        server,
+                        latestConfig,
+                        playerUuid,
+                        playerName,
+                        latestOwner,
+                        dimensionId,
+                        targetX,
+                        targetY,
+                        targetZ,
+                        targetYaw,
+                        targetPitch
+                );
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to route FTB Essentials teleport for player {} to {}",
+                        playerUuid,
+                        dimensionId,
+                        exception
+                );
+
+                scheduleTransferError(
+                        server,
+                        playerUuid,
+                        exception
+                );
+            }
+        });
+
+        return true;
     }
 
     @SubscribeEvent
@@ -152,6 +322,10 @@ public final class ClusterTestModule {
                         server
                 );
 
+                refreshDimensionOwnerCache(
+                        currentConfig
+                );
+
                 if (heartbeatFailureLogged) {
                     LOGGER.info(
                             "Cluster heartbeat recovered for node {}",
@@ -190,6 +364,7 @@ public final class ClusterTestModule {
         }
 
         heartbeatTickCounter = 0;
+        DIMENSION_OWNER_CACHE = Map.of();
     }
 
     @SubscribeEvent
@@ -673,6 +848,11 @@ public final class ClusterTestModule {
                                 nodeId
                         );
 
+                updateCachedDimensionOwner(
+                        assignment.dimensionId(),
+                        assignment.nodeId()
+                );
+
                 server.execute(() -> {
                     String previousNode =
                             assignment.previousNodeId();
@@ -802,6 +982,11 @@ public final class ClusterTestModule {
                                 latestConfig,
                                 normalizedDimension
                         );
+
+                updateCachedDimensionOwner(
+                        assignment.dimensionId(),
+                        assignment.nodeId()
+                );
 
                 server.execute(() -> {
                     if (!assignment.created()) {
@@ -1421,6 +1606,161 @@ public final class ClusterTestModule {
         }
     }
 
+    private void applyFtbTeleportLocally(
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            UUID playerUuid,
+            String dimensionId,
+            double x,
+            double y,
+            double z,
+            float yaw,
+            float pitch
+    ) {
+        ServerPlayer player =
+                server.getPlayerList()
+                        .getPlayer(playerUuid);
+
+        if (player == null) {
+            return;
+        }
+
+        ResourceLocation dimensionLocation =
+                ResourceLocation.tryParse(dimensionId);
+
+        if (dimensionLocation == null) {
+            scheduleRouteFailure(
+                    server,
+                    playerUuid,
+                    "Некорректный dimension id: "
+                            + dimensionId
+            );
+
+            return;
+        }
+
+        ResourceKey<Level> dimensionKey =
+                ResourceKey.create(
+                        Registries.DIMENSION,
+                        dimensionLocation
+                );
+
+        ServerLevel targetLevel =
+                server.getLevel(dimensionKey);
+
+        if (targetLevel == null) {
+            scheduleRouteFailure(
+                    server,
+                    playerUuid,
+                    "Dimension "
+                            + dimensionId
+                            + " назначена текущему узлу "
+                            + currentConfig.nodeId()
+                            + ", но не загружена на нём."
+            );
+
+            return;
+        }
+
+        try {
+            int experienceLevel =
+                    player.experienceLevel;
+
+            player.teleportTo(
+                    targetLevel,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch
+            );
+
+            player.experienceLevel =
+                    experienceLevel;
+        } catch (Exception exception) {
+            LOGGER.error(
+                    "Unable to finish local FTB Essentials teleport for player {} to {}",
+                    playerUuid,
+                    dimensionId,
+                    exception
+            );
+
+            scheduleRouteFailure(
+                    server,
+                    playerUuid,
+                    "Ошибка локальной телепортации: "
+                            + exception.getMessage()
+            );
+        }
+    }
+
+    private void refreshDimensionOwnerCache(
+            ClusterConfig currentConfig
+    ) throws java.sql.SQLException {
+        DIMENSION_OWNER_CACHE =
+                ClusterDatabase.listDimensionOwners(
+                        currentConfig
+                );
+    }
+
+    private static void updateCachedDimensionOwner(
+            String dimensionId,
+            String nodeId
+    ) {
+        Map<String, String> updated =
+                new HashMap<>(
+                        DIMENSION_OWNER_CACHE
+                );
+
+        updated.put(
+                dimensionId,
+                nodeId
+        );
+
+        DIMENSION_OWNER_CACHE =
+                Map.copyOf(updated);
+    }
+
+    private static void removeCachedDimensionOwner(
+            String dimensionId
+    ) {
+        if (!DIMENSION_OWNER_CACHE.containsKey(
+                dimensionId
+        )) {
+            return;
+        }
+
+        Map<String, String> updated =
+                new HashMap<>(
+                        DIMENSION_OWNER_CACHE
+                );
+
+        updated.remove(dimensionId);
+
+        DIMENSION_OWNER_CACHE =
+                Map.copyOf(updated);
+    }
+
+    private void scheduleRouteFailure(
+            MinecraftServer server,
+            UUID playerUuid,
+            String message
+    ) {
+        server.execute(() -> {
+            ServerPlayer onlinePlayer =
+                    server.getPlayerList()
+                            .getPlayer(playerUuid);
+
+            if (onlinePlayer != null) {
+                onlinePlayer.sendSystemMessage(
+                        Component.literal(
+                                "§c" + message
+                        )
+                );
+            }
+        });
+    }
+
     private void scheduleTransferError(
             MinecraftServer server,
             UUID playerUuid,
@@ -1644,6 +1984,10 @@ public final class ClusterTestModule {
                             currentConfig,
                             server
                     );
+
+            refreshDimensionOwnerCache(
+                    currentConfig
+            );
 
             lastResult = result;
             lastError = null;

@@ -12,6 +12,8 @@ import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 
 public final class ClusterDatabase {
@@ -134,6 +136,40 @@ public final class ClusterDatabase {
             }
 
             return List.copyOf(nodes);
+        }
+    }
+
+    public static Map<String, String> listDimensionOwners(
+            ClusterConfig config
+    ) throws SQLException {
+        try (Connection connection = open(config)) {
+            createTables(connection);
+
+            String sql = """
+                    SELECT
+                        dimension_id,
+                        node_id
+                    FROM dimension_assignments
+                    ORDER BY dimension_id
+                    """;
+
+            Map<String, String> owners =
+                    new LinkedHashMap<>();
+
+            try (PreparedStatement statement =
+                         connection.prepareStatement(sql);
+                 ResultSet resultSet =
+                         statement.executeQuery()) {
+
+                while (resultSet.next()) {
+                    owners.put(
+                            resultSet.getString("dimension_id"),
+                            resultSet.getString("node_id")
+                    );
+                }
+            }
+
+            return Map.copyOf(owners);
         }
     }
 
