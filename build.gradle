@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'Crazer.cubeofinterest'
-version = '1.0.5'
+version = '1.0.6'
 
 base {
     archivesName = 'CointCoreGTO'
@@ -123,7 +123,7 @@ dependencies {
     implementation fg.deobf('curse.maven:architectury-api-419699:5137938')
     implementation fg.deobf("curse.maven:ftb-library-forge-404465:7296748")
     implementation fg.deobf("curse.maven:ftb-essentials-410811:7609948")
-    implementation fg.deobf("curse.maven:ftb-quests-forge-289412:7909594")
+    implementation fg.deobf("local:ftb-quests-forge:2001.4.21")
     implementation fg.deobf("local:ad_astra-forge:1.20.1-1.15.20")
     implementation fg.deobf("local:resourcefullib-forge:1.20.1-2.1.29")
     implementation fg.deobf("local:botarium-forge:1.20.1-2.3.4")

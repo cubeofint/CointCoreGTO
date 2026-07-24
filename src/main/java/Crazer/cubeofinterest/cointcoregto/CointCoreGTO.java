@@ -27,7 +27,10 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.HoverEvent;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -729,7 +732,6 @@ public class CointCoreGTO {
                                             return 1;
                                         })))
         );
-
 
 
         event.getDispatcher().register(
@@ -2345,7 +2347,7 @@ public class CointCoreGTO {
                 double leftSeconds = Math.ceil(leftMillis / 100.0D) / 10.0D;
 
                 player.displayClientMessage(
-                        Component.literal("§cПодожди " + leftSeconds + " сек. перед следующим пингом предмета."),
+                        Component.literal("§cПодожди " + leftSeconds + " сек. перед следующим пингом."),
                         true
                 );
 
@@ -2557,6 +2559,194 @@ public class CointCoreGTO {
         LAST_PRIVATE.put(target.getUUID(), sender.getUUID());
         PRIVATE_CHAT_LOGGER.info(senderName + " -> " + targetName + ": " + stripColor(plainItemText));
     }
+
+
+    public static void shareQuest(
+            ServerPlayer player,
+            String questCode,
+            String questTitle,
+            ItemShareChannel requestedChannel
+    ) {
+        if (player == null || questCode == null || questCode.isBlank()) {
+            return;
+        }
+
+        if (isMuted(player)) {
+            sendMutedMessage(player);
+            return;
+        }
+
+        if (!checkItemShareCooldown(player)) {
+            return;
+        }
+
+        String safeCode = questCode.trim();
+        String safeTitle = normalizeQuestTitle(questTitle, safeCode);
+
+        ItemShareChannel channel = requestedChannel == null ? ItemShareChannel.LOCAL : requestedChannel;
+        if (channel == ItemShareChannel.CURRENT) {
+            channel = switch (getChatView(player)) {
+                case GLOBAL -> ItemShareChannel.GLOBAL;
+                case PRIVATE -> ItemShareChannel.PRIVATE;
+                default -> ItemShareChannel.LOCAL;
+            };
+        }
+
+        switch (channel) {
+            case GLOBAL -> sendGlobalQuestShare(player, safeCode, safeTitle);
+            case PRIVATE -> sendPrivateQuestShare(player, safeCode, safeTitle);
+            default -> sendLocalQuestShare(player, safeCode, safeTitle);
+        }
+    }
+
+    private static String normalizeQuestTitle(String title, String fallbackCode) {
+        String safe = title == null ? "" : stripColor(title);
+        safe = safe.replaceAll("[\\r\\n\\t]", " ").replaceAll("\\s+", " ").trim();
+
+        if (safe.length() > 512) {
+            safe = safe.substring(0, 512);
+        }
+        if (safe.isBlank()) {
+            safe = fallbackCode == null || fallbackCode.isBlank() ? "Quest" : fallbackCode;
+        }
+        return safe;
+    }
+
+    private static String getQuestPlainText(String questTitle) {
+        return "✦ Квест: [" + questTitle + "]";
+    }
+
+    private static Component buildQuestComponent(String questCode, String questTitle) {
+        String command = "/cointcoregto_open_quest " + questCode;
+
+        MutableComponent questLink = Component.literal("[" + questTitle + "]")
+                .withStyle(style -> style
+                        .withClickEvent(new ClickEvent(
+                                ClickEvent.Action.RUN_COMMAND,
+                                command
+                        ))
+                        .withHoverEvent(new HoverEvent(
+                                HoverEvent.Action.SHOW_TEXT,
+                                Component.literal("Открыть квест")
+                        ))
+                        .withUnderlined(true)
+                );
+
+        return Component.literal("✦ ")
+                .withStyle(net.minecraft.ChatFormatting.GOLD)
+                .append(
+                        Component.literal("Квест: ")
+                                .withStyle(net.minecraft.ChatFormatting.YELLOW)
+                )
+                .append(questLink);
+    }
+
+    private static void sendLocalQuestShare(ServerPlayer player, String questCode, String questTitle) {
+        String questText = getQuestPlainText(questTitle);
+        String withoutTimePrefix = color(LOCAL_PREFIX.get())
+                + getLuckPermsPrefix(player)
+                + getStaffTag(player)
+                + "§f" + player.getGameProfile().getName()
+                + "§7: §f";
+        String withoutTime = withoutTimePrefix + "    " + questText;
+
+        int receivers = 0;
+        double radius = LOCAL_RADIUS.get();
+        double radiusSquared = radius * radius;
+
+        for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
+            if (target.level().dimension() != player.level().dimension()) {
+                continue;
+            }
+
+            if (target.distanceToSqr(player) > radiusSquared) {
+                continue;
+            }
+
+            String fullPrefix = timePrefix(target) + withoutTimePrefix;
+            String fullPlain = fullPrefix + "    " + questText;
+            Component liveMessage = Component.literal(fullPrefix + "    ")
+                    .append(buildQuestComponent(questCode, questTitle));
+
+            sendFilteredChatMessage(target, ChatView.LOCAL, fullPlain, liveMessage);
+            receivers++;
+        }
+
+        if (receivers <= 1) {
+            player.displayClientMessage(Component.literal("§7Рядом никого нет. Для глобального чата используйте §e/g §7или выберите §6[G]§7."), true);
+        }
+
+        if (DISCORD_SEND_LOCAL_CHAT.get()) {
+            CointCoreGTODiscordProxy.sendToDiscordLog(stripColor(withoutTime));
+        }
+
+        LOCAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
+    }
+
+    private static void sendGlobalQuestShare(ServerPlayer player, String questCode, String questTitle) {
+        String questText = getQuestPlainText(questTitle);
+        String withoutTimePrefix = color(GLOBAL_PREFIX.get())
+                + getLuckPermsPrefix(player)
+                + getStaffTag(player)
+                + "§f" + player.getGameProfile().getName()
+                + "§7: §f";
+        String withoutTime = withoutTimePrefix + "    " + questText;
+
+        for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
+            String fullPrefix = timePrefix(target) + withoutTimePrefix;
+            String fullPlain = fullPrefix + "    " + questText;
+            Component liveMessage = Component.literal(fullPrefix + "    ")
+                    .append(buildQuestComponent(questCode, questTitle));
+
+            sendFilteredChatMessage(target, ChatView.GLOBAL, fullPlain, liveMessage);
+        }
+
+        if (DISCORD_SEND_GLOBAL_CHAT.get()) {
+            CointCoreGTODiscordProxy.sendPlayerMessageToDiscord(
+                    getDiscordDisplayName(player, GLOBAL_PREFIX.get()),
+                    questText,
+                    player.getUUID().toString(),
+                    player.getGameProfile().getName()
+            );
+        }
+
+        GLOBAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
+    }
+
+    private static void sendPrivateQuestShare(ServerPlayer sender, String questCode, String questTitle) {
+        UUID targetUuid = LAST_PRIVATE.get(sender.getUUID());
+        if (targetUuid == null) {
+            sender.displayClientMessage(Component.literal("§cНекому отправить квест. Сначала напишите игроку через /pm."), true);
+            return;
+        }
+
+        ServerPlayer target = sender.server.getPlayerList().getPlayer(targetUuid);
+        if (target == null) {
+            sender.displayClientMessage(Component.literal("§cИгрок уже не в сети."), true);
+            return;
+        }
+
+        String questText = getQuestPlainText(questTitle);
+        String senderName = sender.getGameProfile().getName();
+        String targetName = target.getGameProfile().getName();
+
+        String senderPrefix = timePrefix(sender) + color(PRIVATE_PREFIX.get()) + "§7Вы -> §d" + targetName + "§7: §f";
+        String targetPrefix = timePrefix(target) + color(PRIVATE_PREFIX.get()) + "§d" + senderName + " §7-> Вы: §f";
+
+        Component senderMessage = Component.literal(senderPrefix + "    ")
+                .append(buildQuestComponent(questCode, questTitle));
+        Component targetMessage = Component.literal(targetPrefix + "    ")
+                .append(buildQuestComponent(questCode, questTitle));
+
+        rememberChatMessage(sender, ChatView.PRIVATE, senderPrefix + "    " + questText, senderMessage);
+        rememberChatMessage(target, ChatView.PRIVATE, targetPrefix + "    " + questText, targetMessage);
+        sender.sendSystemMessage(senderMessage);
+        target.sendSystemMessage(targetMessage);
+        LAST_PRIVATE.put(sender.getUUID(), target.getUUID());
+        LAST_PRIVATE.put(target.getUUID(), sender.getUUID());
+        PRIVATE_CHAT_LOGGER.info(senderName + " -> " + targetName + ": " + stripColor(questText));
+    }
+
 
     public static void broadcastDiscordMessage(String author, String message, String replyToMinecraftPlayer) {
         if (CURRENT_SERVER == null) {

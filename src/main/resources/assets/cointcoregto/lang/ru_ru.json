@@ -2,8 +2,11 @@
   "key.categories.cointcoregto": "CointCoreGTO",
   "key.cointcoregto.share_item_to_chat": "Показать предмет в чат",
   "key.cointcoregto.open_mana_overlay_settings": "Настроить GUI маны",
-
   "subtitles.cointcoregto.mention": "Упоминание в чате",
   "block.cointcoregto.coint_radio": "Радио",
-  "config.jade.plugin_cointcoregto.radio_station": "Станция радио"
+  "config.jade.plugin_cointcoregto.radio_station": "Станция радио",
+  "cointcoregto.quest_share.local": "Пингануть квест в локальный чат",
+  "cointcoregto.quest_share.global": "Пингануть квест в глобальный чат",
+  "cointcoregto.quest_share.private": "Пингануть квест в личный чат",
+  "cointcoregto.quest_share.open": "Открыть квест"
 }
