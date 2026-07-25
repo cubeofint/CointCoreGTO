@@ -20,6 +20,7 @@ import com.electronwill.nightconfig.core.io.WritingMode;
 import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.model.user.User;
+import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.registries.Registries;
@@ -2685,20 +2686,32 @@ public class CointCoreGTO {
     }
 
     private static String getQuestPlainText(String questTitle) {
-        return "[" + questTitle + "]";
+        return "✦ Квест: [" + questTitle + "]";
     }
 
     private static Component buildQuestComponent(String questCode, String questTitle) {
-        MutableComponent component = Component.literal("[" + questTitle + "]");
         String command = "/cointcoregto_open_quest " + questCode;
 
-        return component.withStyle(style -> style
-                .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, command))
-                .withHoverEvent(new HoverEvent(
-                        HoverEvent.Action.SHOW_TEXT,
-                        Component.translatable("cointcoregto.quest_share.open")
-                ))
-        );
+        MutableComponent questLink = Component.literal("[" + questTitle + "]")
+                .withStyle(style -> style
+                        .withClickEvent(new ClickEvent(
+                                ClickEvent.Action.RUN_COMMAND,
+                                command
+                        ))
+                        .withHoverEvent(new HoverEvent(
+                                HoverEvent.Action.SHOW_TEXT,
+                                Component.translatable("cointcoregto.quest_share.open")
+                        ))
+                        .withUnderlined(true)
+                );
+
+        return Component.literal("✦ ")
+                .withStyle(ChatFormatting.GOLD)
+                .append(
+                        Component.literal("Квест: ")
+                                .withStyle(ChatFormatting.YELLOW)
+                )
+                .append(questLink);
     }
 
     private static void sendLocalQuestShare(ServerPlayer player, String questCode, String questTitle) {
