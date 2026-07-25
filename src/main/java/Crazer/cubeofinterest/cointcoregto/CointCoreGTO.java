@@ -112,6 +112,9 @@ public class CointCoreGTO {
     private static final ForgeConfigSpec.BooleanValue USE_EXCLAMATION_FOR_GLOBAL;
     private static final ForgeConfigSpec.BooleanValue USE_DOLLAR_FOR_TRADE;
     private static final ForgeConfigSpec.IntValue TRADE_COOLDOWN_SECONDS;
+    private static final ForgeConfigSpec.BooleanValue CAPS_FILTER_ENABLED;
+    private static final ForgeConfigSpec.IntValue CAPS_FILTER_PERCENT;
+    private static final ForgeConfigSpec.IntValue CAPS_FILTER_MIN_LETTERS;
     private static final ForgeConfigSpec.BooleanValue ITEM_PING_LOCAL_ENABLED;
     private static final ForgeConfigSpec.BooleanValue ITEM_PING_GLOBAL_ENABLED;
     private static final ForgeConfigSpec.BooleanValue ITEM_PING_TRADE_ENABLED;
@@ -235,6 +238,18 @@ public class CointCoreGTO {
         TRADE_COOLDOWN_SECONDS = builder
                 .comment("Cooldown between trade chat messages in seconds. 0 disables cooldown.")
                 .defineInRange("trade_cooldown_seconds", 10, 0, 3600);
+
+        CAPS_FILTER_ENABLED = builder
+                .comment("Block chat messages that contain too many uppercase letters.")
+                .define("caps_filter_enabled", true);
+
+        CAPS_FILTER_PERCENT = builder
+                .comment("Uppercase percentage at which a message is blocked.")
+                .defineInRange("caps_filter_percent", 50, 1, 100);
+
+        CAPS_FILTER_MIN_LETTERS = builder
+                .comment("Minimum number of letters before the caps filter is applied.")
+                .defineInRange("caps_filter_min_letters", 5, 1, 1000);
 
         ITEM_PING_LOCAL_ENABLED = builder.define("item_ping_local_enabled", true);
         ITEM_PING_GLOBAL_ENABLED = builder.define("item_ping_global_enabled", true);
@@ -2045,6 +2060,48 @@ public class CointCoreGTO {
         sendLocalChat(player, message);
     }
 
+    private static boolean blockCapsMessage(ServerPlayer player, String message) {
+        if (!shouldBlockCaps(message)) {
+            return false;
+        }
+
+        player.displayClientMessage(Component.literal(
+                "§cСообщение заблокировано: слишком много заглавных букв (порог "
+                        + CAPS_FILTER_PERCENT.get() + "%)."
+        ), false);
+        return true;
+    }
+
+    private static boolean shouldBlockCaps(String message) {
+        if (!CAPS_FILTER_ENABLED.get() || message == null || message.isBlank()) {
+            return false;
+        }
+
+        int letters = 0;
+        int uppercase = 0;
+
+        for (int offset = 0; offset < message.length(); ) {
+            int codePoint = message.codePointAt(offset);
+            offset += Character.charCount(codePoint);
+
+            if (!Character.isLetter(codePoint)) {
+                continue;
+            }
+
+            letters++;
+            if (Character.isUpperCase(codePoint)) {
+                uppercase++;
+            }
+        }
+
+        if (letters < CAPS_FILTER_MIN_LETTERS.get()) {
+            return false;
+        }
+
+        double uppercasePercent = uppercase * 100.0D / letters;
+        return uppercasePercent >= CAPS_FILTER_PERCENT.get();
+    }
+
     private static void setChatView(ServerPlayer player, ChatView view) {
         if (player == null || view == null) {
             return;
@@ -2172,6 +2229,10 @@ public class CointCoreGTO {
     }
 
     private static void sendLocalChat(ServerPlayer player, String message) {
+        if (blockCapsMessage(player, message)) {
+            return;
+        }
+
         String plainMessage = CointCoreGTOItemPreview.toPlainMessage(player, message);
         String withoutTimePrefix = color(LOCAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
@@ -2214,6 +2275,10 @@ public class CointCoreGTO {
     }
 
     private static void sendGlobalChat(ServerPlayer player, String message) {
+        if (blockCapsMessage(player, message)) {
+            return;
+        }
+
         String plainMessage = CointCoreGTOItemPreview.toPlainMessage(player, message);
         String withoutTimePrefix = color(GLOBAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
@@ -2264,6 +2329,10 @@ public class CointCoreGTO {
     }
 
     private static void sendTradeChat(ServerPlayer player, String message) {
+        if (blockCapsMessage(player, message)) {
+            return;
+        }
+
         if (!checkTradeCooldown(player)) {
             return;
         }
@@ -2287,6 +2356,9 @@ public class CointCoreGTO {
     }
 
     private static void sendPrivateMessage(ServerPlayer sender, ServerPlayer target, String message) {
+        if (blockCapsMessage(sender, message)) {
+            return;
+        }
         if (sender.getUUID().equals(target.getUUID())) {
             sender.displayClientMessage(Component.literal("§cНельзя написать самому себе."), true);
             return;
@@ -2613,32 +2685,20 @@ public class CointCoreGTO {
     }
 
     private static String getQuestPlainText(String questTitle) {
-        return "✦ Квест: [" + questTitle + "]";
+        return "[" + questTitle + "]";
     }
 
     private static Component buildQuestComponent(String questCode, String questTitle) {
+        MutableComponent component = Component.literal("[" + questTitle + "]");
         String command = "/cointcoregto_open_quest " + questCode;
 
-        MutableComponent questLink = Component.literal("[" + questTitle + "]")
-                .withStyle(style -> style
-                        .withClickEvent(new ClickEvent(
-                                ClickEvent.Action.RUN_COMMAND,
-                                command
-                        ))
-                        .withHoverEvent(new HoverEvent(
-                                HoverEvent.Action.SHOW_TEXT,
-                                Component.literal("Открыть квест")
-                        ))
-                        .withUnderlined(true)
-                );
-
-        return Component.literal("✦ ")
-                .withStyle(net.minecraft.ChatFormatting.GOLD)
-                .append(
-                        Component.literal("Квест: ")
-                                .withStyle(net.minecraft.ChatFormatting.YELLOW)
-                )
-                .append(questLink);
+        return component.withStyle(style -> style
+                .withClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, command))
+                .withHoverEvent(new HoverEvent(
+                        HoverEvent.Action.SHOW_TEXT,
+                        Component.translatable("cointcoregto.quest_share.open")
+                ))
+        );
     }
 
     private static void sendLocalQuestShare(ServerPlayer player, String questCode, String questTitle) {
