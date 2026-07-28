@@ -57,7 +57,7 @@ public final class CointCoreGTOReminders {
 
     private static final long MILLIS_PER_MINUTE = 60_000L;
     private static final long CHECK_INTERVAL_MILLIS = 1_000L;
-    private static final Pattern URL_PATTERN = Pattern.compile("(?i)\\bhttps?://[^\\s]+");
+    private static final Pattern URL_PATTERN = Pattern.compile("(?i)https?://[^\\s§]+");
 
     private static final Map<String, Long> NEXT_MESSAGE_SEND_AT = new HashMap<>();
     private static final Map<String, Long> NEXT_RANDOM_GROUP_SEND_AT = new HashMap<>();
