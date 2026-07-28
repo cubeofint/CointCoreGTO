@@ -42,10 +42,8 @@ public class ExchangerBlock extends BaseEntityBlock {
             ItemStack stack
     ) {
         super.setPlacedBy(level, pos, state, placer, stack);
-
         if (!level.isClientSide && placer instanceof Player player) {
             BlockEntity blockEntity = level.getBlockEntity(pos);
-
             if (blockEntity instanceof ExchangerBlockEntity exchanger) {
                 exchanger.setOwner(player);
             }
@@ -66,7 +64,6 @@ public class ExchangerBlock extends BaseEntityBlock {
         }
 
         BlockEntity blockEntity = level.getBlockEntity(pos);
-
         if (blockEntity instanceof MenuProvider menuProvider && player instanceof ServerPlayer serverPlayer) {
             if (blockEntity instanceof ExchangerBlockEntity exchanger) {
                 NetworkHooks.openScreen(
@@ -79,7 +76,6 @@ public class ExchangerBlock extends BaseEntityBlock {
                 );
             }
         }
-
         return InteractionResult.CONSUME;
     }
 
@@ -93,11 +89,11 @@ public class ExchangerBlock extends BaseEntityBlock {
     ) {
         if (!oldState.is(newState.getBlock())) {
             BlockEntity blockEntity = level.getBlockEntity(pos);
-
             if (blockEntity instanceof ExchangerBlockEntity exchanger) {
+                exchanger.getItems().setStackInSlot(ExchangerBlockEntity.SLOT_PRODUCT, ItemStack.EMPTY);
+                exchanger.getItems().setStackInSlot(ExchangerBlockEntity.SLOT_PRICE, ItemStack.EMPTY);
                 exchanger.dropContents();
             }
-
             super.onRemove(oldState, level, pos, newState, moving);
         }
     }

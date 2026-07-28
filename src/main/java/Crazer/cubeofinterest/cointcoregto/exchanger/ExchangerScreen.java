@@ -3,11 +3,14 @@ package Crazer.cubeofinterest.cointcoregto.exchanger;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.ItemStack;
 
 public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
+    private static final int EMI_BOTTOM_RESERVED = 22;
     private EditBox dealsBox;
     private Button buyButton;
     private Button switchModeButton;
@@ -18,25 +21,26 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
 
     public ExchangerScreen(ExchangerMenu menu, Inventory playerInventory, Component title) {
         super(menu, playerInventory, Component.literal("Обменник"));
-
-        this.imageWidth = 236;
-        this.imageHeight = 250;
-
-        this.buyerMode = !menu.canEdit();
+        this.imageWidth = 200;
+        this.imageHeight = 206;
+        this.buyerMode = menu.isBuyerMode();
     }
 
     @Override
     protected void init() {
-        this.imageWidth = 236;
-        this.imageHeight = 250;
-
+        this.imageWidth = 200;
+        this.imageHeight = 206;
         super.init();
+        this.topPos = Math.max(0, Math.min(
+                this.topPos,
+                this.height - this.imageHeight - EMI_BOTTOM_RESERVED
+        ));
 
         this.dealsBox = new EditBox(
                 this.font,
-                this.leftPos + 68,
-                this.topPos + 108,
-                54,
+                this.leftPos + 44,
+                this.topPos + 91,
+                32,
                 18,
                 Component.literal("Сделок")
         );
@@ -48,19 +52,19 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         this.buyButton = Button.builder(
                 Component.literal("Купить"),
                 button -> buy()
-        ).bounds(this.leftPos + 132, this.topPos + 107, 82, 20).build();
+        ).bounds(this.leftPos + 80, this.topPos + 90, 52, 20).build();
         this.addRenderableWidget(this.buyButton);
 
         this.aeModeButton = Button.builder(
-                Component.literal("AE режим: выкл"),
+                Component.literal("AE: выкл"),
                 button -> toggleAeMode()
-        ).bounds(this.leftPos + 20, this.topPos + 130, 104, 20).build();
+        ).bounds(this.leftPos + 136, this.topPos + 90, 54, 20).build();
         this.addRenderableWidget(this.aeModeButton);
 
         this.switchModeButton = Button.builder(
                 Component.literal("К покупателю"),
                 button -> switchMode()
-        ).bounds(this.leftPos + this.imageWidth - 108, this.topPos + 16, 94, 20).build();
+        ).bounds(this.leftPos + this.imageWidth - 96, this.topPos + 12, 86, 20).build();
         this.addRenderableWidget(this.switchModeButton);
 
         refreshModeWidgets();
@@ -69,7 +73,7 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
     private void toggleAeMode() {
         this.buyerAeMode = !this.buyerAeMode;
         this.aeModeButton.setMessage(Component.literal(
-                this.buyerAeMode ? "AE режим: вкл" : "AE режим: выкл"
+                this.buyerAeMode ? "AE: вкл" : "AE: выкл"
         ));
     }
 
@@ -79,21 +83,21 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         }
 
         this.buyerMode = !this.buyerMode;
+        this.menu.setEditMode(!this.buyerMode);
+        CointExchangerNetwork.CHANNEL.sendToServer(
+                new ExchangerSetModePacket(this.menu.getBlockPos(), !this.buyerMode)
+        );
         refreshModeWidgets();
     }
 
     private void refreshModeWidgets() {
         boolean canEdit = this.menu.canEdit();
-
         this.dealsBox.visible = this.buyerMode;
         this.dealsBox.active = this.buyerMode;
-
         this.buyButton.visible = this.buyerMode;
         this.buyButton.active = this.buyerMode;
-
         this.aeModeButton.visible = this.buyerMode;
         this.aeModeButton.active = this.buyerMode;
-
         this.switchModeButton.visible = canEdit;
         this.switchModeButton.active = canEdit;
 
@@ -103,17 +107,15 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
             this.switchModeButton.setMessage(Component.literal("К покупателю"));
         }
 
-        this.switchModeButton.setX(this.leftPos + this.imageWidth - 108);
-        this.switchModeButton.setY(this.topPos + 16);
-        this.switchModeButton.setWidth(94);
+        this.switchModeButton.setX(this.leftPos + this.imageWidth - 96);
+        this.switchModeButton.setY(this.topPos + 12);
+        this.switchModeButton.setWidth(86);
     }
 
     private void buy() {
         int deals = 1;
-
         try {
             String value = this.dealsBox.getValue();
-
             if (value != null && !value.isBlank()) {
                 deals = Integer.parseInt(value);
             }
@@ -130,6 +132,95 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         );
     }
 
+    public boolean canAcceptEmiTemplates() {
+        return this.menu.isEditMode() && !this.buyerMode;
+    }
+
+    public int getTemplateSlotScreenX(int slot) {
+        return this.leftPos + this.menu.getSlot(slot).x;
+    }
+
+    public int getTemplateSlotScreenY(int slot) {
+        return this.topPos + this.menu.getSlot(slot).y;
+    }
+
+    public void setTemplateFromEmi(int slot, ItemStack stack) {
+        if (!canAcceptEmiTemplates()) {
+            return;
+        }
+
+        sendTemplateUpdate(slot, stack);
+    }
+
+    private void sendTemplateUpdate(int slot, ItemStack stack) {
+        CointExchangerNetwork.CHANNEL.sendToServer(
+                new ExchangerSetTemplatePacket(this.menu.getBlockPos(), slot, stack)
+        );
+    }
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
+        if (canAcceptEmiTemplates()) {
+            int slot = findTemplateSlot(mouseX, mouseY);
+            if (slot >= 0) {
+                ItemStack current = this.menu.getSlot(slot).getItem();
+                if (!current.isEmpty()) {
+                    ItemStack changed = current.copy();
+                    int direction = delta > 0.0D ? 1 : -1;
+                    int maximum = Math.max(1, Math.min(64, changed.getMaxStackSize()));
+                    int count;
+
+                    if (Screen.hasShiftDown()) {
+                        count = getShiftCount(changed.getCount(), maximum, direction);
+                    } else {
+                        count = Math.max(1, Math.min(maximum, changed.getCount() + direction));
+                    }
+
+                    if (count != changed.getCount()) {
+                        changed.setCount(count);
+                        sendTemplateUpdate(slot, changed);
+                    }
+                    return true;
+                }
+            }
+        }
+
+        return super.mouseScrolled(mouseX, mouseY, delta);
+    }
+
+    private static int getShiftCount(int current, int maximum, int direction) {
+        int[] steps = {1, 16, 32, 48, 64};
+
+        if (direction > 0) {
+            for (int step : steps) {
+                if (step > current && step <= maximum) {
+                    return step;
+                }
+            }
+            return maximum;
+        }
+
+        for (int index = steps.length - 1; index >= 0; index--) {
+            int step = steps[index];
+            if (step < current && step <= maximum) {
+                return step;
+            }
+        }
+        return 1;
+    }
+
+    private int findTemplateSlot(double mouseX, double mouseY) {
+        for (int slot = 0; slot < 2; slot++) {
+            int x = getTemplateSlotScreenX(slot) - 1;
+            int y = getTemplateSlotScreenY(slot) - 1;
+            if (mouseX >= x && mouseX < x + 18 && mouseY >= y && mouseY < y + 18) {
+                return slot;
+            }
+        }
+
+        return -1;
+    }
+
     @Override
     protected void renderBg(GuiGraphics graphics, float partialTick, int mouseX, int mouseY) {
         drawPanel(graphics);
@@ -143,30 +234,33 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
 
         graphics.fill(x, y, x + w, y + h, 0xEE10131C);
         graphics.fill(x, y, x + w, y + 4, 0xFF62DCEB);
-        graphics.fill(x, y + 4, x + w, y + 42, 0xFF161B28);
-
+        graphics.fill(x, y + 4, x + w, y + 36, 0xFF161B28);
         graphics.renderOutline(x, y, w, h, 0xFF5C6B86);
 
-        graphics.fill(x + 10, y + 48, x + w - 10, y + 152, 0xAA242A3A);
-        graphics.renderOutline(x + 10, y + 48, w - 20, 104, 0xFF39445C);
+        graphics.fill(x + 8, y + 40, x + w - 8, y + 113, 0xAA242A3A);
+        graphics.renderOutline(x + 8, y + 40, w - 16, 73, 0xFF39445C);
 
-        graphics.fill(x + 10, y + 156, x + w - 10, y + h - 10, 0xAA1E2432);
-        graphics.renderOutline(x + 10, y + 156, w - 20, h - 166, 0xFF39445C);
+        graphics.fill(x + 8, y + 117, x + w - 8, y + h - 3, 0xAA1E2432);
+        graphics.renderOutline(x + 8, y + 117, w - 16, h - 120, 0xFF39445C);
 
-        drawSlotFrame(graphics, x + 66, y + 52);
-        drawSlotFrame(graphics, x + 154, y + 52);
-
-        graphics.fill(x + 89, y + 59, x + 139, y + 61, 0xFF62DCEB);
-        graphics.fill(x + 135, y + 55, x + 142, y + 60, 0xFF62DCEB);
-        graphics.fill(x + 135, y + 60, x + 142, y + 65, 0xFF62DCEB);
-
+        drawSlotFrame(graphics, x + 48, y + 44);
+        drawSlotFrame(graphics, x + 136, y + 44);
+        drawExchangeArrow(graphics, x, y);
         drawPlayerInventorySlots(graphics, x, y);
     }
 
-    private void drawPlayerInventorySlots(GuiGraphics graphics, int x, int y) {
-        int inventoryX = x + 37;
-        int inventoryY = y + 170;
+    private void drawExchangeArrow(GuiGraphics graphics, int x, int y) {
+        int color = 0xFF62DCEB;
+        int centerY = y + 52;
+        graphics.fill(x + 71, centerY - 1, x + 124, centerY + 2, color);
+        graphics.fill(x + 121, centerY - 6, x + 124, centerY + 7, color);
+        graphics.fill(x + 124, centerY - 4, x + 127, centerY + 5, color);
+        graphics.fill(x + 127, centerY - 2, x + 130, centerY + 3, color);
+    }
 
+    private void drawPlayerInventorySlots(GuiGraphics graphics, int x, int y) {
+        int inventoryX = x + 19;
+        int inventoryY = y + 131;
         for (int row = 0; row < 3; row++) {
             for (int column = 0; column < 9; column++) {
                 drawSlotFrame(
@@ -177,9 +271,8 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
             }
         }
 
-        int hotbarX = x + 37;
-        int hotbarY = y + 228;
-
+        int hotbarX = x + 19;
+        int hotbarY = y + 187;
         for (int column = 0; column < 9; column++) {
             drawSlotFrame(
                     graphics,
@@ -200,22 +293,24 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
 
     @Override
     protected void renderLabels(GuiGraphics graphics, int mouseX, int mouseY) {
-        graphics.drawString(this.font, "Обменник", 18, 18, 0xF2F6FF, false);
+        graphics.drawString(this.font, "Обменник", 14, 12, 0xF2F6FF, false);
 
         if (this.buyerMode) {
-            graphics.drawString(this.font, "Режим покупателя", 18, 30, 0x73E8F2, false);
+            graphics.drawString(this.font, "Покупатель", 14, 24, 0x73E8F2, false);
         } else {
-            graphics.drawString(this.font, "Настройка владельца", 18, 30, 0xFFD36A, false);
+            graphics.drawString(this.font, "Владелец", 14, 24, 0xFFD36A, false);
         }
 
-        graphics.drawString(this.font, "Товар", 62, 76, 0xD6DCEB, false);
-        graphics.drawString(this.font, "Цена", 150, 76, 0xD6DCEB, false);
+        graphics.drawString(this.font, "Товар", 44, 67, 0xD6DCEB, false);
+        graphics.drawString(this.font, "Цена", 132, 67, 0xD6DCEB, false);
 
         if (this.buyerMode) {
-            graphics.drawString(this.font, "Сделок:", 20, 112, 0xD6DCEB, false);
-
+            graphics.drawString(this.font, "Сделок:", 10, 96, 0xD6DCEB, false);
             long availableItems = this.menu.getAvailableProductCount();
-            int perDeal = Math.max(1, this.menu.getSlot(ExchangerBlockEntity.SLOT_PRODUCT).getItem().getCount());
+            int perDeal = Math.max(
+                    1,
+                    this.menu.getSlot(ExchangerBlockEntity.SLOT_PRODUCT).getItem().getCount()
+            );
             long availableDeals = availableItems / perDeal;
             String stockText = "В наличии: " + formatAmount(availableItems)
                     + " шт. (" + formatAmount(availableDeals) + " сделок)";
@@ -223,22 +318,20 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
                     this.font,
                     stockText,
                     this.imageWidth / 2,
-                    92,
+                    79,
                     availableItems > 0 ? 0x8FE59A : 0xF27D7D
             );
-
-            graphics.drawString(this.font, this.buyerAeMode ? "Источник: беспроводная ME" : "Источник: инвентарь", 130, 136, 0x8C93A6, false);
         } else {
-            graphics.drawString(this.font, "Слева — товар, справа — цена.", 20, 106, 0xD6DCEB, false);
-            graphics.drawString(this.font, "Слоты являются шаблонами обмена.", 20, 120, 0x8C93A6, false);
+            graphics.drawString(this.font, "Слева товар, справа цена.", 12, 82, 0xD6DCEB, false);
+            graphics.drawString(this.font, "Колесо: ±1", 12, 95, 0x8C93A6, false);
+            graphics.drawString(this.font, "Shift: 16 / 32 / 48 / 64", 12, 106, 0x8C93A6, false);
         }
 
-        graphics.drawString(this.font, "Инвентарь", 37, 160, 0xD6DCEB, false);
+        graphics.drawString(this.font, "Инвентарь", 19, 120, 0xD6DCEB, false);
     }
 
     private static String formatAmount(long amount) {
         long safeAmount = Math.max(0L, amount);
-
         if (safeAmount < 1_000L) {
             return Long.toString(safeAmount);
         }

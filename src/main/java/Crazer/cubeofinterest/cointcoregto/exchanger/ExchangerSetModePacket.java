@@ -3,38 +3,33 @@ package Crazer.cubeofinterest.cointcoregto.exchanger;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraftforge.network.NetworkEvent;
 
 import java.util.function.Supplier;
 
-public final class ExchangerBuyPacket {
+public final class ExchangerSetModePacket {
     private final BlockPos pos;
-    private final int amount;
-    private final boolean buyerAeMode;
+    private final boolean editMode;
 
-    public ExchangerBuyPacket(BlockPos pos, int amount, boolean buyerAeMode) {
+    public ExchangerSetModePacket(BlockPos pos, boolean editMode) {
         this.pos = pos;
-        this.amount = amount;
-        this.buyerAeMode = buyerAeMode;
+        this.editMode = editMode;
     }
 
-    public static void encode(ExchangerBuyPacket packet, FriendlyByteBuf buffer) {
+    public static void encode(ExchangerSetModePacket packet, FriendlyByteBuf buffer) {
         buffer.writeBlockPos(packet.pos);
-        buffer.writeVarInt(packet.amount);
-        buffer.writeBoolean(packet.buyerAeMode);
+        buffer.writeBoolean(packet.editMode);
     }
 
-    public static ExchangerBuyPacket decode(FriendlyByteBuf buffer) {
-        return new ExchangerBuyPacket(
+    public static ExchangerSetModePacket decode(FriendlyByteBuf buffer) {
+        return new ExchangerSetModePacket(
                 buffer.readBlockPos(),
-                buffer.readVarInt(),
                 buffer.readBoolean()
         );
     }
 
     public static void handle(
-            ExchangerBuyPacket packet,
+            ExchangerSetModePacket packet,
             Supplier<NetworkEvent.Context> contextSupplier
     ) {
         NetworkEvent.Context context = contextSupplier.get();
@@ -48,11 +43,7 @@ public final class ExchangerBuyPacket {
                 return;
             }
 
-            if (!menu.isBuyerMode() || !menu.getBlockPos().equals(packet.pos)) {
-                return;
-            }
-
-            if (packet.amount <= 0 || packet.amount > 100_000) {
+            if (!menu.canEdit() || !menu.getBlockPos().equals(packet.pos)) {
                 return;
             }
 
@@ -64,10 +55,11 @@ public final class ExchangerBuyPacket {
                 return;
             }
 
-            BlockEntity blockEntity = player.level().getBlockEntity(packet.pos);
-            if (blockEntity instanceof ExchangerBlockEntity exchanger) {
-                exchanger.buy(player, packet.amount, packet.buyerAeMode);
+            if (!menu.getExchanger().canEdit(player)) {
+                return;
             }
+
+            menu.setEditMode(packet.editMode);
         });
         context.setPacketHandled(true);
     }

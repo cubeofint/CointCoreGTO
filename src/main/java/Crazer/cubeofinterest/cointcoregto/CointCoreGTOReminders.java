@@ -4,8 +4,12 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.ChatFormatting;
 import net.minecraft.commands.Commands;
+import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.HoverEvent;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -31,6 +35,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Mod.EventBusSubscriber(
         modid = CointCoreGTO.MODID,
@@ -45,15 +51,19 @@ public final class CointCoreGTOReminders {
     private static final Path CONFIG_PATH = FMLPaths.CONFIGDIR
             .get()
             .resolve("cointcoregto-reminders.json");
+    private static final Path STATE_PATH = FMLPaths.CONFIGDIR
+            .get()
+            .resolve("cointcoregto-reminders-state.json");
 
     private static final long MILLIS_PER_MINUTE = 60_000L;
     private static final long CHECK_INTERVAL_MILLIS = 1_000L;
+    private static final Pattern URL_PATTERN = Pattern.compile("(?i)\\bhttps?://[^\\s]+");
 
     private static final Map<String, Long> NEXT_MESSAGE_SEND_AT = new HashMap<>();
     private static final Map<String, Long> NEXT_RANDOM_GROUP_SEND_AT = new HashMap<>();
-    private static final Map<String, Integer> LAST_RANDOM_INDEX = new HashMap<>();
 
     private static ReminderConfig config = ReminderConfig.createDefault();
+    private static ReminderState state = new ReminderState();
     private static long lastCheckMillis = 0L;
 
     private CointCoreGTOReminders() {
@@ -61,15 +71,17 @@ public final class CointCoreGTOReminders {
 
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
+        loadState();
         reloadConfig(false);
     }
 
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
+        saveState();
         lastCheckMillis = 0L;
         NEXT_MESSAGE_SEND_AT.clear();
         NEXT_RANDOM_GROUP_SEND_AT.clear();
-        LAST_RANDOM_INDEX.clear();
+        state = new ReminderState();
     }
 
     @SubscribeEvent
@@ -92,69 +104,129 @@ public final class CointCoreGTOReminders {
             return;
         }
 
-        if (activeConfig.onlyWhenPlayersOnline
-                && server.getPlayerList().getPlayerCount() == 0) {
+        int minimumOnlinePlayers = Math.max(0, activeConfig.minimumOnlinePlayers);
+        if (server.getPlayerList().getPlayerCount() < minimumOnlinePlayers) {
             return;
         }
 
-        processScheduledMessages(server, activeConfig.messages, now);
-        processRandomGroups(server, activeConfig.randomGroups, now);
+        processDueNotifications(server, activeConfig, now);
     }
 
-    private static void processScheduledMessages(
+    private static void processDueNotifications(
             MinecraftServer server,
-            List<ReminderEntry> entries,
+            ReminderConfig activeConfig,
             long now
     ) {
-        if (entries == null || entries.isEmpty()) {
+        if (!canSendAnotherNotification(activeConfig, now)) {
             return;
         }
 
-        for (ReminderEntry entry : entries) {
-            if (!isValid(entry)) {
-                continue;
+        DispatchCandidate selected = null;
+        int order = 0;
+
+        if (activeConfig.messages != null) {
+            for (ReminderEntry entry : activeConfig.messages) {
+                if (!isValid(entry)) {
+                    order++;
+                    continue;
+                }
+
+                String id = normalizeId(entry.id);
+                Long nextSendAt = NEXT_MESSAGE_SEND_AT.get(id);
+                if (nextSendAt == null || now < nextSendAt) {
+                    order++;
+                    continue;
+                }
+
+                if (!isTextRepeatAllowed(activeConfig, entry.text, now)) {
+                    order++;
+                    continue;
+                }
+
+                DispatchCandidate candidate = DispatchCandidate.forMessage(
+                        nextSendAt,
+                        order,
+                        entry
+                );
+                selected = selectEarlier(selected, candidate);
+                order++;
             }
+        }
 
-            String id = normalizeId(entry.id);
-            Long nextSendAt = NEXT_MESSAGE_SEND_AT.get(id);
+        if (activeConfig.randomGroups != null) {
+            for (RandomGroup group : activeConfig.randomGroups) {
+                if (!isValid(group)) {
+                    order++;
+                    continue;
+                }
 
-            if (nextSendAt == null || now < nextSendAt) {
-                continue;
+                String id = normalizeId(group.id);
+                Long nextSendAt = NEXT_RANDOM_GROUP_SEND_AT.get(id);
+                if (nextSendAt == null || now < nextSendAt) {
+                    order++;
+                    continue;
+                }
+
+                RandomSelection selection = selectRandomText(
+                        activeConfig,
+                        group,
+                        now,
+                        true
+                );
+                if (selection == null) {
+                    order++;
+                    continue;
+                }
+
+                DispatchCandidate candidate = DispatchCandidate.forRandomGroup(
+                        nextSendAt,
+                        order,
+                        group,
+                        selection
+                );
+                selected = selectEarlier(selected, candidate);
+                order++;
             }
+        }
 
-            broadcast(server, entry.text);
-            scheduleMessageAfterSend(entry, now);
+        if (selected == null) {
+            return;
+        }
+
+        int recipients = broadcast(server, selected.text);
+        if (recipients <= 0) {
+            return;
+        }
+
+        recordSend(
+                selected.text,
+                selected.randomGroup,
+                selected.randomIndex,
+                now
+        );
+
+        if (selected.message != null) {
+            scheduleMessageAfterSend(selected.message, now);
+        } else if (selected.randomGroup != null) {
+            scheduleRandomGroupAfterSend(selected.randomGroup, now);
         }
     }
 
-    private static void processRandomGroups(
-            MinecraftServer server,
-            List<RandomGroup> groups,
-            long now
+    private static DispatchCandidate selectEarlier(
+            DispatchCandidate current,
+            DispatchCandidate candidate
     ) {
-        if (groups == null || groups.isEmpty()) {
-            return;
+        if (current == null) {
+            return candidate;
         }
-
-        for (RandomGroup group : groups) {
-            if (!isValid(group)) {
-                continue;
-            }
-
-            String id = normalizeId(group.id);
-            Long nextSendAt = NEXT_RANDOM_GROUP_SEND_AT.get(id);
-
-            if (nextSendAt == null || now < nextSendAt) {
-                continue;
-            }
-
-            String selectedText = selectRandomText(group);
-            if (selectedText != null) {
-                broadcast(server, selectedText);
-            }
-
-            scheduleRandomGroupAfterSend(group, now);
+        if (candidate.scheduledAt < current.scheduledAt) {
+            return candidate;
         }
+        if (candidate.scheduledAt == current.scheduledAt
+                && candidate.order < current.order) {
+            return candidate;
+        }
+        return current;
     }
 
     @SubscribeEvent
@@ -168,7 +240,6 @@ public final class CointCoreGTOReminders {
                                                 Commands.literal("reload")
                                                         .executes(context -> {
                                                             boolean loaded = reloadConfig(true);
-
                                                             if (loaded) {
                                                                 context.getSource().sendSuccess(
                                                                         () -> Component.literal(
@@ -178,7 +249,6 @@ public final class CointCoreGTOReminders {
                                                                 );
                                                                 return 1;
                                                             }
-
                                                             context.getSource().sendFailure(
                                                                     Component.literal(
                                                                             "§cНе удалось загрузить cointcoregto-reminders.json. Проверьте формат файла."
@@ -239,10 +309,18 @@ public final class CointCoreGTOReminders {
     private static int sendById(CommandSourceStack source, String requestedId) {
         ReminderEntry entry = findMessage(requestedId);
         if (entry != null) {
-            broadcast(source.getServer(), entry.text);
+            int recipients = broadcast(source.getServer(), entry.text);
+            if (recipients <= 0) {
+                source.sendFailure(
+                        Component.literal("§cНет игроков, которым можно отправить напоминание.")
+                );
+                return 0;
+            }
+
+            recordSend(entry.text, null, null, System.currentTimeMillis());
             source.sendSuccess(
                     () -> Component.literal(
-                            "§aНапоминание '" + entry.id + "' отправлено."
+                            "§aНапоминание '" + entry.id + "' отправлено игрокам: " + recipients + "."
                     ),
                     false
             );
@@ -251,8 +329,14 @@ public final class CointCoreGTOReminders {
 
         RandomGroup group = findRandomGroup(requestedId);
         if (group != null) {
-            String selectedText = selectRandomText(group);
-            if (selectedText == null) {
+            long now = System.currentTimeMillis();
+            RandomSelection selection = selectRandomText(
+                    config,
+                    group,
+                    now,
+                    false
+            );
+            if (selection == null) {
                 source.sendFailure(
                         Component.literal(
                                 "§cВ случайной группе '" + group.id + "' нет доступных фраз."
@@ -261,10 +345,22 @@ public final class CointCoreGTOReminders {
                 return 0;
             }
 
-            broadcast(source.getServer(), selectedText);
+            int recipients = broadcast(source.getServer(), selection.text);
+            if (recipients <= 0) {
+                source.sendFailure(
+                        Component.literal("§cНет игроков, которым можно отправить напоминание.")
+                );
+                return 0;
+            }
+
+            recordSend(selection.text, group, selection.index, now);
             source.sendSuccess(
                     () -> Component.literal(
-                            "§aСлучайная фраза из группы '" + group.id + "' отправлена."
+                            "§aСлучайная фраза из группы '"
+                                    + group.id
+                                    + "' отправлена игрокам: "
+                                    + recipients
+                                    + "."
                     ),
                     false
             );
@@ -299,32 +395,57 @@ public final class CointCoreGTOReminders {
                 throw new IOException("Config file is empty");
             }
 
-            if (loaded.messages == null) {
-                loaded.messages = new ArrayList<>();
-            }
-
-            if (loaded.randomGroups == null) {
-                loaded.randomGroups = new ArrayList<>();
-            }
-
+            normalizeConfig(loaded);
+            validateConfig(loaded);
             validateUniqueIds(loaded.messages, loaded.randomGroups);
 
             config = loaded;
             resetSchedule(System.currentTimeMillis());
+
+            try {
+                writeConfig(config);
+            } catch (IOException ignored) {
+            }
+
             return true;
         } catch (Exception ignored) {
             if (!keepOldConfigOnError) {
                 config = ReminderConfig.createDefault();
                 NEXT_MESSAGE_SEND_AT.clear();
                 NEXT_RANDOM_GROUP_SEND_AT.clear();
-                LAST_RANDOM_INDEX.clear();
             }
-
             return false;
         }
     }
 
+    private static void normalizeConfig(ReminderConfig loaded) {
+        if (loaded.messages == null) {
+            loaded.messages = new ArrayList<>();
+        }
+        if (loaded.randomGroups == null) {
+            loaded.randomGroups = new ArrayList<>();
+        }
+    }
+
+    private static void validateConfig(ReminderConfig loaded) {
+        if (loaded.minimumOnlinePlayers < 0) {
+            throw new IllegalArgumentException("minimumOnlinePlayers must be non-negative");
+        }
+        if (loaded.minimumMinutesBetweenNotifications < 0L) {
+            throw new IllegalArgumentException(
+                    "minimumMinutesBetweenNotifications must be non-negative"
+            );
+        }
+        if (loaded.repeatCooldownMinutes < 0L) {
+            throw new IllegalArgumentException("repeatCooldownMinutes must be non-negative");
+        }
+    }
+
     private static void writeDefaultConfig() throws IOException {
+        writeConfig(ReminderConfig.createDefault());
+    }
+
+    private static void writeConfig(ReminderConfig value) throws IOException {
         Path parent = CONFIG_PATH.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
@@ -334,14 +455,76 @@ public final class CointCoreGTOReminders {
                 CONFIG_PATH,
                 StandardCharsets.UTF_8
         )) {
-            GSON.toJson(ReminderConfig.createDefault(), writer);
+            GSON.toJson(value, writer);
+        }
+    }
+
+    private static void loadState() {
+        try {
+            if (Files.notExists(STATE_PATH)) {
+                state = new ReminderState();
+                return;
+            }
+
+            ReminderState loaded;
+            try (Reader reader = Files.newBufferedReader(
+                    STATE_PATH,
+                    StandardCharsets.UTF_8
+            )) {
+                loaded = GSON.fromJson(reader, ReminderState.class);
+            }
+
+            if (loaded == null) {
+                state = new ReminderState();
+                return;
+            }
+
+            if (loaded.lastTextSendAtMillis == null) {
+                loaded.lastTextSendAtMillis = new HashMap<>();
+            }
+            if (loaded.lastRandomIndexes == null) {
+                loaded.lastRandomIndexes = new HashMap<>();
+            }
+
+            loaded.lastTextSendAtMillis.entrySet().removeIf(
+                    entry -> entry.getKey() == null
+                            || entry.getKey().isBlank()
+                            || entry.getValue() == null
+                            || entry.getValue() <= 0L
+            );
+            loaded.lastRandomIndexes.entrySet().removeIf(
+                    entry -> entry.getKey() == null
+                            || entry.getKey().isBlank()
+                            || entry.getValue() == null
+                            || entry.getValue() < 0
+            );
+
+            state = loaded;
+        } catch (Exception ignored) {
+            state = new ReminderState();
+        }
+    }
+
+    private static void saveState() {
+        try {
+            Path parent = STATE_PATH.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+
+            try (Writer writer = Files.newBufferedWriter(
+                    STATE_PATH,
+                    StandardCharsets.UTF_8
+            )) {
+                GSON.toJson(state, writer);
+            }
+        } catch (IOException ignored) {
         }
     }
 
     private static void resetSchedule(long now) {
         NEXT_MESSAGE_SEND_AT.clear();
         NEXT_RANDOM_GROUP_SEND_AT.clear();
-        LAST_RANDOM_INDEX.clear();
 
         if (!config.enabled) {
             return;
@@ -356,7 +539,6 @@ public final class CointCoreGTOReminders {
                 long delayMillis = safeMinutesToMillis(
                         Math.max(0L, entry.delayMinutes)
                 );
-
                 NEXT_MESSAGE_SEND_AT.put(
                         normalizeId(entry.id),
                         safeAdd(now, delayMillis)
@@ -373,7 +555,6 @@ public final class CointCoreGTOReminders {
                 long delayMillis = safeMinutesToMillis(
                         Math.max(0L, group.delayMinutes)
                 );
-
                 NEXT_RANDOM_GROUP_SEND_AT.put(
                         normalizeId(group.id),
                         safeAdd(now, delayMillis)
@@ -384,7 +565,6 @@ public final class CointCoreGTOReminders {
 
     private static void scheduleMessageAfterSend(ReminderEntry entry, long now) {
         String id = normalizeId(entry.id);
-
         if (entry.intervalMinutes <= 0L) {
             NEXT_MESSAGE_SEND_AT.remove(id);
             return;
@@ -398,7 +578,6 @@ public final class CointCoreGTOReminders {
 
     private static void scheduleRandomGroupAfterSend(RandomGroup group, long now) {
         String id = normalizeId(group.id);
-
         if (group.intervalMinutes <= 0L) {
             NEXT_RANDOM_GROUP_SEND_AT.remove(id);
             return;
@@ -410,51 +589,190 @@ public final class CointCoreGTOReminders {
         );
     }
 
-    private static String selectRandomText(RandomGroup group) {
+    private static boolean canSendAnotherNotification(
+            ReminderConfig activeConfig,
+            long now
+    ) {
+        if (activeConfig.minimumMinutesBetweenNotifications <= 0L) {
+            return true;
+        }
+
+        long lastSentAt = state.lastNotificationAtMillis;
+        if (lastSentAt <= 0L) {
+            return true;
+        }
+
+        long cooldownMillis = safeMinutesToMillis(
+                activeConfig.minimumMinutesBetweenNotifications
+        );
+        return now >= safeAdd(lastSentAt, cooldownMillis);
+    }
+
+    private static boolean isTextRepeatAllowed(
+            ReminderConfig activeConfig,
+            String text,
+            long now
+    ) {
+        if (activeConfig.repeatCooldownMinutes <= 0L) {
+            return true;
+        }
+
+        Long lastSentAt = state.lastTextSendAtMillis.get(normalizeTextKey(text));
+        if (lastSentAt == null || lastSentAt <= 0L) {
+            return true;
+        }
+
+        long cooldownMillis = safeMinutesToMillis(activeConfig.repeatCooldownMinutes);
+        return now >= safeAdd(lastSentAt, cooldownMillis);
+    }
+
+    private static RandomSelection selectRandomText(
+            ReminderConfig activeConfig,
+            RandomGroup group,
+            long now,
+            boolean enforceRepeatCooldown
+    ) {
         List<Integer> validIndexes = new ArrayList<>();
+        List<Integer> eligibleIndexes = new ArrayList<>();
 
         for (int index = 0; index < group.texts.size(); index++) {
             String text = group.texts.get(index);
-            if (text != null && !text.isBlank()) {
-                validIndexes.add(index);
+            if (text == null || text.isBlank()) {
+                continue;
+            }
+
+            validIndexes.add(index);
+            if (!enforceRepeatCooldown
+                    || isTextRepeatAllowed(activeConfig, text, now)) {
+                eligibleIndexes.add(index);
             }
         }
 
-        if (validIndexes.isEmpty()) {
+        if (eligibleIndexes.isEmpty()) {
             return null;
         }
 
-        String id = normalizeId(group.id);
-        Integer lastIndex = LAST_RANDOM_INDEX.get(id);
+        List<Integer> candidates = eligibleIndexes;
+        Integer lastIndex = state.lastRandomIndexes.get(normalizeId(group.id));
 
-        int selectedIndex;
         if (group.avoidImmediateRepeat
                 && validIndexes.size() > 1
                 && lastIndex != null) {
-            List<Integer> candidates = new ArrayList<>(validIndexes);
+            candidates = new ArrayList<>(eligibleIndexes);
             candidates.remove(lastIndex);
-            selectedIndex = candidates.get(
-                    ThreadLocalRandom.current().nextInt(candidates.size())
-            );
-        } else {
-            selectedIndex = validIndexes.get(
-                    ThreadLocalRandom.current().nextInt(validIndexes.size())
-            );
+            if (candidates.isEmpty()) {
+                return null;
+            }
         }
 
-        LAST_RANDOM_INDEX.put(id, selectedIndex);
-        return group.texts.get(selectedIndex);
+        int selectedIndex = candidates.get(
+                ThreadLocalRandom.current().nextInt(candidates.size())
+        );
+        return new RandomSelection(
+                selectedIndex,
+                group.texts.get(selectedIndex)
+        );
     }
 
-    private static void broadcast(MinecraftServer server, String rawText) {
-        if (server == null || rawText == null || rawText.isBlank()) {
-            return;
+    private static void recordSend(
+            String text,
+            RandomGroup randomGroup,
+            Integer randomIndex,
+            long now
+    ) {
+        state.lastNotificationAtMillis = now;
+        state.lastTextSendAtMillis.put(normalizeTextKey(text), now);
+
+        if (randomGroup != null && randomIndex != null) {
+            state.lastRandomIndexes.put(
+                    normalizeId(randomGroup.id),
+                    randomIndex
+            );
         }
 
-        Component message = Component.literal(applyLegacyColors(rawText));
-        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+        saveState();
+    }
+
+    private static int broadcast(MinecraftServer server, String rawText) {
+        if (server == null || rawText == null || rawText.isBlank()) {
+            return 0;
+        }
+
+        Component message = buildClickableMessage(rawText);
+        List<ServerPlayer> players = server.getPlayerList().getPlayers();
+        for (ServerPlayer player : players) {
             player.sendSystemMessage(message);
         }
+        return players.size();
+    }
+
+    private static Component buildClickableMessage(String rawText) {
+        String formattedText = applyLegacyColors(rawText);
+        MutableComponent result = Component.empty();
+        Matcher matcher = URL_PATTERN.matcher(formattedText);
+        int previousEnd = 0;
+
+        while (matcher.find()) {
+            int urlStart = matcher.start();
+            int urlEnd = trimUrlEnd(formattedText, urlStart, matcher.end());
+
+            if (urlStart > previousEnd) {
+                result.append(Component.literal(formattedText.substring(previousEnd, urlStart)));
+            }
+
+            if (urlEnd > urlStart) {
+                String url = formattedText.substring(urlStart, urlEnd);
+                result.append(
+                        Component.literal(url)
+                                .withStyle(style -> style
+                                        .withColor(ChatFormatting.AQUA)
+                                        .withUnderlined(true)
+                                        .withClickEvent(new ClickEvent(
+                                                ClickEvent.Action.OPEN_URL,
+                                                url
+                                        ))
+                                        .withHoverEvent(new HoverEvent(
+                                                HoverEvent.Action.SHOW_TEXT,
+                                                Component.literal("Открыть ссылку")
+                                        )))
+                );
+            }
+
+            if (urlEnd < matcher.end()) {
+                result.append(Component.literal(formattedText.substring(urlEnd, matcher.end())));
+            }
+
+            previousEnd = matcher.end();
+        }
+
+        if (previousEnd < formattedText.length()) {
+            result.append(Component.literal(formattedText.substring(previousEnd)));
+        }
+
+        return result;
+    }
+
+    private static int trimUrlEnd(String text, int start, int end) {
+        int result = end;
+        while (result > start && isTrailingUrlPunctuation(text.charAt(result - 1))) {
+            result--;
+        }
+        return result;
+    }
+
+    private static boolean isTrailingUrlPunctuation(char character) {
+        return character == '.'
+                || character == ','
+                || character == '!'
+                || character == '?'
+                || character == ';'
+                || character == ':'
+                || character == ')'
+                || character == ']'
+                || character == '}'
+                || character == '"'
+                || character == '\''
+                || character == '»';
     }
 
     private static String applyLegacyColors(String text) {
@@ -462,7 +780,6 @@ public final class CointCoreGTOReminders {
 
         for (int index = 0; index < text.length(); index++) {
             char current = text.charAt(index);
-
             if (current == '&' && index + 1 < text.length()) {
                 char code = Character.toLowerCase(text.charAt(index + 1));
                 if ("0123456789abcdefklmnor".indexOf(code) >= 0) {
@@ -476,6 +793,25 @@ public final class CointCoreGTOReminders {
         }
 
         return result.toString();
+    }
+
+    private static String normalizeTextKey(String text) {
+        String formatted = applyLegacyColors(text == null ? "" : text);
+        StringBuilder result = new StringBuilder(formatted.length());
+
+        for (int index = 0; index < formatted.length(); index++) {
+            char current = formatted.charAt(index);
+            if (current == '§' && index + 1 < formatted.length()) {
+                char code = Character.toLowerCase(formatted.charAt(index + 1));
+                if ("0123456789abcdefklmnor".indexOf(code) >= 0) {
+                    index++;
+                    continue;
+                }
+            }
+            result.append(current);
+        }
+
+        return result.toString().trim();
     }
 
     private static boolean isValid(ReminderEntry entry) {
@@ -550,7 +886,6 @@ public final class CointCoreGTOReminders {
                 return entry;
             }
         }
-
         return null;
     }
 
@@ -567,7 +902,6 @@ public final class CointCoreGTOReminders {
                 return group;
             }
         }
-
         return null;
     }
 
@@ -605,11 +939,31 @@ public final class CointCoreGTOReminders {
                 false
         );
 
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§7Минимальный онлайн: §f"
+                                + config.minimumOnlinePlayers
+                                + "§7, пауза между уведомлениями: §f"
+                                + config.minimumMinutesBetweenNotifications
+                                + " мин§7, запрет повтора: §f"
+                                + config.repeatCooldownMinutes
+                                + " мин"
+                ),
+                false
+        );
+
         if (!config.enabled) {
             return;
         }
 
         long now = System.currentTimeMillis();
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§7Следующее уведомление глобально доступно: §f"
+                                + describeNextGlobalSend(now)
+                ),
+                false
+        );
 
         if (config.messages != null) {
             for (ReminderEntry entry : config.messages) {
@@ -621,10 +975,9 @@ public final class CointCoreGTOReminders {
                         + entry.id
                         + "§7: "
                         + describeNextRun(
-                                NEXT_MESSAGE_SEND_AT.get(normalizeId(entry.id)),
-                                now
-                        );
-
+                        NEXT_MESSAGE_SEND_AT.get(normalizeId(entry.id)),
+                        now
+                );
                 source.sendSuccess(() -> Component.literal(line), false);
             }
         }
@@ -639,20 +992,34 @@ public final class CointCoreGTOReminders {
                         + group.id
                         + "§7: "
                         + describeNextRun(
-                                NEXT_RANDOM_GROUP_SEND_AT.get(normalizeId(group.id)),
-                                now
-                        );
-
+                        NEXT_RANDOM_GROUP_SEND_AT.get(normalizeId(group.id)),
+                        now
+                );
                 source.sendSuccess(() -> Component.literal(line), false);
             }
         }
+    }
+
+    private static String describeNextGlobalSend(long now) {
+        if (state.lastNotificationAtMillis <= 0L
+                || config.minimumMinutesBetweenNotifications <= 0L) {
+            return "сейчас";
+        }
+
+        long next = safeAdd(
+                state.lastNotificationAtMillis,
+                safeMinutesToMillis(config.minimumMinutesBetweenNotifications)
+        );
+        if (now >= next) {
+            return "сейчас";
+        }
+        return formatDuration(next - now);
     }
 
     private static String describeNextRun(Long next, long now) {
         if (next == null) {
             return "уже выполнено";
         }
-
         return formatDuration(Math.max(0L, next - now));
     }
 
@@ -665,24 +1032,29 @@ public final class CointCoreGTOReminders {
         if (hours > 0L) {
             return "через " + hours + " ч " + minutes + " мин";
         }
-
         if (minutes > 0L) {
             return "через " + minutes + " мин " + seconds + " сек";
         }
-
         return "через " + seconds + " сек";
     }
 
     private static final class ReminderConfig {
         boolean enabled = false;
-        boolean onlyWhenPlayersOnline = true;
+        int minimumOnlinePlayers = 21;
+        long minimumMinutesBetweenNotifications = 240L;
+        long repeatCooldownMinutes = 2_880L;
         List<ReminderEntry> messages = new ArrayList<>();
         List<RandomGroup> randomGroups = new ArrayList<>();
+
+        ReminderConfig() {
+        }
 
         static ReminderConfig createDefault() {
             ReminderConfig result = new ReminderConfig();
             result.enabled = false;
-            result.onlyWhenPlayersOnline = true;
+            result.minimumOnlinePlayers = 21;
+            result.minimumMinutesBetweenNotifications = 240L;
+            result.repeatCooldownMinutes = 2_880L;
 
             result.messages.add(
                     new ReminderEntry(
@@ -714,6 +1086,15 @@ public final class CointCoreGTOReminders {
             );
 
             return result;
+        }
+    }
+
+    private static final class ReminderState {
+        long lastNotificationAtMillis = 0L;
+        Map<String, Long> lastTextSendAtMillis = new HashMap<>();
+        Map<String, Integer> lastRandomIndexes = new HashMap<>();
+
+        ReminderState() {
         }
     }
 
@@ -767,6 +1148,72 @@ public final class CointCoreGTOReminders {
             this.intervalMinutes = intervalMinutes;
             this.avoidImmediateRepeat = avoidImmediateRepeat;
             this.texts = texts;
+        }
+    }
+
+    private static final class RandomSelection {
+        final int index;
+        final String text;
+
+        RandomSelection(int index, String text) {
+            this.index = index;
+            this.text = text;
+        }
+    }
+
+    private static final class DispatchCandidate {
+        final long scheduledAt;
+        final int order;
+        final ReminderEntry message;
+        final RandomGroup randomGroup;
+        final Integer randomIndex;
+        final String text;
+
+        private DispatchCandidate(
+                long scheduledAt,
+                int order,
+                ReminderEntry message,
+                RandomGroup randomGroup,
+                Integer randomIndex,
+                String text
+        ) {
+            this.scheduledAt = scheduledAt;
+            this.order = order;
+            this.message = message;
+            this.randomGroup = randomGroup;
+            this.randomIndex = randomIndex;
+            this.text = text;
+        }
+
+        static DispatchCandidate forMessage(
+                long scheduledAt,
+                int order,
+                ReminderEntry message
+        ) {
+            return new DispatchCandidate(
+                    scheduledAt,
+                    order,
+                    message,
+                    null,
+                    null,
+                    message.text
+            );
+        }
+
+        static DispatchCandidate forRandomGroup(
+                long scheduledAt,
+                int order,
+                RandomGroup randomGroup,
+                RandomSelection selection
+        ) {
+            return new DispatchCandidate(
+                    scheduledAt,
+                    order,
+                    null,
+                    randomGroup,
+                    selection.index,
+                    selection.text
+            );
         }
     }
 }
