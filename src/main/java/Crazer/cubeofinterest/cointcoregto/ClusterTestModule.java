@@ -46,9 +46,6 @@ public final class ClusterTestModule {
     private static final AtomicBoolean HEARTBEAT_IN_FLIGHT =
             new AtomicBoolean();
 
-    private static final int HEARTBEAT_INTERVAL_TICKS =
-            100;
-
     private static volatile Map<String, String>
             DIMENSION_OWNER_CACHE = Map.of();
 
@@ -122,10 +119,15 @@ public final class ClusterTestModule {
         String cachedOwner =
                 DIMENSION_OWNER_CACHE.get(dimensionId);
 
-        if (cachedOwner == null
-                || cachedOwner.equalsIgnoreCase(
+        if (cachedOwner != null
+                && cachedOwner.equalsIgnoreCase(
                 currentConfig.nodeId()
         )) {
+            return false;
+        }
+
+        if (cachedOwner == null
+                && !currentConfig.failClosedRouting()) {
             return false;
         }
 
@@ -150,6 +152,30 @@ public final class ClusterTestModule {
         float targetPitch = xRot == null
                 ? player.getXRot()
                 : xRot;
+
+        ClusterPlayerDataCodec.Snapshot playerData;
+
+        try {
+            playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+        } catch (Exception exception) {
+            LOGGER.error(
+                    "Unable to capture player data before FTB Essentials route for {}",
+                    playerUuid,
+                    exception
+            );
+
+            player.sendSystemMessage(
+                    Component.literal(
+                            "§cПеренос отменён: не удалось сохранить данные игрока: "
+                                    + exception.getMessage()
+                    )
+            );
+
+            return true;
+        }
 
         DATABASE_EXECUTOR.execute(() -> {
             try {
@@ -226,7 +252,8 @@ public final class ClusterTestModule {
                         targetY,
                         targetZ,
                         targetYaw,
-                        targetPitch
+                        targetPitch,
+                        playerData
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -302,7 +329,7 @@ public final class ClusterTestModule {
         heartbeatTickCounter++;
 
         if (heartbeatTickCounter
-                < HEARTBEAT_INTERVAL_TICKS) {
+                < currentConfig.heartbeatIntervalTicks()) {
             return;
         }
 
@@ -320,6 +347,11 @@ public final class ClusterTestModule {
                 ClusterDatabase.heartbeat(
                         currentConfig,
                         server
+                );
+
+                performFailover(
+                        currentConfig,
+                        false
                 );
 
                 refreshDimensionOwnerCache(
@@ -359,6 +391,25 @@ public final class ClusterTestModule {
     public void onServerStopping(
             ServerStoppingEvent event
     ) {
+        ClusterConfig stoppingConfig = config;
+
+        if (stoppingConfig != null
+                && stoppingConfig.enabled()) {
+            DATABASE_EXECUTOR.execute(() -> {
+                try {
+                    ClusterDatabase.markNodeOffline(
+                            stoppingConfig
+                    );
+                } catch (Exception exception) {
+                    LOGGER.warn(
+                            "Unable to mark cluster node {} as stopped",
+                            stoppingConfig.nodeId(),
+                            exception
+                    );
+                }
+            });
+        }
+
         if (activeServer == event.getServer()) {
             activeServer = null;
         }
@@ -423,6 +474,15 @@ public final class ClusterTestModule {
                                 Commands.literal("nodes")
                                         .executes(context ->
                                                 showNodes(
+                                                        context.getSource()
+                                                )
+                                        )
+                        )
+
+                        .then(
+                                Commands.literal("failover")
+                                        .executes(context ->
+                                                runFailoverCommand(
                                                         context.getSource()
                                                 )
                                         )
@@ -654,6 +714,18 @@ public final class ClusterTestModule {
         }
 
         UUID playerUuid = player.getUUID();
+        String playerName =
+                player.getGameProfile().getName();
+        String loginDimensionId =
+                player.level()
+                        .dimension()
+                        .location()
+                        .toString();
+        double loginX = player.getX();
+        double loginY = player.getY();
+        double loginZ = player.getZ();
+        float loginYaw = player.getYRot();
+        float loginPitch = player.getXRot();
 
         DATABASE_EXECUTOR.execute(() -> {
             try {
@@ -672,28 +744,221 @@ public final class ClusterTestModule {
                                 playerUuid
                         );
 
-                if (transfer == null) {
+                if (transfer != null) {
+                    LOGGER.info(
+                            "Claimed transfer {} for player {}: {} -> {}",
+                            transfer.transferId(),
+                            transfer.playerUuid(),
+                            transfer.sourceNode(),
+                            transfer.targetNode()
+                    );
+
+                    server.execute(
+                            () -> applyTransfer(
+                                    server,
+                                    latestConfig,
+                                    transfer
+                            )
+                    );
+
                     return;
                 }
 
-                LOGGER.info(
-                        "Claimed transfer {} for player {}: {} -> {}",
-                        transfer.transferId(),
-                        transfer.playerUuid(),
-                        transfer.sourceNode(),
-                        transfer.targetNode()
+                String dimensionOwner =
+                        ClusterDatabase.findDimensionOwner(
+                                latestConfig,
+                                loginDimensionId
+                        );
+
+                if (dimensionOwner == null) {
+                    return;
+                }
+
+                updateCachedDimensionOwner(
+                        loginDimensionId,
+                        dimensionOwner
                 );
 
-                server.execute(
-                        () -> applyTransfer(
-                                server,
-                                latestConfig,
-                                transfer
-                        )
+                if (dimensionOwner.equalsIgnoreCase(
+                        latestConfig.nodeId()
+                )) {
+                    return;
+                }
+
+                LOGGER.warn(
+                        "Player {} joined node {} in dimension owned by {}. Redirecting.",
+                        playerUuid,
+                        latestConfig.nodeId(),
+                        dimensionOwner
+                );
+
+                createTransferAndScheduleRedirect(
+                        server,
+                        latestConfig,
+                        playerUuid,
+                        playerName,
+                        dimensionOwner,
+                        loginDimensionId,
+                        loginX,
+                        loginY,
+                        loginZ,
+                        loginYaw,
+                        loginPitch,
+                        null
                 );
             } catch (Exception exception) {
                 LOGGER.error(
-                        "Unable to claim pending transfer for player {}",
+                        "Unable to process cluster login for player {}",
+                        playerUuid,
+                        exception
+                );
+            }
+        });
+    }
+
+    @SubscribeEvent
+    public void onPlayerChangedDimension(
+            PlayerEvent.PlayerChangedDimensionEvent event
+    ) {
+        if (!(event.getEntity()
+                instanceof ServerPlayer player)) {
+            return;
+        }
+
+        ClusterConfig currentConfig = config;
+
+        if (currentConfig == null
+                || !currentConfig.enabled()) {
+            return;
+        }
+
+        String dimensionId =
+                event.getTo()
+                        .location()
+                        .toString();
+
+        String cachedOwner =
+                DIMENSION_OWNER_CACHE.get(dimensionId);
+
+        if (cachedOwner != null
+                && cachedOwner.equalsIgnoreCase(
+                currentConfig.nodeId()
+        )) {
+            return;
+        }
+
+        if (cachedOwner == null
+                && !currentConfig.failClosedRouting()) {
+            return;
+        }
+
+        MinecraftServer server = player.getServer();
+
+        if (server == null) {
+            return;
+        }
+
+        UUID playerUuid = player.getUUID();
+        String playerName =
+                player.getGameProfile().getName();
+        double x = player.getX();
+        double y = player.getY();
+        double z = player.getZ();
+        float yaw = player.getYRot();
+        float pitch = player.getXRot();
+
+        ClusterPlayerDataCodec.Snapshot playerData;
+
+        try {
+            playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+        } catch (Exception exception) {
+            LOGGER.error(
+                    "Unable to capture player data after dimension change for {}",
+                    playerUuid,
+                    exception
+            );
+
+            player.sendSystemMessage(
+                    Component.literal(
+                            "§cКластерный переход отменён: не удалось сохранить данные игрока: "
+                                    + exception.getMessage()
+                    )
+            );
+
+            return;
+        }
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig =
+                        ClusterConfig.load();
+
+                config = latestConfig;
+
+                if (!latestConfig.enabled()) {
+                    return;
+                }
+
+                String owner =
+                        ClusterDatabase.findDimensionOwner(
+                                latestConfig,
+                                dimensionId
+                        );
+
+                if (owner == null) {
+                    removeCachedDimensionOwner(
+                            dimensionId
+                    );
+
+                    return;
+                }
+
+                updateCachedDimensionOwner(
+                        dimensionId,
+                        owner
+                );
+
+                if (owner.equalsIgnoreCase(
+                        latestConfig.nodeId()
+                )) {
+                    return;
+                }
+
+                LOGGER.warn(
+                        "Player {} entered dimension {} on node {}, but owner is {}. Redirecting.",
+                        playerUuid,
+                        dimensionId,
+                        latestConfig.nodeId(),
+                        owner
+                );
+
+                createTransferAndScheduleRedirect(
+                        server,
+                        latestConfig,
+                        playerUuid,
+                        playerName,
+                        owner,
+                        dimensionId,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        pitch,
+                        playerData
+                );
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to route player {} after dimension change to {}",
+                        playerUuid,
+                        dimensionId,
+                        exception
+                );
+
+                scheduleTransferError(
+                        server,
                         playerUuid,
                         exception
                 );
@@ -1198,6 +1463,24 @@ public final class ClusterTestModule {
         float yaw = player.getYRot();
         float pitch = player.getXRot();
 
+        ClusterPlayerDataCodec.Snapshot playerData;
+
+        try {
+            playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+        } catch (Exception exception) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cНе удалось сохранить данные игрока перед transfer: "
+                                    + exception.getMessage()
+                    )
+            );
+
+            return 0;
+        }
+
         source.sendSuccess(
                 () -> Component.literal(
                         "§eИщу владельца dimension §f"
@@ -1271,7 +1554,8 @@ public final class ClusterTestModule {
                         y,
                         z,
                         yaw,
-                        pitch
+                        pitch,
+                        playerData
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -1322,6 +1606,24 @@ public final class ClusterTestModule {
         String playerName =
                 player.getGameProfile().getName();
 
+        ClusterPlayerDataCodec.Snapshot playerData;
+
+        try {
+            playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+        } catch (Exception exception) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cНе удалось сохранить данные игрока перед transfer: "
+                                    + exception.getMessage()
+                    )
+            );
+
+            return 0;
+        }
+
         source.sendSuccess(
                 () -> Component.literal(
                         "§eСоздаю transfer на узел §f"
@@ -1356,7 +1658,8 @@ public final class ClusterTestModule {
                         y,
                         z,
                         yaw,
-                        pitch
+                        pitch,
+                        playerData
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -1376,6 +1679,22 @@ public final class ClusterTestModule {
         return 1;
     }
 
+    private ClusterPlayerDataCodec.Snapshot
+    capturePlayerDataForTransfer(
+            ServerPlayer player,
+            ClusterConfig currentConfig
+    ) throws Exception {
+        if (!currentConfig.syncPlayerData()) {
+            return null;
+        }
+
+        return ClusterPlayerDataCodec.capture(
+                player,
+                currentConfig.maxPlayerDataBytes(),
+                currentConfig.syncForgeCapabilities()
+        );
+    }
+
     private void createTransferAndScheduleRedirect(
             MinecraftServer server,
             ClusterConfig currentConfig,
@@ -1387,7 +1706,8 @@ public final class ClusterTestModule {
             double y,
             double z,
             float yaw,
-            float pitch
+            float pitch,
+            ClusterPlayerDataCodec.Snapshot playerData
     ) throws Exception {
         ClusterDatabase.CreatedTransfer transfer =
                 ClusterDatabase.createTransfer(
@@ -1399,11 +1719,12 @@ public final class ClusterTestModule {
                         y,
                         z,
                         yaw,
-                        pitch
+                        pitch,
+                        playerData
                 );
 
         LOGGER.info(
-                "Created transfer {} for player {}: {} -> {}, destination={} {} {} {}, redirect={}",
+                "Created transfer {} for player {}: {} -> {}, destination={} {} {} {}, redirect={}, playerData={} bytes",
                 transfer.transferId(),
                 transfer.playerUuid(),
                 transfer.sourceNode(),
@@ -1412,7 +1733,8 @@ public final class ClusterTestModule {
                 transfer.x(),
                 transfer.y(),
                 transfer.z(),
-                transfer.redirectAddress()
+                transfer.redirectAddress(),
+                transfer.playerDataSize()
         );
 
         server.execute(
@@ -1464,6 +1786,11 @@ public final class ClusterTestModule {
                                 + formatCoordinate(transfer.y())
                                 + " "
                                 + formatCoordinate(transfer.z())
+                                + (transfer.playerDataSize() > 0
+                                ? "\n§7Данные игрока: §a"
+                                + transfer.playerDataSize()
+                                + " байт"
+                                : "\n§7Данные игрока: §8snapshot отсутствует")
                                 + "\n§eАвтоматически перенаправляю на §f"
                                 + transfer.redirectAddress()
                 )
@@ -1865,6 +2192,13 @@ public final class ClusterTestModule {
         }
 
         try {
+            ClusterPlayerDataCodec.ApplyResult playerDataResult =
+                    applyPlayerDataSnapshot(
+                            player,
+                            currentConfig,
+                            transfer
+                    );
+
             player.teleportTo(
                     targetLevel,
                     transfer.x(),
@@ -1874,6 +2208,10 @@ public final class ClusterTestModule {
                     transfer.pitch()
             );
 
+            // Persist both the restored state and the replay-protection marker
+            // before the DB claim can become stale and be retried.
+            server.getPlayerList().saveAll();
+
             player.sendSystemMessage(
                     Component.literal(
                             "§aTransfer выполнен: §f"
@@ -1882,14 +2220,21 @@ public final class ClusterTestModule {
                                     + transfer.targetNode()
                                     + "§a, dimension: §f"
                                     + transfer.dimensionId()
+                                    + formatPlayerDataApplyMessage(
+                                            playerDataResult
+                                    )
                     )
             );
 
             LOGGER.info(
-                    "Applied transfer {} for player {} on node {}",
+                    "Applied transfer {} for player {} on node {}, playerDataPresent={}, playerDataApplied={}, playerDataAlreadyApplied={}, playerDataSize={}",
                     transfer.transferId(),
                     transfer.playerUuid(),
-                    currentConfig.nodeId()
+                    currentConfig.nodeId(),
+                    playerDataResult.snapshotPresent(),
+                    playerDataResult.applied(),
+                    playerDataResult.alreadyApplied(),
+                    playerDataResult.compressedSize()
             );
 
             DATABASE_EXECUTOR.execute(() -> {
@@ -1917,11 +2262,83 @@ public final class ClusterTestModule {
 
             player.sendSystemMessage(
                     Component.literal(
-                            "§cОшибка телепортации transfer: "
+                            "§cОшибка применения transfer: "
                                     + exception.getMessage()
                     )
             );
         }
+    }
+
+    private ClusterPlayerDataCodec.ApplyResult
+    applyPlayerDataSnapshot(
+            ServerPlayer player,
+            ClusterConfig currentConfig,
+            ClusterDatabase.PendingTransfer transfer
+    ) throws Exception {
+        byte[] playerData = transfer.playerData();
+        boolean snapshotPresent =
+                playerData != null
+                        && playerData.length > 0;
+
+        if (!snapshotPresent) {
+            if (transfer.playerDataSize() != 0
+                    || transfer.playerDataCodec() != 0
+                    || transfer.playerDataSha256() != null) {
+                throw new IllegalStateException(
+                        "Player-data snapshot metadata is inconsistent"
+                );
+            }
+
+            return new ClusterPlayerDataCodec.ApplyResult(
+                    false,
+                    false,
+                    false,
+                    0,
+                    null
+            );
+        }
+
+        if (!currentConfig.syncPlayerData()) {
+            throw new IllegalStateException(
+                    "На целевом узле sync_player_data=false, snapshot не применён"
+            );
+        }
+
+        if (transfer.playerDataSize() != playerData.length) {
+            throw new IllegalStateException(
+                    "Player-data size mismatch: declared "
+                            + transfer.playerDataSize()
+                            + ", actual "
+                            + playerData.length
+            );
+        }
+
+        return ClusterPlayerDataCodec.apply(
+                player,
+                transfer.transferId(),
+                transfer.playerDataCodec(),
+                playerData,
+                transfer.playerDataSha256(),
+                currentConfig.maxPlayerDataBytes()
+        );
+    }
+
+    private static String formatPlayerDataApplyMessage(
+            ClusterPlayerDataCodec.ApplyResult result
+    ) {
+        if (!result.snapshotPresent()) {
+            return "\n§7Данные игрока: §8snapshot отсутствует";
+        }
+
+        if (result.alreadyApplied()) {
+            return "\n§7Данные игрока: §eуже были применены §7("
+                    + result.compressedSize()
+                    + " байт)";
+        }
+
+        return "\n§7Данные игрока: §aсинхронизированы §7("
+                + result.compressedSize()
+                + " байт)";
     }
 
     private void failTransfer(
@@ -1950,6 +2367,134 @@ public final class ClusterTestModule {
                 );
             }
         });
+    }
+
+    private List<ClusterDatabase.DimensionReassignment>
+    performFailover(
+            ClusterConfig currentConfig,
+            boolean force
+    ) throws java.sql.SQLException {
+        if (!force && !currentConfig.automaticFailover()) {
+            return List.of();
+        }
+
+        List<ClusterDatabase.DimensionReassignment> reassignments =
+                ClusterDatabase.failoverOfflineDimensions(
+                        currentConfig
+                );
+
+        for (ClusterDatabase.DimensionReassignment reassignment
+                : reassignments) {
+            LOGGER.warn(
+                    "Cluster failover moved dimension {}: {} -> {}",
+                    reassignment.dimensionId(),
+                    reassignment.previousNodeId(),
+                    reassignment.newNodeId()
+            );
+        }
+
+        return reassignments;
+    }
+
+    private int runFailoverCommand(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+
+        if (currentConfig == null
+                || !currentConfig.enabled()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКластер выключен или конфиг ещё не загружен."
+                    )
+            );
+
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§eПроверяю владельцев измерений и OFFLINE-узлы..."
+                ),
+                false
+        );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig =
+                        ClusterConfig.load();
+
+                config = latestConfig;
+
+                List<ClusterDatabase.DimensionReassignment> reassignments =
+                        performFailover(
+                                latestConfig,
+                                true
+                        );
+
+                refreshDimensionOwnerCache(
+                        latestConfig
+                );
+
+                server.execute(() -> {
+                    if (reassignments.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "§aFailover не требуется: все владельцы измерений ONLINE."
+                                ),
+                                false
+                        );
+
+                        return;
+                    }
+
+                    source.sendSuccess(
+                            () -> Component.literal(
+                                    "§aПереназначено измерений: §f"
+                                            + reassignments.size()
+                            ),
+                            false
+                    );
+
+                    for (ClusterDatabase.DimensionReassignment reassignment
+                            : reassignments) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "§f"
+                                                + reassignment.dimensionId()
+                                                + " §7| §c"
+                                                + reassignment.previousNodeId()
+                                                + " §7-> §a"
+                                                + reassignment.newNodeId()
+                                ),
+                                false
+                        );
+                    }
+                });
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to perform cluster failover",
+                        exception
+                );
+
+                server.execute(
+                        () -> source.sendFailure(
+                                Component.literal(
+                                        "§cFailover завершился ошибкой: "
+                                                + exception
+                                                .getClass()
+                                                .getSimpleName()
+                                                + ": "
+                                                + exception.getMessage()
+                                )
+                        )
+                );
+            }
+        });
+
+        return 1;
     }
 
     private void runTest(
@@ -1984,6 +2529,11 @@ public final class ClusterTestModule {
                             currentConfig,
                             server
                     );
+
+            performFailover(
+                    currentConfig,
+                    false
+            );
 
             refreshDimensionOwnerCache(
                     currentConfig
@@ -2164,6 +2714,21 @@ public final class ClusterTestModule {
                                 + currentConfig.nodeId()
                                 + "§7, redirect: §f"
                                 + currentConfig.redirectAddress()
+                                + "§7, heartbeat ticks: §f"
+                                + currentConfig.heartbeatIntervalTicks()
+                                + "§7, node timeout: §f"
+                                + currentConfig.nodeTimeoutSeconds()
+                                + "s§7, auto failover: §f"
+                                + currentConfig.automaticFailover()
+                                + "§7, fail-closed routing: §f"
+                                + currentConfig.failClosedRouting()
+                                + "§7, player-data sync: §f"
+                                + currentConfig.syncPlayerData()
+                                + "§7, Forge capabilities: §f"
+                                + currentConfig.syncForgeCapabilities()
+                                + "§7, max player-data: §f"
+                                + currentConfig.maxPlayerDataBytes()
+                                + " bytes"
                 ),
                 false
         );

@@ -9,6 +9,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -24,6 +25,7 @@ public final class ClusterDatabase {
             "com.mysql.cj.jdbc.Driver";
 
     private static volatile boolean driverLoaded;
+    private static volatile String initializedSchemaKey;
 
     private ClusterDatabase() {
     }
@@ -39,9 +41,11 @@ public final class ClusterDatabase {
             ClusterConfig config,
             MinecraftServer server
     ) throws SQLException {
+        ensureSchema(config);
+
         try (Connection connection = open(config)) {
-            createTables(connection);
             expireTransfers(connection);
+            recoverStaleClaims(connection, config);
             upsertNode(connection, config, server);
 
             return readTestResult(connection, config);
@@ -52,6 +56,8 @@ public final class ClusterDatabase {
             ClusterConfig config,
             MinecraftServer server
     ) throws SQLException {
+        ensureSchema(config);
+
         try (Connection connection = open(config)) {
             upsertNode(connection, config, server);
         }
@@ -60,9 +66,9 @@ public final class ClusterDatabase {
     public static List<ClusterNodeStatus> listNodes(
             ClusterConfig config
     ) throws SQLException {
-        try (Connection connection = open(config)) {
-            createTables(connection);
+        ensureSchema(config);
 
+        try (Connection connection = open(config)) {
             String sql = """
                 SELECT
                     nodes.node_id,
@@ -78,9 +84,11 @@ public final class ClusterDatabase {
                                           )
                                       ) AS heartbeat_age_seconds,
                                       CASE
-                                          WHEN nodes.last_seen >= DATE_SUB(
-                                              CURRENT_TIMESTAMP(3),
-                                              INTERVAL 15 SECOND
+                                          WHEN nodes.stopped_at IS NULL
+                                           AND nodes.last_seen >= TIMESTAMPADD(
+                                              SECOND,
+                                              -?,
+                                              CURRENT_TIMESTAMP(3)
                                           )
                                           THEN 1
                                           ELSE 0
@@ -94,7 +102,8 @@ public final class ClusterDatabase {
                     nodes.node_id,
                     nodes.redirect_address,
                     nodes.player_count,
-                    nodes.last_seen
+                    nodes.last_seen,
+                    nodes.stopped_at
                 ORDER BY nodes.node_id
                 """;
 
@@ -102,36 +111,43 @@ public final class ClusterDatabase {
                     new ArrayList<>();
 
             try (PreparedStatement statement =
-                         connection.prepareStatement(sql);
-                 ResultSet resultSet =
-                         statement.executeQuery()) {
+                         connection.prepareStatement(sql)) {
 
-                while (resultSet.next()) {
-                    nodes.add(
-                            new ClusterNodeStatus(
-                                    resultSet.getString(
-                                            "node_id"
-                                    ),
-                                    resultSet.getString(
-                                            "redirect_address"
-                                    ),
-                                    resultSet.getInt(
-                                            "player_count"
-                                    ),
-                                    resultSet.getInt(
-                                            "dimension_count"
-                                    ),
-                                    resultSet.getBoolean(
-                                            "online"
-                                    ),
-                                    resultSet.getLong(
-                                            "heartbeat_age_seconds"
-                                    ),
-                                    resultSet.getTimestamp(
-                                            "last_seen"
-                                    ).toInstant()
-                            )
-                    );
+                statement.setInt(
+                        1,
+                        config.nodeTimeoutSeconds()
+                );
+
+                try (ResultSet resultSet =
+                             statement.executeQuery()) {
+
+                    while (resultSet.next()) {
+                        nodes.add(
+                                new ClusterNodeStatus(
+                                        resultSet.getString(
+                                                "node_id"
+                                        ),
+                                        resultSet.getString(
+                                                "redirect_address"
+                                        ),
+                                        resultSet.getInt(
+                                                "player_count"
+                                        ),
+                                        resultSet.getInt(
+                                                "dimension_count"
+                                        ),
+                                        resultSet.getBoolean(
+                                                "online"
+                                        ),
+                                        resultSet.getLong(
+                                                "heartbeat_age_seconds"
+                                        ),
+                                        resultSet.getTimestamp(
+                                                "last_seen"
+                                        ).toInstant()
+                                )
+                        );
+                    }
                 }
             }
 
@@ -142,9 +158,9 @@ public final class ClusterDatabase {
     public static Map<String, String> listDimensionOwners(
             ClusterConfig config
     ) throws SQLException {
-        try (Connection connection = open(config)) {
-            createTables(connection);
+        ensureSchema(config);
 
+        try (Connection connection = open(config)) {
             String sql = """
                     SELECT
                         dimension_id,
@@ -173,6 +189,115 @@ public final class ClusterDatabase {
         }
     }
 
+    public static void markNodeOffline(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+
+        String sql = """
+                UPDATE cluster_nodes
+                SET
+                    player_count = 0,
+                    stopped_at = CURRENT_TIMESTAMP(3)
+                WHERE node_id = ?
+                """;
+
+        try (Connection connection = open(config);
+             PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+
+            statement.setString(1, config.nodeId());
+            statement.executeUpdate();
+        }
+    }
+
+    public static List<DimensionReassignment>
+    failoverOfflineDimensions(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                lockClusterNodes(connection);
+                lockDimensionAssignments(connection);
+
+                List<OfflineDimensionAssignment> offlineAssignments =
+                        findOfflineDimensionAssignments(
+                                connection,
+                                config.nodeTimeoutSeconds()
+                        );
+
+                List<DimensionReassignment> reassignments =
+                        new ArrayList<>();
+
+                for (OfflineDimensionAssignment assignment
+                        : offlineAssignments) {
+                    LeastAssignedNode selectedNode =
+                            findLeastAssignedNode(
+                                    connection,
+                                    config.nodeTimeoutSeconds()
+                            );
+
+                    if (selectedNode == null) {
+                        break;
+                    }
+
+                    String updateSql = """
+                            UPDATE dimension_assignments
+                            SET
+                                node_id = ?,
+                                updated_at = CURRENT_TIMESTAMP(3)
+                            WHERE dimension_id = ?
+                              AND node_id = ?
+                            """;
+
+                    try (PreparedStatement statement =
+                                 connection.prepareStatement(
+                                         updateSql
+                                 )) {
+
+                        statement.setString(
+                                1,
+                                selectedNode.nodeId()
+                        );
+                        statement.setString(
+                                2,
+                                assignment.dimensionId()
+                        );
+                        statement.setString(
+                                3,
+                                assignment.previousNodeId()
+                        );
+
+                        if (statement.executeUpdate() != 1) {
+                            continue;
+                        }
+                    }
+
+                    reassignments.add(
+                            new DimensionReassignment(
+                                    assignment.dimensionId(),
+                                    assignment.previousNodeId(),
+                                    selectedNode.nodeId(),
+                                    Instant.now()
+                            )
+                    );
+                }
+
+                connection.commit();
+                return List.copyOf(reassignments);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
     public static DimensionAssignment assignDimension(
             ClusterConfig config,
             String dimensionId,
@@ -186,12 +311,12 @@ public final class ClusterDatabase {
             throw new SQLException("Node id is empty");
         }
 
+        ensureSchema(config);
+
         try (Connection connection = open(config)) {
             connection.setAutoCommit(false);
 
             try {
-                createTables(connection);
-
                 if (findNodeRedirectAddress(connection, nodeId) == null) {
                     throw new SQLException(
                             "Узел " + nodeId
@@ -248,8 +373,9 @@ public final class ClusterDatabase {
             ClusterConfig config,
             String dimensionId
     ) throws SQLException {
+        ensureSchema(config);
+
         try (Connection connection = open(config)) {
-            createTables(connection);
             return findDimensionOwner(connection, dimensionId);
         }
     }
@@ -262,41 +388,53 @@ public final class ClusterDatabase {
             throw new SQLException("Dimension id is empty");
         }
 
+        ensureSchema(config);
+
         try (Connection connection = open(config)) {
             connection.setAutoCommit(false);
 
             try {
-                createTables(connection);
                 lockClusterNodes(connection);
 
                 String existingOwner =
                         findDimensionOwner(connection, dimensionId);
 
                 if (existingOwner != null) {
-                    int currentAssignments =
-                            countAssignmentsForNode(
-                                    connection,
-                                    existingOwner
-                            );
-
-                    connection.commit();
-
-                    return new AutomaticDimensionAssignment(
-                            dimensionId,
+                    if (isNodeOnline(
+                            connection,
                             existingOwner,
-                            false,
-                            currentAssignments,
-                            0,
-                            Instant.now()
-                    );
+                            config.nodeTimeoutSeconds()
+                    )) {
+                        int currentAssignments =
+                                countAssignmentsForNode(
+                                        connection,
+                                        existingOwner
+                                );
+
+                        connection.commit();
+
+                        return new AutomaticDimensionAssignment(
+                                dimensionId,
+                                existingOwner,
+                                false,
+                                currentAssignments,
+                                0,
+                                Instant.now()
+                        );
+                    }
                 }
 
                 LeastAssignedNode selectedNode =
-                        findLeastAssignedNode(connection);
+                        findLeastAssignedNode(
+                                connection,
+                                config.nodeTimeoutSeconds()
+                        );
 
                 if (selectedNode == null) {
                     throw new SQLException(
-                            "Нет доступных ONLINE-узлов с heartbeat не старше 15 секунд"
+                            "Нет доступных ONLINE-узлов с heartbeat не старше "
+                                    + config.nodeTimeoutSeconds()
+                                    + " секунд"
                     );
                 }
 
@@ -312,6 +450,9 @@ public final class ClusterDatabase {
                             CURRENT_TIMESTAMP(3),
                             CURRENT_TIMESTAMP(3)
                         )
+                        ON DUPLICATE KEY UPDATE
+                            node_id = VALUES(node_id),
+                            updated_at = CURRENT_TIMESTAMP(3)
                         """;
 
                 try (PreparedStatement statement =
@@ -354,7 +495,8 @@ public final class ClusterDatabase {
             double y,
             double z,
             float yaw,
-            float pitch
+            float pitch,
+            ClusterPlayerDataCodec.Snapshot playerData
     ) throws SQLException {
         if (targetNode == null || targetNode.isBlank()) {
             throw new SQLException("Target node is empty");
@@ -366,17 +508,20 @@ public final class ClusterDatabase {
             );
         }
 
+        ensureSchema(config);
+
         try (Connection connection = open(config)) {
             connection.setAutoCommit(false);
 
             try {
-                createTables(connection);
                 expireTransfers(connection);
+                recoverStaleClaims(connection, config);
 
                 String redirectAddress =
                         findOnlineNodeRedirectAddress(
                                 connection,
-                                targetNode
+                                targetNode,
+                                config.nodeTimeoutSeconds()
                         );
 
                 if (redirectAddress == null) {
@@ -392,7 +537,9 @@ public final class ClusterDatabase {
 
                     throw new SQLException(
                             "Узел " + targetNode
-                                    + " сейчас OFFLINE: heartbeat старше 15 секунд"
+                                    + " сейчас OFFLINE: heartbeat старше "
+                                    + config.nodeTimeoutSeconds()
+                                    + " секунд или узел штатно остановлен"
                     );
                 }
 
@@ -412,17 +559,23 @@ public final class ClusterDatabase {
                             z,
                             yaw,
                             pitch,
+                            player_data,
+                            player_data_sha256,
+                            player_data_codec,
+                            player_data_size,
                             status,
                             created_at,
                             expires_at
                         )
                         VALUES (
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?,
                             'READY',
                             CURRENT_TIMESTAMP(3),
-                            DATE_ADD(
-                                CURRENT_TIMESTAMP(3),
-                                INTERVAL 5 MINUTE
+                            TIMESTAMPADD(
+                                SECOND,
+                                ?,
+                                CURRENT_TIMESTAMP(3)
                             )
                         )
                         """;
@@ -440,6 +593,35 @@ public final class ClusterDatabase {
                     statement.setDouble(8, z);
                     statement.setFloat(9, yaw);
                     statement.setFloat(10, pitch);
+
+                    if (playerData == null) {
+                        statement.setNull(11, Types.LONGVARBINARY);
+                        statement.setNull(12, Types.CHAR);
+                        statement.setInt(13, 0);
+                        statement.setInt(14, 0);
+                    } else {
+                        statement.setBytes(
+                                11,
+                                playerData.compressedNbt()
+                        );
+                        statement.setString(
+                                12,
+                                playerData.sha256()
+                        );
+                        statement.setInt(
+                                13,
+                                playerData.codecVersion()
+                        );
+                        statement.setInt(
+                                14,
+                                playerData.compressedSize()
+                        );
+                    }
+
+                    statement.setInt(
+                            15,
+                            config.transferTtlSeconds()
+                    );
                     statement.executeUpdate();
                 }
 
@@ -456,7 +638,13 @@ public final class ClusterDatabase {
                         y,
                         z,
                         yaw,
-                        pitch
+                        pitch,
+                        playerData == null
+                                ? 0
+                                : playerData.compressedSize(),
+                        playerData == null
+                                ? null
+                                : playerData.sha256()
                 );
             } catch (SQLException exception) {
                 rollbackQuietly(connection);
@@ -471,12 +659,14 @@ public final class ClusterDatabase {
             ClusterConfig config,
             UUID playerUuid
     ) throws SQLException {
+        ensureSchema(config);
+
         try (Connection connection = open(config)) {
             connection.setAutoCommit(false);
 
             try {
-                createTables(connection);
                 expireTransfers(connection);
+                recoverStaleClaims(connection, config);
 
                 PendingTransfer transfer = null;
 
@@ -492,6 +682,10 @@ public final class ClusterDatabase {
                             z,
                             yaw,
                             pitch,
+                            player_data,
+                            player_data_sha256,
+                            player_data_codec,
+                            player_data_size,
                             created_at,
                             expires_at
                         FROM pending_transfers
@@ -526,7 +720,9 @@ public final class ClusterDatabase {
 
                 String claimSql = """
                         UPDATE pending_transfers
-                        SET status = 'CLAIMED'
+                        SET
+                            status = 'CLAIMED',
+                            claimed_at = CURRENT_TIMESTAMP(3)
                         WHERE transfer_id = ?
                           AND status = 'READY'
                         """;
@@ -587,9 +783,19 @@ public final class ClusterDatabase {
             String transferId,
             String newStatus
     ) throws SQLException {
+        ensureSchema(config);
+
         String sql = """
                 UPDATE pending_transfers
-                SET status = ?
+                SET
+                    status = ?,
+                    claimed_at = NULL,
+                    player_data = NULL,
+                    applied_at = CASE
+                        WHEN ? = 'CONSUMED'
+                        THEN CURRENT_TIMESTAMP(3)
+                        ELSE applied_at
+                    END
                 WHERE transfer_id = ?
                   AND status = 'CLAIMED'
                 """;
@@ -599,7 +805,8 @@ public final class ClusterDatabase {
                      connection.prepareStatement(sql)) {
 
             statement.setString(1, newStatus);
-            statement.setString(2, transferId);
+            statement.setString(2, newStatus);
+            statement.setString(3, transferId);
             statement.executeUpdate();
         }
     }
@@ -614,6 +821,31 @@ public final class ClusterDatabase {
                 config.username(),
                 config.password()
         );
+    }
+
+    private static void ensureSchema(
+            ClusterConfig config
+    ) throws SQLException {
+        String schemaKey =
+                config.jdbcUrl()
+                        + "\n"
+                        + config.username();
+
+        if (schemaKey.equals(initializedSchemaKey)) {
+            return;
+        }
+
+        synchronized (ClusterDatabase.class) {
+            if (schemaKey.equals(initializedSchemaKey)) {
+                return;
+            }
+
+            try (Connection connection = open(config)) {
+                createTables(connection);
+            }
+
+            initializedSchemaKey = schemaKey;
+        }
     }
 
     private static void ensureDriverLoaded()
@@ -669,6 +901,7 @@ public final class ClusterDatabase {
                     player_count INT NOT NULL DEFAULT 0,
                     last_seen TIMESTAMP(3) NOT NULL
                         DEFAULT CURRENT_TIMESTAMP(3),
+                    stopped_at TIMESTAMP(3) NULL,
                     started_at TIMESTAMP(3) NOT NULL
                         DEFAULT CURRENT_TIMESTAMP(3)
                 )
@@ -706,6 +939,12 @@ public final class ClusterDatabase {
                     yaw FLOAT NOT NULL,
                     pitch FLOAT NOT NULL,
                     status VARCHAR(24) NOT NULL,
+                    claimed_at TIMESTAMP(3) NULL,
+                    applied_at TIMESTAMP(3) NULL,
+                    player_data LONGBLOB NULL,
+                    player_data_sha256 CHAR(64) NULL,
+                    player_data_codec INT NOT NULL DEFAULT 0,
+                    player_data_size INT NOT NULL DEFAULT 0,
                     created_at TIMESTAMP(3) NOT NULL
                         DEFAULT CURRENT_TIMESTAMP(3),
                     expires_at TIMESTAMP(3) NOT NULL,
@@ -731,6 +970,55 @@ public final class ClusterDatabase {
                 "player_count",
                 "INT NOT NULL DEFAULT 0"
         );
+
+        ensureColumnExists(
+                connection,
+                "cluster_nodes",
+                "stopped_at",
+                "TIMESTAMP(3) NULL"
+        );
+
+        ensureColumnExists(
+                connection,
+                "pending_transfers",
+                "claimed_at",
+                "TIMESTAMP(3) NULL"
+        );
+
+        ensureColumnExists(
+                connection,
+                "pending_transfers",
+                "applied_at",
+                "TIMESTAMP(3) NULL"
+        );
+
+        ensureColumnExists(
+                connection,
+                "pending_transfers",
+                "player_data",
+                "LONGBLOB NULL"
+        );
+
+        ensureColumnExists(
+                connection,
+                "pending_transfers",
+                "player_data_sha256",
+                "CHAR(64) NULL"
+        );
+
+        ensureColumnExists(
+                connection,
+                "pending_transfers",
+                "player_data_codec",
+                "INT NOT NULL DEFAULT 0"
+        );
+
+        ensureColumnExists(
+                connection,
+                "pending_transfers",
+                "player_data_size",
+                "INT NOT NULL DEFAULT 0"
+        );
     }
 
     private static void upsertNode(
@@ -745,18 +1033,21 @@ public final class ClusterDatabase {
                 minecraft_version,
                 player_count,
                 last_seen,
+                stopped_at,
                 started_at
             )
             VALUES (
                 ?, ?, ?, ?,
                 CURRENT_TIMESTAMP(3),
+                NULL,
                 CURRENT_TIMESTAMP(3)
             )
             ON DUPLICATE KEY UPDATE
                 redirect_address = VALUES(redirect_address),
                 minecraft_version = VALUES(minecraft_version),
                 player_count = VALUES(player_count),
-                last_seen = CURRENT_TIMESTAMP(3)
+                last_seen = CURRENT_TIMESTAMP(3),
+                stopped_at = NULL
             """;
 
         try (PreparedStatement statement =
@@ -865,15 +1156,18 @@ public final class ClusterDatabase {
 
     private static String findOnlineNodeRedirectAddress(
             Connection connection,
-            String targetNode
+            String targetNode,
+            int timeoutSeconds
     ) throws SQLException {
         String sql = """
             SELECT redirect_address
             FROM cluster_nodes
             WHERE node_id = ?
-              AND last_seen >= DATE_SUB(
-                    CURRENT_TIMESTAMP(3),
-                    INTERVAL 15 SECOND
+              AND stopped_at IS NULL
+              AND last_seen >= TIMESTAMPADD(
+                    SECOND,
+                    -?,
+                    CURRENT_TIMESTAMP(3)
               )
             """;
 
@@ -881,6 +1175,7 @@ public final class ClusterDatabase {
                      connection.prepareStatement(sql)) {
 
             statement.setString(1, targetNode);
+            statement.setInt(2, timeoutSeconds);
 
             try (ResultSet resultSet =
                          statement.executeQuery()) {
@@ -917,8 +1212,81 @@ public final class ClusterDatabase {
         }
     }
 
-    private static LeastAssignedNode findLeastAssignedNode(
+    private static void lockDimensionAssignments(
             Connection connection
+    ) throws SQLException {
+        String sql = """
+                SELECT dimension_id
+                FROM dimension_assignments
+                ORDER BY dimension_id
+                FOR UPDATE
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql);
+             ResultSet resultSet =
+                     statement.executeQuery()) {
+
+            while (resultSet.next()) {
+                resultSet.getString("dimension_id");
+            }
+        }
+    }
+
+    private static List<OfflineDimensionAssignment>
+    findOfflineDimensionAssignments(
+            Connection connection,
+            int timeoutSeconds
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    assignments.dimension_id,
+                    assignments.node_id
+                FROM dimension_assignments AS assignments
+                LEFT JOIN cluster_nodes AS nodes
+                    ON nodes.node_id = assignments.node_id
+                WHERE nodes.node_id IS NULL
+                   OR nodes.stopped_at IS NOT NULL
+                   OR nodes.last_seen < TIMESTAMPADD(
+                        SECOND,
+                        -?,
+                        CURRENT_TIMESTAMP(3)
+                   )
+                ORDER BY assignments.dimension_id
+                """;
+
+        List<OfflineDimensionAssignment> assignments =
+                new ArrayList<>();
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+
+            statement.setInt(1, timeoutSeconds);
+
+            try (ResultSet resultSet =
+                         statement.executeQuery()) {
+
+                while (resultSet.next()) {
+                    assignments.add(
+                            new OfflineDimensionAssignment(
+                                    resultSet.getString(
+                                            "dimension_id"
+                                    ),
+                                    resultSet.getString(
+                                            "node_id"
+                                    )
+                            )
+                    );
+                }
+            }
+        }
+
+        return assignments;
+    }
+
+    private static LeastAssignedNode findLeastAssignedNode(
+            Connection connection,
+            int timeoutSeconds
     ) throws SQLException {
         String sql = """
             SELECT
@@ -929,9 +1297,11 @@ public final class ClusterDatabase {
             FROM cluster_nodes AS nodes
             LEFT JOIN dimension_assignments AS assignments
                 ON assignments.node_id = nodes.node_id
-            WHERE nodes.last_seen >= DATE_SUB(
-                CURRENT_TIMESTAMP(3),
-                INTERVAL 15 SECOND
+            WHERE nodes.stopped_at IS NULL
+              AND nodes.last_seen >= TIMESTAMPADD(
+                SECOND,
+                -?,
+                CURRENT_TIMESTAMP(3)
             )
             GROUP BY
                 nodes.node_id,
@@ -944,23 +1314,58 @@ public final class ClusterDatabase {
             """;
 
         try (PreparedStatement statement =
-                     connection.prepareStatement(sql);
-             ResultSet resultSet =
-                     statement.executeQuery()) {
+                     connection.prepareStatement(sql)) {
 
-            if (!resultSet.next()) {
-                return null;
+            statement.setInt(1, timeoutSeconds);
+
+            try (ResultSet resultSet =
+                         statement.executeQuery()) {
+
+                if (!resultSet.next()) {
+                    return null;
+                }
+
+                return new LeastAssignedNode(
+                        resultSet.getString("node_id"),
+                        resultSet.getInt(
+                                "assignment_count"
+                        ),
+                        resultSet.getInt(
+                                "player_count"
+                        )
+                );
             }
+        }
+    }
 
-            return new LeastAssignedNode(
-                    resultSet.getString("node_id"),
-                    resultSet.getInt(
-                            "assignment_count"
-                    ),
-                    resultSet.getInt(
-                            "player_count"
-                    )
-            );
+    private static boolean isNodeOnline(
+            Connection connection,
+            String nodeId,
+            int timeoutSeconds
+    ) throws SQLException {
+        String sql = """
+                SELECT 1
+                FROM cluster_nodes
+                WHERE node_id = ?
+                  AND stopped_at IS NULL
+                  AND last_seen >= TIMESTAMPADD(
+                        SECOND,
+                        -?,
+                        CURRENT_TIMESTAMP(3)
+                  )
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+
+            statement.setString(1, nodeId);
+            statement.setInt(2, timeoutSeconds);
+
+            try (ResultSet resultSet =
+                         statement.executeQuery()) {
+
+                return resultSet.next();
+            }
         }
     }
 
@@ -1021,7 +1426,9 @@ public final class ClusterDatabase {
     ) throws SQLException {
         String sql = """
                 UPDATE pending_transfers
-                SET status = 'CANCELLED'
+                SET
+                    status = 'CANCELLED',
+                    player_data = NULL
                 WHERE player_uuid = ?
                   AND status = 'READY'
                 """;
@@ -1043,13 +1450,47 @@ public final class ClusterDatabase {
     ) throws SQLException {
         String sql = """
                 UPDATE pending_transfers
-                SET status = 'EXPIRED'
+                SET
+                    status = 'EXPIRED',
+                    claimed_at = NULL,
+                    player_data = NULL
                 WHERE status IN ('READY', 'CLAIMED')
                   AND expires_at <= CURRENT_TIMESTAMP(3)
                 """;
 
         try (PreparedStatement statement =
                      connection.prepareStatement(sql)) {
+
+            statement.executeUpdate();
+        }
+    }
+
+    private static void recoverStaleClaims(
+            Connection connection,
+            ClusterConfig config
+    ) throws SQLException {
+        String sql = """
+                UPDATE pending_transfers
+                SET
+                    status = 'READY',
+                    claimed_at = NULL
+                WHERE status = 'CLAIMED'
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at <= TIMESTAMPADD(
+                        SECOND,
+                        -?,
+                        CURRENT_TIMESTAMP(3)
+                  )
+                  AND expires_at > CURRENT_TIMESTAMP(3)
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+
+            statement.setInt(
+                    1,
+                    config.staleClaimSeconds()
+            );
 
             statement.executeUpdate();
         }
@@ -1071,6 +1512,10 @@ public final class ClusterDatabase {
                 resultSet.getDouble("z"),
                 resultSet.getFloat("yaw"),
                 resultSet.getFloat("pitch"),
+                resultSet.getBytes("player_data"),
+                resultSet.getString("player_data_sha256"),
+                resultSet.getInt("player_data_codec"),
+                resultSet.getInt("player_data_size"),
                 resultSet
                         .getTimestamp("created_at")
                         .toInstant(),
@@ -1174,6 +1619,20 @@ public final class ClusterDatabase {
     ) {
     }
 
+    private record OfflineDimensionAssignment(
+            String dimensionId,
+            String previousNodeId
+    ) {
+    }
+
+    public record DimensionReassignment(
+            String dimensionId,
+            String previousNodeId,
+            String newNodeId,
+            Instant reassignedAt
+    ) {
+    }
+
     public record CreatedTransfer(
             String transferId,
             UUID playerUuid,
@@ -1185,7 +1644,9 @@ public final class ClusterDatabase {
             double y,
             double z,
             float yaw,
-            float pitch
+            float pitch,
+            int playerDataSize,
+            String playerDataSha256
     ) {
     }
 
@@ -1200,6 +1661,10 @@ public final class ClusterDatabase {
             double z,
             float yaw,
             float pitch,
+            byte[] playerData,
+            String playerDataSha256,
+            int playerDataCodec,
+            int playerDataSize,
             Instant createdAt,
             Instant expiresAt
     ) {
