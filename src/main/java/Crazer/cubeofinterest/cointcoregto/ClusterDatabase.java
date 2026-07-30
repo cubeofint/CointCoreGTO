@@ -12,9 +12,15 @@ import java.sql.Statement;
 import java.sql.Types;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.List;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 
 public final class ClusterDatabase {
@@ -34,23 +40,55 @@ public final class ClusterDatabase {
             ClusterConfig config,
             MinecraftServer server
     ) throws SQLException {
-        return test(config, server);
+        return test(config, server, Map.of());
+    }
+
+    public static TestResult initializeAndTest(
+            ClusterConfig config,
+            MinecraftServer server,
+            Map<String, Integer> dimensionPlayerCounts
+    ) throws SQLException {
+        return test(config, server, dimensionPlayerCounts);
     }
 
     public static TestResult test(
             ClusterConfig config,
             MinecraftServer server
     ) throws SQLException {
+        return test(config, server, Map.of());
+    }
+
+    public static TestResult test(
+            ClusterConfig config,
+            MinecraftServer server,
+            Map<String, Integer> dimensionPlayerCounts
+    ) throws SQLException {
         ensureSchema(config);
 
         try (Connection connection = open(config)) {
-            expireTransfers(connection);
-            recoverStaleClaims(connection, config);
-            cleanupExpiredBackups(connection, config);
-            upsertNode(connection, config, server);
-            refreshPlayerSessionLeases(connection, config, server);
+            connection.setAutoCommit(false);
 
-            return readTestResult(connection, config);
+            try {
+                expireTransfers(connection);
+                recoverStaleClaims(connection, config);
+                cleanupExpiredBackups(connection, config);
+                upsertNode(connection, config, server);
+                refreshPlayerSessionLeases(connection, config, server);
+                refreshDimensionActivity(
+                        connection,
+                        config,
+                        dimensionPlayerCounts
+                );
+
+                TestResult result = readTestResult(connection, config);
+                connection.commit();
+                return result;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
         }
     }
 
@@ -58,14 +96,62 @@ public final class ClusterDatabase {
             ClusterConfig config,
             MinecraftServer server
     ) throws SQLException {
+        heartbeat(config, server, Map.of());
+    }
+
+    public static void heartbeat(
+            ClusterConfig config,
+            MinecraftServer server,
+            Map<String, Integer> dimensionPlayerCounts
+    ) throws SQLException {
         ensureSchema(config);
 
         try (Connection connection = open(config)) {
-            expireTransfers(connection);
-            recoverStaleClaims(connection, config);
-            cleanupExpiredBackups(connection, config);
-            upsertNode(connection, config, server);
-            refreshPlayerSessionLeases(connection, config, server);
+            connection.setAutoCommit(false);
+
+            try {
+                expireTransfers(connection);
+                recoverStaleClaims(connection, config);
+                cleanupExpiredBackups(connection, config);
+                upsertNode(connection, config, server);
+                refreshPlayerSessionLeases(connection, config, server);
+                refreshDimensionActivity(
+                        connection,
+                        config,
+                        dimensionPlayerCounts
+                );
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static void updateDimensionActivity(
+            ClusterConfig config,
+            Map<String, Integer> dimensionPlayerCounts
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                refreshDimensionActivity(
+                        connection,
+                        config,
+                        dimensionPlayerCounts
+                );
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
         }
     }
 
@@ -245,6 +331,17 @@ public final class ClusterDatabase {
                     statement.executeUpdate();
                 }
 
+                String activitySql = """
+                        DELETE FROM cluster_dimension_activity
+                        WHERE node_id = ?
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(activitySql)) {
+                    statement.setString(1, config.nodeId());
+                    statement.executeUpdate();
+                }
+
                 connection.commit();
             } catch (SQLException exception) {
                 rollbackQuietly(connection);
@@ -371,6 +468,24 @@ public final class ClusterDatabase {
                 String previousNode =
                         findDimensionOwner(connection, dimensionId);
 
+                DimensionActivity activeDimension =
+                        loadDimensionActivity(
+                                connection,
+                                config.nodeTimeoutSeconds()
+                        ).get(dimensionId);
+
+                if (activeDimension != null
+                        && activeDimension.playerCount() > 0
+                        && (previousNode == null
+                        || !previousNode.equalsIgnoreCase(nodeId))) {
+                    throw new SQLException(
+                            "Dimension " + dimensionId
+                                    + " сейчас содержит игроков на узлах "
+                                    + activeDimension.nodeIds()
+                                    + "; переназначение запрещено"
+                    );
+                }
+
                 String sql = """
                         INSERT INTO dimension_assignments (
                             dimension_id,
@@ -439,6 +554,8 @@ public final class ClusterDatabase {
 
             try {
                 lockClusterNodes(connection);
+                lockDimensionAssignments(connection);
+                lockDimensionActivity(connection);
 
                 String existingOwner =
                         findDimensionOwner(connection, dimensionId);
@@ -468,11 +585,57 @@ public final class ClusterDatabase {
                     }
                 }
 
-                LeastAssignedNode selectedNode =
-                        findLeastAssignedNode(
+                DimensionActivity activeDimension =
+                        loadDimensionActivity(
                                 connection,
                                 config.nodeTimeoutSeconds()
+                        ).get(dimensionId);
+
+                LeastAssignedNode selectedNode;
+
+                if (activeDimension != null
+                        && activeDimension.playerCount() > 0) {
+                    String activeNode = singleActiveNode(activeDimension);
+
+                    if (activeNode == null) {
+                        throw new SQLException(
+                                "Dimension " + dimensionId
+                                        + " одновременно содержит игроков на узлах "
+                                        + activeDimension.nodeIds()
+                                        + "; автоматическое назначение запрещено"
                         );
+                    }
+
+                    PlanningNode activePlanningNode =
+                            findOnlinePlanningNodes(
+                                    connection,
+                                    config.nodeTimeoutSeconds()
+                            ).stream()
+                                    .filter(node -> node.nodeId()
+                                            .equalsIgnoreCase(activeNode))
+                                    .findFirst()
+                                    .orElseThrow(
+                                            () -> new SQLException(
+                                                    "Активный узел "
+                                                            + activeNode
+                                                            + " не находится ONLINE"
+                                            )
+                                    );
+
+                    selectedNode = new LeastAssignedNode(
+                            activePlanningNode.nodeId(),
+                            countAssignmentsForNode(
+                                    connection,
+                                    activePlanningNode.nodeId()
+                            ),
+                            activePlanningNode.playerCount()
+                    );
+                } else {
+                    selectedNode = findLeastAssignedNode(
+                            connection,
+                            config.nodeTimeoutSeconds()
+                    );
+                }
 
                 if (selectedNode == null) {
                     throw new SQLException(
@@ -519,6 +682,655 @@ public final class ClusterDatabase {
                         true,
                         selectedNode.assignmentCount(),
                         selectedNode.playerCount(),
+                        Instant.now()
+                );
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionPinResult pinDimension(
+            ClusterConfig config,
+            String dimensionId,
+            String nodeId
+    ) throws SQLException {
+        if (dimensionId == null || dimensionId.isBlank()) {
+            throw new SQLException("Dimension id is empty");
+        }
+
+        if (nodeId == null || nodeId.isBlank()) {
+            throw new SQLException("Node id is empty");
+        }
+
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                lockClusterNodes(connection);
+                lockDimensionAssignments(connection);
+
+                if (findNodeRedirectAddress(connection, nodeId) == null) {
+                    throw new SQLException(
+                            "Узел " + nodeId
+                                    + " не найден в cluster_nodes"
+                    );
+                }
+
+                DimensionAssignmentRow previous =
+                        findDimensionAssignmentRow(
+                                connection,
+                                dimensionId
+                        );
+
+                DimensionActivity activeDimension =
+                        loadDimensionActivity(
+                                connection,
+                                config.nodeTimeoutSeconds()
+                        ).get(dimensionId);
+
+                if (activeDimension != null
+                        && activeDimension.playerCount() > 0) {
+                    String activeNode = singleActiveNode(activeDimension);
+                    String currentOwner = previous == null
+                            ? activeNode
+                            : previous.nodeId();
+
+                    if (currentOwner == null
+                            || !currentOwner.equalsIgnoreCase(nodeId)) {
+                        throw new SQLException(
+                                "Dimension " + dimensionId
+                                        + " сейчас содержит игроков на узлах "
+                                        + activeDimension.nodeIds()
+                                        + "; закрепление за другим узлом запрещено"
+                        );
+                    }
+                }
+
+                String sql = """
+                        INSERT INTO dimension_assignments (
+                            dimension_id,
+                            node_id,
+                            pinned,
+                            assigned_at,
+                            updated_at
+                        )
+                        VALUES (
+                            ?, ?, 1,
+                            CURRENT_TIMESTAMP(3),
+                            CURRENT_TIMESTAMP(3)
+                        )
+                        ON DUPLICATE KEY UPDATE
+                            node_id = VALUES(node_id),
+                            pinned = 1,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(sql)) {
+                    statement.setString(1, dimensionId);
+                    statement.setString(2, nodeId);
+                    statement.executeUpdate();
+                }
+
+                connection.commit();
+
+                return new DimensionPinResult(
+                        dimensionId,
+                        nodeId,
+                        previous == null ? null : previous.nodeId(),
+                        previous != null && previous.pinned(),
+                        true,
+                        Instant.now()
+                );
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionPinResult unpinDimension(
+            ClusterConfig config,
+            String dimensionId
+    ) throws SQLException {
+        if (dimensionId == null || dimensionId.isBlank()) {
+            throw new SQLException("Dimension id is empty");
+        }
+
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                lockDimensionAssignments(connection);
+
+                DimensionAssignmentRow previous =
+                        findDimensionAssignmentRow(
+                                connection,
+                                dimensionId
+                        );
+
+                if (previous == null) {
+                    throw new SQLException(
+                            "Для dimension " + dimensionId
+                                    + " владелец не назначен"
+                    );
+                }
+
+                String sql = """
+                        UPDATE dimension_assignments
+                        SET
+                            pinned = 0,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE dimension_id = ?
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(sql)) {
+                    statement.setString(1, dimensionId);
+                    statement.executeUpdate();
+                }
+
+                connection.commit();
+
+                return new DimensionPinResult(
+                        dimensionId,
+                        previous.nodeId(),
+                        previous.nodeId(),
+                        previous.pinned(),
+                        false,
+                        Instant.now()
+                );
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionAssignmentInfo findDimensionAssignmentInfo(
+            ClusterConfig config,
+            String dimensionId
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            DimensionAssignmentRow assignment =
+                    findDimensionAssignmentRow(
+                            connection,
+                            dimensionId
+                    );
+
+            if (assignment == null) {
+                return null;
+            }
+
+            DimensionActivity activity =
+                    loadDimensionActivity(
+                            connection,
+                            config.nodeTimeoutSeconds()
+                    ).get(dimensionId);
+
+            return new DimensionAssignmentInfo(
+                    dimensionId,
+                    assignment.nodeId(),
+                    assignment.pinned(),
+                    activity == null ? 0 : activity.playerCount(),
+                    activity == null
+                            ? List.of()
+                            : activity.nodeIds()
+            );
+        }
+    }
+
+    public static List<DimensionAssignmentInfo> listDimensionAssignments(
+            ClusterConfig config,
+            Collection<String> registeredDimensions
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            Map<String, DimensionAssignmentRow> assignments =
+                    loadDimensionAssignments(connection);
+            Map<String, DimensionActivity> activity =
+                    loadDimensionActivity(
+                            connection,
+                            config.nodeTimeoutSeconds()
+                    );
+
+            Set<String> dimensions = new TreeSet<>();
+            if (registeredDimensions != null) {
+                for (String dimensionId : registeredDimensions) {
+                    if (dimensionId != null && !dimensionId.isBlank()) {
+                        dimensions.add(dimensionId);
+                    }
+                }
+            }
+            dimensions.addAll(assignments.keySet());
+            dimensions.addAll(activity.keySet());
+
+            List<DimensionAssignmentInfo> result =
+                    new ArrayList<>();
+
+            for (String dimensionId : dimensions) {
+                DimensionAssignmentRow assignment =
+                        assignments.get(dimensionId);
+                DimensionActivity dimensionActivity =
+                        activity.get(dimensionId);
+
+                result.add(
+                        new DimensionAssignmentInfo(
+                                dimensionId,
+                                assignment == null
+                                        ? null
+                                        : assignment.nodeId(),
+                                assignment != null
+                                        && assignment.pinned(),
+                                dimensionActivity == null
+                                        ? 0
+                                        : dimensionActivity.playerCount(),
+                                dimensionActivity == null
+                                        ? List.of()
+                                        : dimensionActivity.nodeIds()
+                        )
+                );
+            }
+
+            return List.copyOf(result);
+        }
+    }
+
+    public static DimensionPlanResult planDimensionAssignments(
+            ClusterConfig config,
+            Collection<String> registeredDimensions,
+            boolean rebalance,
+            boolean apply
+    ) throws SQLException {
+        ensureSchema(config);
+
+        Set<String> knownDimensions = new TreeSet<>();
+        if (registeredDimensions != null) {
+            for (String dimensionId : registeredDimensions) {
+                if (dimensionId != null && !dimensionId.isBlank()) {
+                    knownDimensions.add(dimensionId);
+                }
+            }
+        }
+
+        if (knownDimensions.isEmpty()) {
+            throw new SQLException(
+                    "Список зарегистрированных измерений пуст"
+            );
+        }
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                lockClusterNodes(connection);
+                lockDimensionAssignments(connection);
+                lockDimensionActivity(connection);
+
+                List<PlanningNode> onlineNodes =
+                        findOnlinePlanningNodes(
+                                connection,
+                                config.nodeTimeoutSeconds()
+                        );
+
+                if (onlineNodes.isEmpty()) {
+                    throw new SQLException(
+                            "Нет доступных ONLINE-узлов с heartbeat не старше "
+                                    + config.nodeTimeoutSeconds()
+                                    + " секунд"
+                    );
+                }
+
+                Map<String, PlanningNode> nodesById =
+                        new LinkedHashMap<>();
+                Map<String, Integer> assignedCounts =
+                        new HashMap<>();
+
+                for (PlanningNode node : onlineNodes) {
+                    nodesById.put(node.nodeId(), node);
+                    assignedCounts.put(node.nodeId(), 0);
+                }
+
+                Map<String, DimensionAssignmentRow> assignments =
+                        loadDimensionAssignments(connection);
+                Map<String, DimensionActivity> activity =
+                        loadDimensionActivity(
+                                connection,
+                                config.nodeTimeoutSeconds()
+                        );
+
+                List<DimensionPlanEntry> entries =
+                        new ArrayList<>();
+
+                if (!rebalance) {
+                    for (DimensionAssignmentRow assignment
+                            : assignments.values()) {
+                        if (nodesById.containsKey(
+                                assignment.nodeId()
+                        )) {
+                            assignedCounts.computeIfPresent(
+                                    assignment.nodeId(),
+                                    (ignored, count) -> count + 1
+                            );
+                        }
+                    }
+
+                    for (String dimensionId : knownDimensions) {
+                        DimensionAssignmentRow assignment =
+                                assignments.get(dimensionId);
+                        DimensionActivity dimensionActivity =
+                                activity.get(dimensionId);
+
+                        if (assignment != null) {
+                            entries.add(
+                                    createPlanEntry(
+                                            dimensionId,
+                                            assignment,
+                                            assignment.nodeId(),
+                                            dimensionActivity,
+                                            DimensionPlanAction.KEEP
+                                    )
+                            );
+                            continue;
+                        }
+
+                        String activeNode =
+                                singleActiveNode(dimensionActivity);
+
+                        if (dimensionActivity != null
+                                && dimensionActivity.playerCount() > 0
+                                && activeNode == null) {
+                            entries.add(
+                                    createPlanEntry(
+                                            dimensionId,
+                                            null,
+                                            null,
+                                            dimensionActivity,
+                                            DimensionPlanAction.CONFLICT_ACTIVE
+                                    )
+                            );
+                            continue;
+                        }
+
+                        String targetNode = activeNode != null
+                                && nodesById.containsKey(activeNode)
+                                ? activeNode
+                                : selectPlanningNode(
+                                        onlineNodes,
+                                        assignedCounts,
+                                        null
+                                );
+
+                        assignedCounts.computeIfPresent(
+                                targetNode,
+                                (ignored, count) -> count + 1
+                        );
+
+                        entries.add(
+                                createPlanEntry(
+                                        dimensionId,
+                                        null,
+                                        targetNode,
+                                        dimensionActivity,
+                                        DimensionPlanAction.ASSIGN
+                                )
+                        );
+                    }
+                } else {
+                    for (Map.Entry<String, DimensionAssignmentRow> entry
+                            : assignments.entrySet()) {
+                        if (knownDimensions.contains(entry.getKey())) {
+                            continue;
+                        }
+
+                        String ownerNode = entry.getValue().nodeId();
+                        if (nodesById.containsKey(ownerNode)) {
+                            assignedCounts.computeIfPresent(
+                                    ownerNode,
+                                    (ignored, count) -> count + 1
+                            );
+                        }
+                    }
+
+                    List<String> movableDimensions =
+                            new ArrayList<>();
+
+                    for (String dimensionId : knownDimensions) {
+                        DimensionAssignmentRow assignment =
+                                assignments.get(dimensionId);
+                        DimensionActivity dimensionActivity =
+                                activity.get(dimensionId);
+
+                        if (assignment != null && assignment.pinned()) {
+                            if (nodesById.containsKey(
+                                    assignment.nodeId()
+                            )) {
+                                assignedCounts.computeIfPresent(
+                                        assignment.nodeId(),
+                                        (ignored, count) -> count + 1
+                                );
+                            }
+
+                            entries.add(
+                                    createPlanEntry(
+                                            dimensionId,
+                                            assignment,
+                                            assignment.nodeId(),
+                                            dimensionActivity,
+                                            DimensionPlanAction.SKIP_PINNED
+                                    )
+                            );
+                            continue;
+                        }
+
+                        if (dimensionActivity != null
+                                && dimensionActivity.playerCount() > 0) {
+                            if (assignment != null) {
+                                if (nodesById.containsKey(
+                                        assignment.nodeId()
+                                )) {
+                                    assignedCounts.computeIfPresent(
+                                            assignment.nodeId(),
+                                            (ignored, count) -> count + 1
+                                    );
+                                }
+
+                                entries.add(
+                                        createPlanEntry(
+                                                dimensionId,
+                                                assignment,
+                                                assignment.nodeId(),
+                                                dimensionActivity,
+                                                DimensionPlanAction.SKIP_ACTIVE
+                                        )
+                                );
+                                continue;
+                            }
+
+                            String activeNode =
+                                    singleActiveNode(dimensionActivity);
+
+                            if (activeNode == null
+                                    || !nodesById.containsKey(activeNode)) {
+                                entries.add(
+                                        createPlanEntry(
+                                                dimensionId,
+                                                null,
+                                                null,
+                                                dimensionActivity,
+                                                DimensionPlanAction.CONFLICT_ACTIVE
+                                        )
+                                );
+                                continue;
+                            }
+
+                            assignedCounts.computeIfPresent(
+                                    activeNode,
+                                    (ignored, count) -> count + 1
+                            );
+
+                            entries.add(
+                                    createPlanEntry(
+                                            dimensionId,
+                                            null,
+                                            activeNode,
+                                            dimensionActivity,
+                                            DimensionPlanAction.ASSIGN
+                                    )
+                            );
+                            continue;
+                        }
+
+                        movableDimensions.add(dimensionId);
+                    }
+
+                    movableDimensions.sort(String::compareTo);
+
+                    for (String dimensionId : movableDimensions) {
+                        DimensionAssignmentRow assignment =
+                                assignments.get(dimensionId);
+                        String previousNode = assignment == null
+                                ? null
+                                : assignment.nodeId();
+
+                        String targetNode = selectPlanningNode(
+                                onlineNodes,
+                                assignedCounts,
+                                previousNode
+                        );
+
+                        assignedCounts.computeIfPresent(
+                                targetNode,
+                                (ignored, count) -> count + 1
+                        );
+
+                        DimensionPlanAction action;
+                        if (previousNode == null) {
+                            action = DimensionPlanAction.ASSIGN;
+                        } else if (previousNode.equalsIgnoreCase(
+                                targetNode
+                        )) {
+                            action = DimensionPlanAction.KEEP;
+                        } else {
+                            action = DimensionPlanAction.MOVE;
+                        }
+
+                        entries.add(
+                                createPlanEntry(
+                                        dimensionId,
+                                        assignment,
+                                        targetNode,
+                                        activity.get(dimensionId),
+                                        action
+                                )
+                        );
+                    }
+                }
+
+                entries.sort(
+                        Comparator.comparing(
+                                DimensionPlanEntry::dimensionId
+                        )
+                );
+
+                int changed = 0;
+
+                for (DimensionPlanEntry entry : entries) {
+                    if (entry.action() == DimensionPlanAction.ASSIGN
+                            || entry.action() == DimensionPlanAction.MOVE) {
+                        changed++;
+                    }
+                }
+
+                if (apply) {
+                    String upsertSql = """
+                            INSERT INTO dimension_assignments (
+                                dimension_id,
+                                node_id,
+                                pinned,
+                                assigned_at,
+                                updated_at
+                            )
+                            VALUES (
+                                ?, ?, 0,
+                                CURRENT_TIMESTAMP(3),
+                                CURRENT_TIMESTAMP(3)
+                            )
+                            ON DUPLICATE KEY UPDATE
+                                node_id = VALUES(node_id),
+                                updated_at = CURRENT_TIMESTAMP(3)
+                            """;
+
+                    try (PreparedStatement statement =
+                                 connection.prepareStatement(upsertSql)) {
+                        for (DimensionPlanEntry entry : entries) {
+                            if (entry.action()
+                                    != DimensionPlanAction.ASSIGN
+                                    && entry.action()
+                                    != DimensionPlanAction.MOVE) {
+                                continue;
+                            }
+
+                            if (entry.targetNodeId() == null) {
+                                continue;
+                            }
+
+                            statement.setString(
+                                    1,
+                                    entry.dimensionId()
+                            );
+                            statement.setString(
+                                    2,
+                                    entry.targetNodeId()
+                            );
+                            statement.addBatch();
+                        }
+
+                        if (changed > 0) {
+                            statement.executeBatch();
+                        }
+                    }
+                }
+
+                connection.commit();
+
+                List<PlanningNodeStatus> finalNodes =
+                        new ArrayList<>();
+
+                for (PlanningNode node : onlineNodes) {
+                    finalNodes.add(
+                            new PlanningNodeStatus(
+                                    node.nodeId(),
+                                    node.playerCount(),
+                                    assignedCounts.getOrDefault(
+                                            node.nodeId(),
+                                            0
+                                    )
+                            )
+                    );
+                }
+
+                return new DimensionPlanResult(
+                        apply,
+                        rebalance,
+                        changed,
+                        List.copyOf(entries),
+                        List.copyOf(finalNodes),
                         Instant.now()
                 );
             } catch (SQLException exception) {
@@ -1842,6 +2654,7 @@ public final class ClusterDatabase {
                 CREATE TABLE IF NOT EXISTS dimension_assignments (
                     dimension_id VARCHAR(255) NOT NULL PRIMARY KEY,
                     node_id VARCHAR(64) NOT NULL,
+                    pinned TINYINT(1) NOT NULL DEFAULT 0,
                     assigned_at TIMESTAMP(3) NOT NULL
                         DEFAULT CURRENT_TIMESTAMP(3),
                     updated_at TIMESTAMP(3) NOT NULL
@@ -1849,6 +2662,33 @@ public final class ClusterDatabase {
 
                     INDEX idx_dimension_node (
                         node_id
+                    )
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_dimension_activity (
+                    node_id VARCHAR(64) NOT NULL,
+                    dimension_id VARCHAR(255) NOT NULL,
+                    player_count INT NOT NULL DEFAULT 0,
+                    last_seen TIMESTAMP(3) NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP(3),
+
+                    PRIMARY KEY (
+                        node_id,
+                        dimension_id
+                    ),
+
+                    INDEX idx_dimension_activity_dimension (
+                        dimension_id,
+                        player_count
+                    ),
+
+                    INDEX idx_dimension_activity_seen (
+                        last_seen
                     )
                 )
                 ENGINE=InnoDB
@@ -1953,6 +2793,13 @@ public final class ClusterDatabase {
 
         ensureColumnExists(
                 connection,
+                "dimension_assignments",
+                "pinned",
+                "TINYINT(1) NOT NULL DEFAULT 0"
+        );
+
+        ensureColumnExists(
+                connection,
                 "cluster_nodes",
                 "player_count",
                 "INT NOT NULL DEFAULT 0"
@@ -2020,6 +2867,64 @@ public final class ClusterDatabase {
                 "restore_node",
                 "VARCHAR(64) NULL"
         );
+    }
+
+    private static void refreshDimensionActivity(
+            Connection connection,
+            ClusterConfig config,
+            Map<String, Integer> dimensionPlayerCounts
+    ) throws SQLException {
+        String deleteSql = """
+                DELETE FROM cluster_dimension_activity
+                WHERE node_id = ?
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(deleteSql)) {
+            statement.setString(1, config.nodeId());
+            statement.executeUpdate();
+        }
+
+        if (dimensionPlayerCounts == null
+                || dimensionPlayerCounts.isEmpty()) {
+            return;
+        }
+
+        String insertSql = """
+                INSERT INTO cluster_dimension_activity (
+                    node_id,
+                    dimension_id,
+                    player_count,
+                    last_seen
+                )
+                VALUES (
+                    ?, ?, ?, CURRENT_TIMESTAMP(3)
+                )
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(insertSql)) {
+            for (Map.Entry<String, Integer> entry
+                    : dimensionPlayerCounts.entrySet()) {
+                String dimensionId = entry.getKey();
+                int playerCount = entry.getValue() == null
+                        ? 0
+                        : Math.max(0, entry.getValue());
+
+                if (dimensionId == null
+                        || dimensionId.isBlank()
+                        || playerCount <= 0) {
+                    continue;
+                }
+
+                statement.setString(1, config.nodeId());
+                statement.setString(2, dimensionId);
+                statement.setInt(3, playerCount);
+                statement.addBatch();
+            }
+
+            statement.executeBatch();
+        }
     }
 
     private static void upsertNode(
@@ -2246,13 +3151,14 @@ public final class ClusterDatabase {
                 FROM dimension_assignments AS assignments
                 LEFT JOIN cluster_nodes AS nodes
                     ON nodes.node_id = assignments.node_id
-                WHERE nodes.node_id IS NULL
+                WHERE assignments.pinned = 0
+                  AND (nodes.node_id IS NULL
                    OR nodes.stopped_at IS NOT NULL
                    OR nodes.last_seen < TIMESTAMPADD(
                         SECOND,
                         -?,
                         CURRENT_TIMESTAMP(3)
-                   )
+                   ))
                 ORDER BY assignments.dimension_id
                 """;
 
@@ -2419,6 +3325,274 @@ public final class ClusterDatabase {
                 return resultSet.getString("node_id");
             }
         }
+    }
+
+    private static void lockDimensionActivity(
+            Connection connection
+    ) throws SQLException {
+        String sql = """
+                SELECT node_id, dimension_id
+                FROM cluster_dimension_activity
+                ORDER BY node_id, dimension_id
+                FOR UPDATE
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            while (resultSet.next()) {
+                resultSet.getString("node_id");
+                resultSet.getString("dimension_id");
+            }
+        }
+    }
+
+    private static List<PlanningNode> findOnlinePlanningNodes(
+            Connection connection,
+            int timeoutSeconds
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    node_id,
+                    player_count
+                FROM cluster_nodes
+                WHERE stopped_at IS NULL
+                  AND last_seen >= TIMESTAMPADD(
+                        SECOND,
+                        -?,
+                        CURRENT_TIMESTAMP(3)
+                  )
+                ORDER BY node_id
+                """;
+
+        List<PlanningNode> nodes = new ArrayList<>();
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setInt(1, timeoutSeconds);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    nodes.add(
+                            new PlanningNode(
+                                    resultSet.getString("node_id"),
+                                    resultSet.getInt("player_count")
+                            )
+                    );
+                }
+            }
+        }
+
+        return List.copyOf(nodes);
+    }
+
+    private static Map<String, DimensionAssignmentRow>
+    loadDimensionAssignments(
+            Connection connection
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    dimension_id,
+                    node_id,
+                    pinned
+                FROM dimension_assignments
+                ORDER BY dimension_id
+                """;
+
+        Map<String, DimensionAssignmentRow> assignments =
+                new LinkedHashMap<>();
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            while (resultSet.next()) {
+                assignments.put(
+                        resultSet.getString("dimension_id"),
+                        new DimensionAssignmentRow(
+                                resultSet.getString("node_id"),
+                                resultSet.getBoolean("pinned")
+                        )
+                );
+            }
+        }
+
+        return assignments;
+    }
+
+    private static DimensionAssignmentRow findDimensionAssignmentRow(
+            Connection connection,
+            String dimensionId
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    node_id,
+                    pinned
+                FROM dimension_assignments
+                WHERE dimension_id = ?
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, dimensionId);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return null;
+                }
+
+                return new DimensionAssignmentRow(
+                        resultSet.getString("node_id"),
+                        resultSet.getBoolean("pinned")
+                );
+            }
+        }
+    }
+
+    private static Map<String, DimensionActivity>
+    loadDimensionActivity(
+            Connection connection,
+            int timeoutSeconds
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    activity.dimension_id,
+                    activity.node_id,
+                    activity.player_count
+                FROM cluster_dimension_activity AS activity
+                INNER JOIN cluster_nodes AS nodes
+                    ON nodes.node_id = activity.node_id
+                WHERE activity.player_count > 0
+                  AND activity.last_seen >= TIMESTAMPADD(
+                        SECOND,
+                        -?,
+                        CURRENT_TIMESTAMP(3)
+                  )
+                  AND nodes.stopped_at IS NULL
+                  AND nodes.last_seen >= TIMESTAMPADD(
+                        SECOND,
+                        -?,
+                        CURRENT_TIMESTAMP(3)
+                  )
+                ORDER BY
+                    activity.dimension_id,
+                    activity.node_id
+                """;
+
+        Map<String, Integer> playerCounts = new LinkedHashMap<>();
+        Map<String, Set<String>> activeNodes = new LinkedHashMap<>();
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setInt(1, timeoutSeconds);
+            statement.setInt(2, timeoutSeconds);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    String dimensionId =
+                            resultSet.getString("dimension_id");
+                    String nodeId =
+                            resultSet.getString("node_id");
+                    int playerCount =
+                            resultSet.getInt("player_count");
+
+                    playerCounts.merge(
+                            dimensionId,
+                            playerCount,
+                            Integer::sum
+                    );
+                    activeNodes.computeIfAbsent(
+                            dimensionId,
+                            ignored -> new LinkedHashSet<>()
+                    ).add(nodeId);
+                }
+            }
+        }
+
+        Map<String, DimensionActivity> result =
+                new LinkedHashMap<>();
+
+        for (Map.Entry<String, Integer> entry
+                : playerCounts.entrySet()) {
+            result.put(
+                    entry.getKey(),
+                    new DimensionActivity(
+                            entry.getValue(),
+                            List.copyOf(
+                                    activeNodes.getOrDefault(
+                                            entry.getKey(),
+                                            Set.of()
+                                    )
+                            )
+                    )
+            );
+        }
+
+        return result;
+    }
+
+    private static String singleActiveNode(
+            DimensionActivity activity
+    ) {
+        if (activity == null
+                || activity.playerCount() <= 0
+                || activity.nodeIds().size() != 1) {
+            return null;
+        }
+
+        return activity.nodeIds().get(0);
+    }
+
+    private static String selectPlanningNode(
+            List<PlanningNode> onlineNodes,
+            Map<String, Integer> assignedCounts,
+            String preferredNode
+    ) throws SQLException {
+        return onlineNodes.stream()
+                .min(
+                        Comparator
+                                .comparingInt(
+                                        (PlanningNode node) -> assignedCounts.getOrDefault(
+                                                node.nodeId(),
+                                                0
+                                        )
+                                )
+                                .thenComparingInt(
+                                        PlanningNode::playerCount
+                                )
+                                .thenComparingInt(
+                                        node -> preferredNode != null
+                                                && preferredNode.equalsIgnoreCase(
+                                                        node.nodeId()
+                                                )
+                                                ? 0
+                                                : 1
+                                )
+                                .thenComparing(PlanningNode::nodeId)
+                )
+                .map(PlanningNode::nodeId)
+                .orElseThrow(
+                        () -> new SQLException(
+                                "Нет ONLINE-узлов для назначения измерения"
+                        )
+                );
+    }
+
+    private static DimensionPlanEntry createPlanEntry(
+            String dimensionId,
+            DimensionAssignmentRow assignment,
+            String targetNode,
+            DimensionActivity activity,
+            DimensionPlanAction action
+    ) {
+        return new DimensionPlanEntry(
+                dimensionId,
+                assignment == null ? null : assignment.nodeId(),
+                targetNode,
+                assignment != null && assignment.pinned(),
+                activity == null ? 0 : activity.playerCount(),
+                activity == null ? List.of() : activity.nodeIds(),
+                action
+        );
     }
 
     private static void cancelReadyTransfers(
@@ -2666,6 +3840,62 @@ public final class ClusterDatabase {
     ) {
     }
 
+    public record DimensionAssignmentInfo(
+            String dimensionId,
+            String nodeId,
+            boolean pinned,
+            int activePlayers,
+            List<String> activeNodes
+    ) {
+    }
+
+    public record DimensionPinResult(
+            String dimensionId,
+            String nodeId,
+            String previousNodeId,
+            boolean previouslyPinned,
+            boolean pinned,
+            Instant updatedAt
+    ) {
+    }
+
+    public enum DimensionPlanAction {
+        KEEP,
+        ASSIGN,
+        MOVE,
+        SKIP_PINNED,
+        SKIP_ACTIVE,
+        CONFLICT_ACTIVE
+    }
+
+    public record DimensionPlanEntry(
+            String dimensionId,
+            String previousNodeId,
+            String targetNodeId,
+            boolean pinned,
+            int activePlayers,
+            List<String> activeNodes,
+            DimensionPlanAction action
+    ) {
+    }
+
+    public record PlanningNodeStatus(
+            String nodeId,
+            int playerCount,
+            int plannedDimensionCount
+    ) {
+    }
+
+    public record DimensionPlanResult(
+            boolean applied,
+            boolean rebalance,
+            int changedCount,
+            List<DimensionPlanEntry> entries,
+            List<PlanningNodeStatus> nodes,
+            Instant createdAt
+    ) {
+    }
+
     public record ClusterNodeStatus(
             String nodeId,
             String redirectAddress,
@@ -2674,6 +3904,24 @@ public final class ClusterDatabase {
             boolean online,
             long heartbeatAgeSeconds,
             Instant lastSeen
+    ) {
+    }
+
+    private record DimensionAssignmentRow(
+            String nodeId,
+            boolean pinned
+    ) {
+    }
+
+    private record DimensionActivity(
+            int playerCount,
+            List<String> nodeIds
+    ) {
+    }
+
+    private record PlanningNode(
+            String nodeId,
+            int playerCount
     ) {
     }
 

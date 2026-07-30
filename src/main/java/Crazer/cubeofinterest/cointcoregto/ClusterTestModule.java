@@ -2,6 +2,7 @@ package Crazer.cubeofinterest.cointcoregto;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -29,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -58,6 +60,11 @@ public final class ClusterTestModule {
     private static final Set<String>
             DIMENSION_TICK_SUPPRESSION_LOGGED =
             ConcurrentHashMap.newKeySet();
+
+    private static volatile Map<String, Integer>
+            DIMENSION_PLAYER_COUNT_SNAPSHOT = Map.of();
+
+    private static final int DIMENSION_LIST_PAGE_SIZE = 12;
 
     private static final ConcurrentMap<UUID, DimensionRouteSuppression>
             DIMENSION_ROUTE_SUPPRESSIONS = new ConcurrentHashMap<>();
@@ -163,6 +170,7 @@ public final class ClusterTestModule {
 
         return suppressed;
     }
+
     public static boolean routeFtbEssentialsTeleport(
             ServerPlayer player,
             ResourceKey<Level> dimension,
@@ -379,6 +387,8 @@ public final class ClusterTestModule {
         ClusterTransferGuard.clearAll();
         activeServer = server;
         heartbeatTickCounter = 0;
+        DIMENSION_PLAYER_COUNT_SNAPSHOT =
+                captureDimensionPlayerCounts(server);
 
         try {
             config = ClusterConfig.load();
@@ -424,6 +434,9 @@ public final class ClusterTestModule {
             return;
         }
 
+        DIMENSION_PLAYER_COUNT_SNAPSHOT =
+                captureDimensionPlayerCounts(server);
+
         heartbeatTickCounter++;
 
         if (heartbeatTickCounter
@@ -444,7 +457,8 @@ public final class ClusterTestModule {
             try {
                 ClusterDatabase.heartbeat(
                         currentConfig,
-                        server
+                        server,
+                        DIMENSION_PLAYER_COUNT_SNAPSHOT
                 );
 
                 performFailover(
@@ -514,6 +528,7 @@ public final class ClusterTestModule {
 
         heartbeatTickCounter = 0;
         DIMENSION_OWNER_CACHE = Map.of();
+        DIMENSION_PLAYER_COUNT_SNAPSHOT = Map.of();
         DIMENSION_ROUTE_SUPPRESSIONS.clear();
         DIMENSION_TICK_SUPPRESSION_LOGGED.clear();
         DIMENSION_TICK_GUARD_ACTIVE.set(false);
@@ -745,6 +760,117 @@ public final class ClusterTestModule {
                                                                                                         "dimension"
                                                                                                 ).toString()
                                                                                         )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("pin")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "dimension",
+                                                                                ResourceLocationArgument.id()
+                                                                        )
+                                                                        .then(
+                                                                                Commands.argument(
+                                                                                                "node",
+                                                                                                StringArgumentType.word()
+                                                                                        )
+                                                                                        .executes(
+                                                                                                context ->
+                                                                                                        pinDimensionOwner(
+                                                                                                                context.getSource(),
+                                                                                                                ResourceLocationArgument.getId(
+                                                                                                                        context,
+                                                                                                                        "dimension"
+                                                                                                                ).toString(),
+                                                                                                                StringArgumentType.getString(
+                                                                                                                        context,
+                                                                                                                        "node"
+                                                                                                                )
+                                                                                                        )
+                                                                                        )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("unpin")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "dimension",
+                                                                                ResourceLocationArgument.id()
+                                                                        )
+                                                                        .executes(
+                                                                                context ->
+                                                                                        unpinDimensionOwner(
+                                                                                                context.getSource(),
+                                                                                                ResourceLocationArgument.getId(
+                                                                                                        context,
+                                                                                                        "dimension"
+                                                                                                ).toString()
+                                                                                        )
+                                                                        )
+                                                        )
+                                        )
+                        )
+
+                        .then(
+                                Commands.literal("dimensions")
+                                        .then(
+                                                Commands.literal("list")
+                                                        .executes(
+                                                                context ->
+                                                                        showDimensions(
+                                                                                context.getSource(),
+                                                                                1
+                                                                        )
+                                                        )
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "page",
+                                                                                IntegerArgumentType.integer(1)
+                                                                        )
+                                                                        .executes(
+                                                                                context ->
+                                                                                        showDimensions(
+                                                                                                context.getSource(),
+                                                                                                IntegerArgumentType.getInteger(
+                                                                                                        context,
+                                                                                                        "page"
+                                                                                                )
+                                                                                        )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("preview")
+                                                        .executes(
+                                                                context ->
+                                                                        runDimensionPlan(
+                                                                                context.getSource(),
+                                                                                true,
+                                                                                false
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("autoassign")
+                                                        .executes(
+                                                                context ->
+                                                                        runDimensionPlan(
+                                                                                context.getSource(),
+                                                                                false,
+                                                                                true
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("rebalance")
+                                                        .executes(
+                                                                context ->
+                                                                        runDimensionPlan(
+                                                                                context.getSource(),
+                                                                                true,
+                                                                                true
                                                                         )
                                                         )
                                         )
@@ -1671,6 +1797,617 @@ public final class ClusterTestModule {
         }
     }
 
+    private static Map<String, Integer> captureDimensionPlayerCounts(
+            MinecraftServer server
+    ) {
+        Map<String, Integer> playerCounts = new HashMap<>();
+
+        for (ServerLevel level : server.getAllLevels()) {
+            playerCounts.put(
+                    level.dimension().location().toString(),
+                    level.players().size()
+            );
+        }
+
+        return Map.copyOf(playerCounts);
+    }
+
+    private static List<String> registeredDimensionIds(
+            MinecraftServer server
+    ) {
+        Set<String> dimensions = new TreeSet<>();
+
+        server.registryAccess()
+                .registryOrThrow(Registries.DIMENSION)
+                .keySet()
+                .forEach(
+                        location -> dimensions.add(
+                                location.toString()
+                        )
+                );
+
+        for (ServerLevel level : server.getAllLevels()) {
+            dimensions.add(
+                    level.dimension().location().toString()
+            );
+        }
+
+        return List.copyOf(dimensions);
+    }
+
+    private int showDimensions(
+            CommandSourceStack source,
+            int requestedPage
+    ) {
+        ClusterConfig currentConfig = config;
+
+        if (currentConfig == null
+                || !currentConfig.enabled()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКластер выключен или конфиг ещё не загружен."
+                    )
+            );
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        List<String> registeredDimensions =
+                registeredDimensionIds(server);
+        Set<String> registeredSet =
+                Set.copyOf(registeredDimensions);
+        Map<String, Integer> localActivity =
+                captureDimensionPlayerCounts(server);
+
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§eПолучаю список измерений кластера..."
+                ),
+                false
+        );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+
+                ClusterDatabase.updateDimensionActivity(
+                        latestConfig,
+                        localActivity
+                );
+
+                List<ClusterDatabase.DimensionAssignmentInfo> dimensions =
+                        ClusterDatabase.listDimensionAssignments(
+                                latestConfig,
+                                registeredDimensions
+                        );
+
+                server.execute(() -> {
+                    int totalPages = Math.max(
+                            1,
+                            (dimensions.size()
+                                    + DIMENSION_LIST_PAGE_SIZE
+                                    - 1)
+                                    / DIMENSION_LIST_PAGE_SIZE
+                    );
+                    int page = Math.min(
+                            Math.max(1, requestedPage),
+                            totalPages
+                    );
+                    int start = (page - 1)
+                            * DIMENSION_LIST_PAGE_SIZE;
+                    int end = Math.min(
+                            dimensions.size(),
+                            start + DIMENSION_LIST_PAGE_SIZE
+                    );
+
+                    long unknown = dimensions.stream()
+                            .filter(info -> info.nodeId() == null)
+                            .count();
+                    long pinned = dimensions.stream()
+                            .filter(
+                                    ClusterDatabase.DimensionAssignmentInfo::pinned
+                            )
+                            .count();
+                    long active = dimensions.stream()
+                            .filter(info -> info.activePlayers() > 0)
+                            .count();
+
+                    source.sendSuccess(
+                            () -> Component.literal(
+                                    "§6Измерения кластера §7(страница §f"
+                                            + page
+                                            + "§7/§f"
+                                            + totalPages
+                                            + "§7, всего §f"
+                                            + dimensions.size()
+                                            + "§7, без владельца §f"
+                                            + unknown
+                                            + "§7, закреплено §f"
+                                            + pinned
+                                            + "§7, с игроками §f"
+                                            + active
+                                            + "§7):"
+                            ),
+                            false
+                    );
+
+                    for (int index = start; index < end; index++) {
+                        ClusterDatabase.DimensionAssignmentInfo info =
+                                dimensions.get(index);
+
+                        String owner = info.nodeId() == null
+                                ? "§cunknown"
+                                : "§f" + info.nodeId();
+                        String pinState = info.pinned()
+                                ? " §6[PINNED]"
+                                : "";
+                        String players = info.activePlayers() > 0
+                                ? " §a[players="
+                                + info.activePlayers()
+                                + " on "
+                                + info.activeNodes()
+                                + "]"
+                                : "";
+                        String registryState = registeredSet.contains(
+                                info.dimensionId()
+                        )
+                                ? ""
+                                : " §8[not registered locally]";
+
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "§f"
+                                                + info.dimensionId()
+                                                + "§7 -> "
+                                                + owner
+                                                + pinState
+                                                + players
+                                                + registryState
+                                ),
+                                false
+                        );
+                    }
+
+                    if (totalPages > 1) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "§7Следующая страница: §f/gtocluster dimensions list "
+                                                + Math.min(
+                                                        totalPages,
+                                                        page + 1
+                                                )
+                                ),
+                                false
+                        );
+                    }
+                });
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to list cluster dimensions",
+                        exception
+                );
+
+                server.execute(
+                        () -> source.sendFailure(
+                                Component.literal(
+                                        "§cНе удалось получить список измерений: "
+                                                + exception
+                                                .getClass()
+                                                .getSimpleName()
+                                                + ": "
+                                                + exception.getMessage()
+                                )
+                        )
+                );
+            }
+        });
+
+        return 1;
+    }
+
+    private int runDimensionPlan(
+            CommandSourceStack source,
+            boolean rebalance,
+            boolean apply
+    ) {
+        ClusterConfig currentConfig = config;
+
+        if (currentConfig == null
+                || !currentConfig.enabled()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКластер выключен или конфиг ещё не загружен."
+                    )
+            );
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        List<String> registeredDimensions =
+                registeredDimensionIds(server);
+        Map<String, Integer> localActivity =
+                captureDimensionPlayerCounts(server);
+
+        String operation;
+        if (!apply) {
+            operation = "предварительный план балансировки";
+        } else if (rebalance) {
+            operation = "балансировку измерений";
+        } else {
+            operation = "назначение измерений без владельца";
+        }
+
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§eЗапускаю " + operation + "..."
+                ),
+                false
+        );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+
+                ClusterDatabase.updateDimensionActivity(
+                        latestConfig,
+                        localActivity
+                );
+
+                ClusterDatabase.DimensionPlanResult result =
+                        ClusterDatabase.planDimensionAssignments(
+                                latestConfig,
+                                registeredDimensions,
+                                rebalance,
+                                apply
+                        );
+
+                if (apply) {
+                    refreshDimensionOwnerCache(latestConfig);
+                }
+
+                server.execute(
+                        () -> sendDimensionPlanResult(
+                                source,
+                                result
+                        )
+                );
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to run dimension assignment plan",
+                        exception
+                );
+
+                server.execute(
+                        () -> source.sendFailure(
+                                Component.literal(
+                                        "§cНе удалось выполнить план измерений: "
+                                                + exception
+                                                .getClass()
+                                                .getSimpleName()
+                                                + ": "
+                                                + exception.getMessage()
+                                )
+                        )
+                );
+            }
+        });
+
+        return 1;
+    }
+
+    private void sendDimensionPlanResult(
+            CommandSourceStack source,
+            ClusterDatabase.DimensionPlanResult result
+    ) {
+        int assigned = 0;
+        int moved = 0;
+        int pinned = 0;
+        int active = 0;
+        int conflicts = 0;
+
+        for (ClusterDatabase.DimensionPlanEntry entry
+                : result.entries()) {
+            switch (entry.action()) {
+                case ASSIGN -> assigned++;
+                case MOVE -> moved++;
+                case SKIP_PINNED -> pinned++;
+                case SKIP_ACTIVE -> active++;
+                case CONFLICT_ACTIVE -> conflicts++;
+                default -> {
+                }
+            }
+        }
+
+        String mode = result.applied()
+                ? "§aПлан применён"
+                : "§eПредварительный план";
+        final int assignedCount = assigned;
+        final int movedCount = moved;
+        final int pinnedCount = pinned;
+        final int activeCount = active;
+        final int conflictCount = conflicts;
+
+        source.sendSuccess(
+                () -> Component.literal(
+                        mode
+                                + "§7 | назначить: §f"
+                                + assignedCount
+                                + "§7 | переместить: §f"
+                                + movedCount
+                                + "§7 | pinned: §f"
+                                + pinnedCount
+                                + "§7 | активные пропущены: §f"
+                                + activeCount
+                                + "§7 | конфликты: §f"
+                                + conflictCount
+                ),
+                false
+        );
+
+        int shown = 0;
+        for (ClusterDatabase.DimensionPlanEntry entry
+                : result.entries()) {
+            if (entry.action()
+                    == ClusterDatabase.DimensionPlanAction.KEEP) {
+                continue;
+            }
+
+            if (shown >= 30) {
+                break;
+            }
+
+            String line = switch (entry.action()) {
+                case ASSIGN -> "§aASSIGN §f"
+                        + entry.dimensionId()
+                        + " §7-> §f"
+                        + entry.targetNodeId();
+                case MOVE -> "§eMOVE §f"
+                        + entry.dimensionId()
+                        + " §7"
+                        + entry.previousNodeId()
+                        + " -> §f"
+                        + entry.targetNodeId();
+                case SKIP_PINNED -> "§6PINNED §f"
+                        + entry.dimensionId()
+                        + " §7-> §f"
+                        + entry.targetNodeId();
+                case SKIP_ACTIVE -> "§bACTIVE §f"
+                        + entry.dimensionId()
+                        + " §7players="
+                        + entry.activePlayers()
+                        + " nodes="
+                        + entry.activeNodes();
+                case CONFLICT_ACTIVE -> "§cCONFLICT §f"
+                        + entry.dimensionId()
+                        + " §7players="
+                        + entry.activePlayers()
+                        + " nodes="
+                        + entry.activeNodes();
+                default -> "";
+            };
+
+            if (!line.isEmpty()) {
+                String finalLine = line;
+                source.sendSuccess(
+                        () -> Component.literal(finalLine),
+                        false
+                );
+                shown++;
+            }
+        }
+
+        final int shownCount = shown;
+        if (result.entries().stream()
+                .filter(entry -> entry.action()
+                        != ClusterDatabase.DimensionPlanAction.KEEP)
+                .count() > shownCount) {
+            source.sendSuccess(
+                    () -> Component.literal(
+                            "§7Показаны первые §f"
+                                    + shownCount
+                                    + "§7 изменения/блокировки."
+                    ),
+                    false
+            );
+        }
+
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§6Планируемая нагрузка узлов:"
+                ),
+                false
+        );
+
+        for (ClusterDatabase.PlanningNodeStatus node
+                : result.nodes()) {
+            source.sendSuccess(
+                    () -> Component.literal(
+                            "§f"
+                                    + node.nodeId()
+                                    + "§7 | dimensions: §f"
+                                    + node.plannedDimensionCount()
+                                    + "§7 | players: §f"
+                                    + node.playerCount()
+                    ),
+                    false
+            );
+        }
+    }
+
+    private int pinDimensionOwner(
+            CommandSourceStack source,
+            String dimensionId,
+            String nodeId
+    ) {
+        ResourceLocation parsedDimension =
+                ResourceLocation.tryParse(dimensionId);
+
+        if (parsedDimension == null) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cНекорректный dimension id: §f"
+                                    + dimensionId
+                    )
+            );
+            return 0;
+        }
+
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКластер выключен или конфиг ещё не загружен."
+                    )
+            );
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        String normalizedDimension = parsedDimension.toString();
+        Map<String, Integer> localActivity =
+                captureDimensionPlayerCounts(server);
+
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§eЗакрепляю dimension §f"
+                                + normalizedDimension
+                                + "§e за узлом §f"
+                                + nodeId
+                                + "§e..."
+                ),
+                false
+        );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+
+                ClusterDatabase.updateDimensionActivity(
+                        latestConfig,
+                        localActivity
+                );
+
+                ClusterDatabase.DimensionPinResult result =
+                        ClusterDatabase.pinDimension(
+                                latestConfig,
+                                normalizedDimension,
+                                nodeId
+                        );
+
+                updateCachedDimensionOwner(
+                        result.dimensionId(),
+                        result.nodeId()
+                );
+
+                server.execute(
+                        () -> source.sendSuccess(
+                                () -> Component.literal(
+                                        "§aDimension §f"
+                                                + result.dimensionId()
+                                                + "§a закреплена за узлом §f"
+                                                + result.nodeId()
+                                ),
+                                false
+                        )
+                );
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to pin dimension {} to node {}",
+                        normalizedDimension,
+                        nodeId,
+                        exception
+                );
+
+                server.execute(
+                        () -> source.sendFailure(
+                                Component.literal(
+                                        "§cНе удалось закрепить dimension: "
+                                                + exception.getMessage()
+                                )
+                        )
+                );
+            }
+        });
+
+        return 1;
+    }
+
+    private int unpinDimensionOwner(
+            CommandSourceStack source,
+            String dimensionId
+    ) {
+        ResourceLocation parsedDimension =
+                ResourceLocation.tryParse(dimensionId);
+
+        if (parsedDimension == null) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cНекорректный dimension id: §f"
+                                    + dimensionId
+                    )
+            );
+            return 0;
+        }
+
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКластер выключен или конфиг ещё не загружен."
+                    )
+            );
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        String normalizedDimension = parsedDimension.toString();
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+
+                ClusterDatabase.DimensionPinResult result =
+                        ClusterDatabase.unpinDimension(
+                                latestConfig,
+                                normalizedDimension
+                        );
+
+                server.execute(
+                        () -> source.sendSuccess(
+                                () -> Component.literal(
+                                        "§aЗакрепление снято: §f"
+                                                + result.dimensionId()
+                                                + "§a остаётся на узле §f"
+                                                + result.nodeId()
+                                ),
+                                false
+                        )
+                );
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to unpin dimension {}",
+                        normalizedDimension,
+                        exception
+                );
+
+                server.execute(
+                        () -> source.sendFailure(
+                                Component.literal(
+                                        "§cНе удалось снять закрепление: "
+                                                + exception.getMessage()
+                                )
+                        )
+                );
+            }
+        });
+
+        return 1;
+    }
+
     private int assignDimensionOwner(
             CommandSourceStack source,
             String dimensionId,
@@ -1977,14 +2714,14 @@ public final class ClusterTestModule {
 
                 config = latestConfig;
 
-                String owner =
-                        ClusterDatabase.findDimensionOwner(
+                ClusterDatabase.DimensionAssignmentInfo info =
+                        ClusterDatabase.findDimensionAssignmentInfo(
                                 latestConfig,
                                 normalizedDimension
                         );
 
                 server.execute(() -> {
-                    if (owner == null) {
+                    if (info == null) {
                         source.sendFailure(
                                 Component.literal(
                                         "§cДля dimension §f"
@@ -1996,12 +2733,25 @@ public final class ClusterTestModule {
                         return;
                     }
 
+                    String pinState = info.pinned()
+                            ? "§6 [PINNED]"
+                            : "§7 [unpinned]";
+                    String activeState = info.activePlayers() > 0
+                            ? "§a | players: §f"
+                            + info.activePlayers()
+                            + "§a on §f"
+                            + info.activeNodes()
+                            : "";
+
                     source.sendSuccess(
                             () -> Component.literal(
                                     "§aDimension §f"
                                             + normalizedDimension
                                             + "§a принадлежит узлу §f"
-                                            + owner
+                                            + info.nodeId()
+                                            + " "
+                                            + pinState
+                                            + activeState
                             ),
                             false
                     );
@@ -3351,7 +4101,8 @@ public final class ClusterTestModule {
             ClusterDatabase.TestResult result =
                     ClusterDatabase.test(
                             currentConfig,
-                            server
+                            server,
+                            DIMENSION_PLAYER_COUNT_SNAPSHOT
                     );
 
             performFailover(
