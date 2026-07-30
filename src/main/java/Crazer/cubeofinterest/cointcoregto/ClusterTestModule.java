@@ -20,12 +20,14 @@ import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.server.ServerAboutToStartEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -64,6 +66,11 @@ public final class ClusterTestModule {
     private static volatile Map<String, Integer>
             DIMENSION_PLAYER_COUNT_SNAPSHOT = Map.of();
 
+    private static volatile Set<String>
+            DIMENSION_MIGRATION_FROZEN = Set.of();
+    private static volatile Set<String>
+            DIMENSION_MIGRATION_BLOCKED = Set.of();
+
     private static final int DIMENSION_LIST_PAGE_SIZE = 12;
 
     private static final ConcurrentMap<UUID, DimensionRouteSuppression>
@@ -71,6 +78,21 @@ public final class ClusterTestModule {
 
     private static final long DIMENSION_ROUTE_SUPPRESSION_NANOS =
             10_000_000_000L;
+
+    private static final ExecutorService MIGRATION_EXECUTOR =
+            Executors.newSingleThreadExecutor(task -> {
+                Thread thread = new Thread(
+                        task,
+                        "CointCoreGTO-Dimension-Migration"
+                );
+
+                thread.setDaemon(true);
+                thread.setContextClassLoader(
+                        ClusterTestModule.class.getClassLoader()
+                );
+
+                return thread;
+            });
 
     private static final ExecutorService DATABASE_EXECUTOR =
             Executors.newSingleThreadExecutor(task -> {
@@ -122,27 +144,39 @@ public final class ClusterTestModule {
 
         if (level == null
                 || currentConfig == null
-                || !currentConfig.enabled()
-                || !currentConfig.dimensionTickIsolation()) {
+                || !currentConfig.enabled()) {
             return false;
         }
 
         String dimensionId =
                 level.dimension().location().toString();
 
+        if (DIMENSION_MIGRATION_FROZEN.contains(dimensionId)) {
+            if (DIMENSION_TICK_SUPPRESSION_LOGGED.add(dimensionId)) {
+                LOGGER.info(
+                        "Dimension migration freezing {} on source node {}",
+                        dimensionId,
+                        currentConfig.nodeId()
+                );
+            }
+            return true;
+        }
+
+        if (!level.players().isEmpty()) {
+            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(dimensionId);
+            return false;
+        }
+
+        if (!currentConfig.dimensionTickIsolation()) {
+            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(dimensionId);
+            return false;
+        }
+
         String ownerNode =
                 DIMENSION_OWNER_CACHE.get(dimensionId);
 
-        if (!level.players().isEmpty()) {
-            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(
-                    dimensionId
-            );
-            return false;
-        }
         if (ownerNode == null || ownerNode.isBlank()) {
-            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(
-                    dimensionId
-            );
+            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(dimensionId);
             return false;
         }
 
@@ -152,9 +186,7 @@ public final class ClusterTestModule {
                 );
 
         if (suppressed) {
-            if (DIMENSION_TICK_SUPPRESSION_LOGGED.add(
-                    dimensionId
-            )) {
+            if (DIMENSION_TICK_SUPPRESSION_LOGGED.add(dimensionId)) {
                 LOGGER.info(
                         "Dimension tick isolation enabled: freezing {} on node {} because owner is {}",
                         dimensionId,
@@ -163,9 +195,7 @@ public final class ClusterTestModule {
                 );
             }
         } else {
-            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(
-                    dimensionId
-            );
+            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(dimensionId);
         }
 
         return suppressed;
@@ -207,15 +237,17 @@ public final class ClusterTestModule {
         String dimensionId =
                 dimension.location().toString();
 
+        if (DIMENSION_MIGRATION_BLOCKED.contains(dimensionId)) {
+            player.sendSystemMessage(
+                    Component.literal(
+                            "§cИзмерение временно недоступно: выполняется безопасная migration."
+                    )
+            );
+            return true;
+        }
+
         String cachedOwner =
                 DIMENSION_OWNER_CACHE.get(dimensionId);
-
-        if (cachedOwner != null
-                && cachedOwner.equalsIgnoreCase(
-                currentConfig.nodeId()
-        )) {
-            return false;
-        }
 
         if (cachedOwner == null
                 && !currentConfig.failClosedRouting()) {
@@ -380,6 +412,35 @@ public final class ClusterTestModule {
     }
 
     @SubscribeEvent
+    public void onServerAboutToStart(
+            ServerAboutToStartEvent event
+    ) {
+        try {
+            ClusterConfig startupConfig = ClusterConfig.load();
+            config = startupConfig;
+
+            if (!startupConfig.enabled()) {
+                return;
+            }
+
+            refreshDimensionMigrationFreeze(startupConfig);
+            applyPendingDimensionMigrationAtStartup(
+                    event.getServer(),
+                    startupConfig
+            );
+            refreshDimensionMigrationFreeze(startupConfig);
+        } catch (Exception exception) {
+            lastError = exception.getClass().getSimpleName()
+                    + ": "
+                    + exception.getMessage();
+            LOGGER.error(
+                    "Unable to process pending dimension migration before world load",
+                    exception
+            );
+        }
+    }
+
+    @SubscribeEvent
     public void onServerStarted(
             ServerStartedEvent event
     ) {
@@ -469,6 +530,9 @@ public final class ClusterTestModule {
                 refreshDimensionOwnerCache(
                         currentConfig
                 );
+                refreshDimensionMigrationFreeze(
+                        currentConfig
+                );
 
                 if (heartbeatFailureLogged) {
                     LOGGER.info(
@@ -529,6 +593,8 @@ public final class ClusterTestModule {
         heartbeatTickCounter = 0;
         DIMENSION_OWNER_CACHE = Map.of();
         DIMENSION_PLAYER_COUNT_SNAPSHOT = Map.of();
+        DIMENSION_MIGRATION_FROZEN = Set.of();
+        DIMENSION_MIGRATION_BLOCKED = Set.of();
         DIMENSION_ROUTE_SUPPRESSIONS.clear();
         DIMENSION_TICK_SUPPRESSION_LOGGED.clear();
         DIMENSION_TICK_GUARD_ACTIVE.set(false);
@@ -871,6 +937,67 @@ public final class ClusterTestModule {
                                                                                 context.getSource(),
                                                                                 true,
                                                                                 true
+                                                                        )
+                                                        )
+                                        )
+                        )
+
+                        .then(
+                                Commands.literal("migration")
+                                        .then(
+                                                Commands.literal("prepare")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "dimension",
+                                                                                ResourceLocationArgument.id()
+                                                                        )
+                                                                        .then(
+                                                                                Commands.argument(
+                                                                                                "targetNode",
+                                                                                                StringArgumentType.word()
+                                                                                        )
+                                                                                        .executes(
+                                                                                                context ->
+                                                                                                        prepareDimensionMigration(
+                                                                                                                context.getSource(),
+                                                                                                                ResourceLocationArgument.getId(
+                                                                                                                        context,
+                                                                                                                        "dimension"
+                                                                                                                ).toString(),
+                                                                                                                StringArgumentType.getString(
+                                                                                                                        context,
+                                                                                                                        "targetNode"
+                                                                                                                )
+                                                                                                        )
+                                                                                        )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(
+                                                                context ->
+                                                                        showDimensionMigrations(
+                                                                                context.getSource()
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("cancel")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "migrationId",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(
+                                                                                context ->
+                                                                                        cancelDimensionMigration(
+                                                                                                context.getSource(),
+                                                                                                StringArgumentType.getString(
+                                                                                                        context,
+                                                                                                        "migrationId"
+                                                                                                )
+                                                                                        )
                                                                         )
                                                         )
                                         )
@@ -1353,6 +1480,18 @@ public final class ClusterTestModule {
             return;
         }
 
+        if (DIMENSION_MIGRATION_BLOCKED.contains(loginDimensionId)) {
+            ClusterTransferGuard.unlock(player);
+            player.connection.disconnect(
+                    Component.literal(
+                            "Измерение "
+                                    + loginDimensionId
+                                    + " временно недоступно: выполняется безопасная migration."
+                    )
+            );
+            return;
+        }
+
         if (dimensionOwner == null
                 || dimensionOwner.equalsIgnoreCase(
                 currentConfig.nodeId()
@@ -1361,28 +1500,137 @@ public final class ClusterTestModule {
             return;
         }
 
-        LOGGER.warn(
-                "Player {} joined node {} in dimension owned by {} without a pending transfer. Disconnecting to prevent a redirect loop.",
-                playerUuid,
-                currentConfig.nodeId(),
+        queueWrongNodeLoginTransfer(
+                server,
+                currentConfig,
+                player,
+                loginDimensionId,
                 dimensionOwner
         );
+    }
 
-        ClusterTransferGuard.unlock(player);
-        player.connection.disconnect(
+    private void queueWrongNodeLoginTransfer(
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ServerPlayer player,
+            String dimensionId,
+            String targetNode
+    ) {
+        UUID playerUuid = player.getUUID();
+        String playerName = player.getGameProfile().getName();
+
+        ClusterTransferGuard.updateReason(
+                playerUuid,
+                "Автоматический переход на владельца измерения"
+        );
+
+        ClusterPlayerDataCodec.Snapshot playerData;
+
+        try {
+            playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+        } catch (Exception exception) {
+            LOGGER.error(
+                    "Unable to capture player data for wrong-node login handoff {}",
+                    playerUuid,
+                    exception
+            );
+            ClusterTransferGuard.unlock(player);
+            player.connection.disconnect(
+                    Component.literal(
+                            "Не удалось подготовить автоматический переход на узел "
+                                    + targetNode
+                                    + ": "
+                                    + exception.getMessage()
+                    )
+            );
+            return;
+        }
+
+        double x = player.getX();
+        double y = player.getY();
+        double z = player.getZ();
+        float yaw = player.getYRot();
+        float pitch = player.getXRot();
+
+        player.sendSystemMessage(
                 Component.literal(
-                        "Вы подключились к узлу "
-                                + currentConfig.nodeId()
-                                + " в измерении "
-                                + loginDimensionId
-                                + ", которое принадлежит узлу "
-                                + dimensionOwner
-                                + ".\nАвтоматический redirect без активного transfer "
-                                + "заблокирован для защиты от бесконечного цикла. "
-                                + "Подключитесь к правильному узлу или выполните "
-                                + "кластерный переход из игры."
+                        "§eИзмерение §f"
+                                + dimensionId
+                                + "§e принадлежит узлу §f"
+                                + targetNode
+                                + "§e. Выполняю автоматический кластерный переход."
                 )
         );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+
+                String latestOwner = ClusterDatabase.findDimensionOwner(
+                        latestConfig,
+                        dimensionId
+                );
+
+                if (latestOwner == null) {
+                    scheduleRouteFailure(
+                            server,
+                            playerUuid,
+                            "Для dimension "
+                                    + dimensionId
+                                    + " владелец не назначен."
+                    );
+                    return;
+                }
+
+                updateCachedDimensionOwner(
+                        dimensionId,
+                        latestOwner
+                );
+
+                if (latestOwner.equalsIgnoreCase(latestConfig.nodeId())) {
+                    server.execute(() -> {
+                        ServerPlayer onlinePlayer = server.getPlayerList()
+                                .getPlayer(playerUuid);
+                        if (onlinePlayer != null) {
+                            ClusterTransferGuard.unlock(onlinePlayer);
+                        } else {
+                            ClusterTransferGuard.unlock(playerUuid);
+                        }
+                    });
+                    return;
+                }
+
+                createTransferAndScheduleRedirect(
+                        server,
+                        latestConfig,
+                        playerUuid,
+                        playerName,
+                        latestOwner,
+                        dimensionId,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        pitch,
+                        playerData
+                );
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to create wrong-node login transfer for player {}",
+                        playerUuid,
+                        exception
+                );
+                scheduleTransferError(
+                        server,
+                        playerUuid,
+                        exception
+                );
+            }
+        });
     }
 
     private void releaseSessionAfterLoginAbort(
@@ -1536,6 +1784,17 @@ public final class ClusterTestModule {
 
         UUID playerUuid = player.getUUID();
 
+        if (DIMENSION_MIGRATION_BLOCKED.contains(dimensionId)) {
+            player.connection.disconnect(
+                    Component.literal(
+                            "Измерение "
+                                    + dimensionId
+                                    + " временно недоступно: выполняется безопасная migration."
+                    )
+            );
+            return;
+        }
+
         if (ClusterTransferGuard.isLocked(player)
                 || isDimensionRouteSuppressed(
                 playerUuid,
@@ -1551,13 +1810,6 @@ public final class ClusterTestModule {
 
         String cachedOwner =
                 DIMENSION_OWNER_CACHE.get(dimensionId);
-
-        if (cachedOwner != null
-                && cachedOwner.equalsIgnoreCase(
-                currentConfig.nodeId()
-        )) {
-            return;
-        }
 
         if (cachedOwner == null
                 && !currentConfig.failClosedRouting()) {
@@ -2104,6 +2356,7 @@ public final class ClusterTestModule {
         int assigned = 0;
         int moved = 0;
         int pinned = 0;
+        int migrating = 0;
         int active = 0;
         int conflicts = 0;
 
@@ -2113,6 +2366,7 @@ public final class ClusterTestModule {
                 case ASSIGN -> assigned++;
                 case MOVE -> moved++;
                 case SKIP_PINNED -> pinned++;
+                case SKIP_MIGRATING -> migrating++;
                 case SKIP_ACTIVE -> active++;
                 case CONFLICT_ACTIVE -> conflicts++;
                 default -> {
@@ -2126,6 +2380,7 @@ public final class ClusterTestModule {
         final int assignedCount = assigned;
         final int movedCount = moved;
         final int pinnedCount = pinned;
+        final int migratingCount = migrating;
         final int activeCount = active;
         final int conflictCount = conflicts;
 
@@ -2138,6 +2393,8 @@ public final class ClusterTestModule {
                                 + movedCount
                                 + "§7 | pinned: §f"
                                 + pinnedCount
+                                + "§7 | migration: §f"
+                                + migratingCount
                                 + "§7 | активные пропущены: §f"
                                 + activeCount
                                 + "§7 | конфликты: §f"
@@ -2170,6 +2427,10 @@ public final class ClusterTestModule {
                         + " -> §f"
                         + entry.targetNodeId();
                 case SKIP_PINNED -> "§6PINNED §f"
+                        + entry.dimensionId()
+                        + " §7-> §f"
+                        + entry.targetNodeId();
+                case SKIP_MIGRATING -> "§dMIGRATION §f"
                         + entry.dimensionId()
                         + " §7-> §f"
                         + entry.targetNodeId();
@@ -2405,6 +2666,464 @@ public final class ClusterTestModule {
             }
         });
 
+        return 1;
+    }
+
+    private int prepareDimensionMigration(
+            CommandSourceStack source,
+            String dimensionId,
+            String targetNode
+    ) {
+        ClusterConfig currentConfig = config;
+
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКластер выключен или конфиг ещё не загружен."
+                    )
+            );
+            return 0;
+        }
+
+        Path stagingPath = currentConfig.dimensionMigrationStagingPath();
+        if (stagingPath == null) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cВ конфиге не указан dimension_migration_staging_path."
+                    )
+            );
+            return 0;
+        }
+
+        ResourceLocation parsedDimension = ResourceLocation.tryParse(dimensionId);
+        if (parsedDimension == null) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cНекорректный dimension id: §f" + dimensionId
+                    )
+            );
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        String normalizedDimension = parsedDimension.toString();
+        ResourceKey<Level> dimensionKey = ResourceKey.create(
+                Registries.DIMENSION,
+                parsedDimension
+        );
+        ServerLevel level = server.getLevel(dimensionKey);
+
+        if (level == null) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cИзмерение не загружено на source node: §f"
+                                    + normalizedDimension
+                    )
+            );
+            return 0;
+        }
+
+        if (!level.players().isEmpty()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cВ измерении находятся игроки: §f"
+                                    + level.players().size()
+                    )
+            );
+            return 0;
+        }
+
+        try {
+            ClusterDimensionMigration.resolveDimensionPath(
+                    server,
+                    normalizedDimension
+            );
+        } catch (Exception exception) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cMigration недоступна: " + exception.getMessage()
+                    )
+            );
+            return 0;
+        }
+
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§eСоздаю migration для §f"
+                                + normalizedDimension
+                                + "§e: §f"
+                                + currentConfig.nodeId()
+                                + " §7-> §f"
+                                + targetNode
+                ),
+                false
+        );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+
+                ClusterDatabase.DimensionMigration migration =
+                        ClusterDatabase.requestDimensionMigration(
+                                latestConfig,
+                                normalizedDimension,
+                                targetNode
+                        );
+
+                server.execute(() -> startDimensionMigrationArchive(
+                        source,
+                        server,
+                        latestConfig,
+                        migration
+                ));
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to create dimension migration for {}",
+                        normalizedDimension,
+                        exception
+                );
+                server.execute(
+                        () -> source.sendFailure(
+                                Component.literal(
+                                        "§cНе удалось создать migration: "
+                                                + exception.getMessage()
+                                )
+                        )
+                );
+            }
+        });
+
+        return 1;
+    }
+
+    private void startDimensionMigrationArchive(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ClusterDatabase.DimensionMigration migration
+    ) {
+        ResourceLocation parsedDimension =
+                ResourceLocation.tryParse(migration.dimensionId());
+        if (parsedDimension == null) {
+            failDimensionMigration(
+                    source,
+                    server,
+                    currentConfig,
+                    migration,
+                    "Некорректный dimension id"
+            );
+            return;
+        }
+
+        ServerLevel level = server.getLevel(
+                ResourceKey.create(
+                        Registries.DIMENSION,
+                        parsedDimension
+                )
+        );
+
+        if (level == null || !level.players().isEmpty()) {
+            failDimensionMigration(
+                    source,
+                    server,
+                    currentConfig,
+                    migration,
+                    level == null
+                            ? "Измерение не загружено"
+                            : "В измерении появились игроки"
+            );
+            return;
+        }
+
+        addMigrationFreeze(migration.dimensionId());
+
+        boolean saved;
+        try {
+            saved = server.saveEverything(true, true, true);
+        } catch (Exception exception) {
+            failDimensionMigration(
+                    source,
+                    server,
+                    currentConfig,
+                    migration,
+                    "Ошибка сохранения мира: " + exception.getMessage()
+            );
+            return;
+        }
+
+        if (!saved) {
+            failDimensionMigration(
+                    source,
+                    server,
+                    currentConfig,
+                    migration,
+                    "MinecraftServer не подтвердил сохранение мира"
+            );
+            return;
+        }
+
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§eИзмерение заморожено и сохранено. Создаю архив..."
+                ),
+                false
+        );
+
+        MIGRATION_EXECUTOR.execute(() -> {
+            ClusterDimensionMigration.PreparedArchive archive = null;
+            try {
+                archive = ClusterDimensionMigration.createArchive(
+                        server,
+                        migration.dimensionId(),
+                        currentConfig.dimensionMigrationStagingPath(),
+                        migration.migrationId()
+                );
+
+                ClusterDatabase.DimensionMigration ready =
+                        ClusterDatabase.markDimensionMigrationReady(
+                                currentConfig,
+                                migration.migrationId(),
+                                archive.archiveName(),
+                                archive.archiveSha256(),
+                                archive.contentSha256(),
+                                archive.archiveSize()
+                        );
+
+                refreshDimensionMigrationFreeze(currentConfig);
+                ClusterDimensionMigration.PreparedArchive finalArchive = archive;
+                server.execute(() -> {
+                    source.sendSuccess(
+                            () -> Component.literal(
+                                    "§aMigration READY: §f"
+                                            + ready.migrationId()
+                                            + "§a, dimension: §f"
+                                            + ready.dimensionId()
+                                            + "§a, target: §f"
+                                            + ready.targetNode()
+                                            + "§a, files: §f"
+                                            + finalArchive.fileCount()
+                                            + "§a, archive: §f"
+                                            + finalArchive.archiveSize()
+                                            + " bytes"
+                            ),
+                            false
+                    );
+                    source.sendSuccess(
+                            () -> Component.literal(
+                                    "§eТеперь полностью перезапусти target node §f"
+                                            + ready.targetNode()
+                                            + "§e. Владелец изменится только после проверки архива."
+                            ),
+                            false
+                    );
+                });
+            } catch (Exception exception) {
+                if (archive != null) {
+                    try {
+                        ClusterDimensionMigration.deleteArchive(
+                                currentConfig.dimensionMigrationStagingPath(),
+                                archive.archiveName()
+                        );
+                    } catch (Exception ignored) {
+                    }
+                }
+                failDimensionMigration(
+                        source,
+                        server,
+                        currentConfig,
+                        migration,
+                        exception.getClass().getSimpleName()
+                                + ": "
+                                + exception.getMessage()
+                );
+            }
+        });
+    }
+
+    private void failDimensionMigration(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ClusterDatabase.DimensionMigration migration,
+            String error
+    ) {
+        MIGRATION_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.failDimensionMigration(
+                        currentConfig,
+                        migration.migrationId(),
+                        error
+                );
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to mark dimension migration {} as failed",
+                        migration.migrationId(),
+                        exception
+                );
+            }
+
+            removeMigrationFreeze(migration.dimensionId());
+            server.execute(
+                    () -> source.sendFailure(
+                            Component.literal(
+                                    "§cMigration "
+                                            + migration.migrationId()
+                                            + " завершилась ошибкой: "
+                                            + error
+                            )
+                    )
+            );
+        });
+    }
+
+    private int showDimensionMigrations(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКластер выключен или конфиг ещё не загружен."
+                    )
+            );
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.DimensionMigration> migrations =
+                        ClusterDatabase.listDimensionMigrations(
+                                currentConfig,
+                                20
+                        );
+
+                server.execute(() -> {
+                    if (migrations.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "§7Dimension migrations отсутствуют."
+                                ),
+                                false
+                        );
+                        return;
+                    }
+
+                    source.sendSuccess(
+                            () -> Component.literal(
+                                    "§6Последние dimension migrations:"
+                            ),
+                            false
+                    );
+
+                    for (ClusterDatabase.DimensionMigration migration
+                            : migrations) {
+                        String color = switch (migration.status()) {
+                            case "APPLIED" -> "§a";
+                            case "FAILED", "CANCELLED" -> "§c";
+                            case "READY" -> "§e";
+                            case "APPLYING" -> "§b";
+                            default -> "§6";
+                        };
+
+                        String error = migration.errorText() == null
+                                || migration.errorText().isBlank()
+                                ? ""
+                                : " §7| error: §c" + migration.errorText();
+
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        color
+                                                + migration.status()
+                                                + " §f"
+                                                + migration.migrationId()
+                                                + " §7| §f"
+                                                + migration.dimensionId()
+                                                + " §7| "
+                                                + migration.sourceNode()
+                                                + " -> "
+                                                + migration.targetNode()
+                                                + " §7| "
+                                                + migration.archiveSize()
+                                                + " bytes"
+                                                + error
+                                ),
+                                false
+                        );
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(
+                        () -> source.sendFailure(
+                                Component.literal(
+                                        "§cНе удалось получить migrations: "
+                                                + exception.getMessage()
+                                )
+                        )
+                );
+            }
+        });
+        return 1;
+    }
+
+    private int cancelDimensionMigration(
+            CommandSourceStack source,
+            String migrationId
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКластер выключен или конфиг ещё не загружен."
+                    )
+            );
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.DimensionMigration migration =
+                        ClusterDatabase.cancelDimensionMigration(
+                                currentConfig,
+                                migrationId
+                        );
+
+                try {
+                    ClusterDimensionMigration.deleteArchive(
+                            currentConfig.dimensionMigrationStagingPath(),
+                            migration.archiveName()
+                    );
+                } catch (Exception exception) {
+                    LOGGER.warn(
+                            "Unable to delete cancelled migration archive {}",
+                            migration.archiveName(),
+                            exception
+                    );
+                }
+
+                removeMigrationFreeze(migration.dimensionId());
+                server.execute(
+                        () -> source.sendSuccess(
+                                () -> Component.literal(
+                                        "§aMigration отменена: §f"
+                                                + migration.migrationId()
+                                ),
+                                false
+                        )
+                );
+            } catch (Exception exception) {
+                server.execute(
+                        () -> source.sendFailure(
+                                Component.literal(
+                                        "§cНе удалось отменить migration: "
+                                                + exception.getMessage()
+                                )
+                        )
+                );
+            }
+        });
         return 1;
     }
 
@@ -4071,6 +4790,149 @@ public final class ClusterTestModule {
         return 1;
     }
 
+    private void applyPendingDimensionMigrationAtStartup(
+            MinecraftServer server,
+            ClusterConfig currentConfig
+    ) throws Exception {
+        while (true) {
+            ClusterDatabase.DimensionMigration pending =
+                    ClusterDatabase.findPendingDimensionMigrationForTarget(
+                            currentConfig
+                    );
+
+            if (pending == null) {
+                return;
+            }
+
+            Path stagingPath = currentConfig.dimensionMigrationStagingPath();
+            if (stagingPath == null) {
+                throw new IllegalStateException(
+                        "Найдена migration "
+                                + pending.migrationId()
+                                + ", но dimension_migration_staging_path не настроен"
+                );
+            }
+
+            if (pending.archiveName() == null
+                    || pending.archiveSha256() == null
+                    || pending.contentSha256() == null
+                    || pending.archiveSize() <= 0) {
+                ClusterDatabase.failDimensionMigration(
+                        currentConfig,
+                        pending.migrationId(),
+                        "Запись migration не содержит корректных данных архива"
+                );
+                throw new IllegalStateException(
+                        "Migration "
+                                + pending.migrationId()
+                                + " не содержит корректных данных архива"
+                );
+            }
+
+            ClusterDatabase.DimensionMigration applying =
+                    ClusterDatabase.markDimensionMigrationApplying(
+                            currentConfig,
+                            pending.migrationId()
+                    );
+
+            ClusterDimensionMigration.AppliedArchive applied;
+            try {
+                applied = ClusterDimensionMigration.applyArchive(
+                        server,
+                        applying,
+                        stagingPath
+                );
+            } catch (Exception exception) {
+                try {
+                    ClusterDatabase.failDimensionMigration(
+                            currentConfig,
+                            applying.migrationId(),
+                            exception.getClass().getSimpleName()
+                                    + ": "
+                                    + exception.getMessage()
+                    );
+                } catch (Exception databaseException) {
+                    exception.addSuppressed(databaseException);
+                }
+                throw exception;
+            }
+
+            ClusterDatabase.DimensionMigration completed =
+                    ClusterDatabase.completeDimensionMigration(
+                            currentConfig,
+                            applying.migrationId()
+                    );
+
+            LOGGER.info(
+                    "Dimension migration applied before world load: migration={}, dimension={}, source={}, target={}, targetPath={}, backupPath={}, alreadyApplied={}",
+                    completed.migrationId(),
+                    completed.dimensionId(),
+                    completed.sourceNode(),
+                    completed.targetNode(),
+                    applied.targetPath(),
+                    applied.backupPath(),
+                    applied.alreadyApplied()
+            );
+
+            try {
+                ClusterDimensionMigration.deleteArchive(
+                        stagingPath,
+                        completed.archiveName()
+                );
+            } catch (Exception exception) {
+                LOGGER.warn(
+                        "Unable to delete applied migration archive {}",
+                        completed.archiveName(),
+                        exception
+                );
+            }
+        }
+    }
+
+    private void refreshDimensionMigrationFreeze(
+            ClusterConfig currentConfig
+    ) throws Exception {
+        DIMENSION_MIGRATION_FROZEN =
+                ClusterDatabase.listFrozenMigrationDimensions(
+                        currentConfig
+                );
+        DIMENSION_MIGRATION_BLOCKED =
+                ClusterDatabase.listActiveMigrationDimensions(
+                        currentConfig
+                );
+    }
+
+    private static void addMigrationFreeze(
+            String dimensionId
+    ) {
+        synchronized (ClusterTestModule.class) {
+            Set<String> dimensions =
+                    new TreeSet<>(DIMENSION_MIGRATION_FROZEN);
+            dimensions.add(dimensionId);
+            DIMENSION_MIGRATION_FROZEN = Set.copyOf(dimensions);
+            Set<String> blocked =
+                    new TreeSet<>(DIMENSION_MIGRATION_BLOCKED);
+            blocked.add(dimensionId);
+            DIMENSION_MIGRATION_BLOCKED = Set.copyOf(blocked);
+        }
+    }
+
+    private static void removeMigrationFreeze(
+            String dimensionId
+    ) {
+        synchronized (ClusterTestModule.class) {
+            Set<String> dimensions =
+                    new TreeSet<>(DIMENSION_MIGRATION_FROZEN);
+            dimensions.remove(dimensionId);
+            DIMENSION_MIGRATION_FROZEN = Set.copyOf(dimensions);
+            Set<String> blocked =
+                    new TreeSet<>(DIMENSION_MIGRATION_BLOCKED);
+            blocked.remove(dimensionId);
+            DIMENSION_MIGRATION_BLOCKED = Set.copyOf(blocked);
+            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(dimensionId);
+        }
+    }
+
     private void runTest(
             MinecraftServer server,
             boolean reportToOperators
@@ -4111,6 +4973,9 @@ public final class ClusterTestModule {
             );
 
             refreshDimensionOwnerCache(
+                    currentConfig
+            );
+            refreshDimensionMigrationFreeze(
                     currentConfig
             );
 
@@ -4312,6 +5177,8 @@ public final class ClusterTestModule {
             String state;
             if (!currentConfig.enabled()) {
                 state = "§eTICKING §7(cluster disabled)";
+            } else if (DIMENSION_MIGRATION_FROZEN.contains(dimensionId)) {
+                state = "§cFROZEN §7(migration)";
             } else if (!currentConfig.dimensionTickIsolation()) {
                 state = "§eTICKING §7(isolation disabled)";
             } else if (!level.players().isEmpty()) {
@@ -4398,6 +5265,10 @@ public final class ClusterTestModule {
                                 + currentConfig.playerBackupRetentionDays()
                                 + " days§7, dimension tick isolation: §f"
                                 + currentConfig.dimensionTickIsolation()
+                                + "§7, migration staging: §f"
+                                + (currentConfig.dimensionMigrationStagingPath() == null
+                                ? "not configured"
+                                : currentConfig.dimensionMigrationStagingPath())
                 ),
                 false
         );

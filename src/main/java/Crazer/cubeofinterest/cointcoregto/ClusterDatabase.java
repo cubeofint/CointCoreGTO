@@ -465,6 +465,12 @@ public final class ClusterDatabase {
                     );
                 }
 
+                if (hasActiveDimensionMigration(connection, dimensionId)) {
+                    throw new SQLException(
+                            "Dimension " + dimensionId + " находится в процессе migration"
+                    );
+                }
+
                 String previousNode =
                         findDimensionOwner(connection, dimensionId);
 
@@ -556,6 +562,12 @@ public final class ClusterDatabase {
                 lockClusterNodes(connection);
                 lockDimensionAssignments(connection);
                 lockDimensionActivity(connection);
+
+                if (hasActiveDimensionMigration(connection, dimensionId)) {
+                    throw new SQLException(
+                            "Dimension " + dimensionId + " находится в процессе migration"
+                    );
+                }
 
                 String existingOwner =
                         findDimensionOwner(connection, dimensionId);
@@ -722,6 +734,12 @@ public final class ClusterDatabase {
                     );
                 }
 
+                if (hasActiveDimensionMigration(connection, dimensionId)) {
+                    throw new SQLException(
+                            "Dimension " + dimensionId + " находится в процессе migration"
+                    );
+                }
+
                 DimensionAssignmentRow previous =
                         findDimensionAssignmentRow(
                                 connection,
@@ -812,6 +830,12 @@ public final class ClusterDatabase {
 
             try {
                 lockDimensionAssignments(connection);
+
+                if (hasActiveDimensionMigration(connection, dimensionId)) {
+                    throw new SQLException(
+                            "Dimension " + dimensionId + " находится в процессе migration"
+                    );
+                }
 
                 DimensionAssignmentRow previous =
                         findDimensionAssignmentRow(
@@ -1013,6 +1037,8 @@ public final class ClusterDatabase {
                                 connection,
                                 config.nodeTimeoutSeconds()
                         );
+                Set<String> migratingDimensions =
+                        loadActiveMigrationDimensions(connection);
 
                 List<DimensionPlanEntry> entries =
                         new ArrayList<>();
@@ -1043,7 +1069,9 @@ public final class ClusterDatabase {
                                             assignment,
                                             assignment.nodeId(),
                                             dimensionActivity,
-                                            DimensionPlanAction.KEEP
+                                            migratingDimensions.contains(dimensionId)
+                                                    ? DimensionPlanAction.SKIP_MIGRATING
+                                                    : DimensionPlanAction.KEEP
                                     )
                             );
                             continue;
@@ -1115,6 +1143,26 @@ public final class ClusterDatabase {
                                 assignments.get(dimensionId);
                         DimensionActivity dimensionActivity =
                                 activity.get(dimensionId);
+
+                        if (migratingDimensions.contains(dimensionId)) {
+                            if (assignment != null
+                                    && nodesById.containsKey(assignment.nodeId())) {
+                                assignedCounts.computeIfPresent(
+                                        assignment.nodeId(),
+                                        (ignored, count) -> count + 1
+                                );
+                            }
+                            entries.add(
+                                    createPlanEntry(
+                                            dimensionId,
+                                            assignment,
+                                            assignment == null ? null : assignment.nodeId(),
+                                            dimensionActivity,
+                                            DimensionPlanAction.SKIP_MIGRATING
+                                    )
+                            );
+                            continue;
+                        }
 
                         if (assignment != null && assignment.pinned()) {
                             if (nodesById.containsKey(
@@ -1342,6 +1390,563 @@ public final class ClusterDatabase {
         }
     }
 
+    public static DimensionMigration requestDimensionMigration(
+            ClusterConfig config,
+            String dimensionId,
+            String targetNode
+    ) throws SQLException {
+        if (dimensionId == null || dimensionId.isBlank()) {
+            throw new SQLException("Dimension id is empty");
+        }
+        if (targetNode == null || targetNode.isBlank()) {
+            throw new SQLException("Target node is empty");
+        }
+        if (targetNode.equalsIgnoreCase(config.nodeId())) {
+            throw new SQLException("Целевой узел совпадает с текущим узлом");
+        }
+
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                lockClusterNodes(connection);
+                lockDimensionAssignments(connection);
+                lockDimensionActivity(connection);
+
+                if (!isNodeOnline(
+                        connection,
+                        targetNode,
+                        config.nodeTimeoutSeconds()
+                )) {
+                    throw new SQLException(
+                            "Целевой узел " + targetNode + " не находится ONLINE"
+                    );
+                }
+
+                DimensionAssignmentRow assignment =
+                        findDimensionAssignmentRow(connection, dimensionId);
+
+                if (assignment == null) {
+                    throw new SQLException(
+                            "Для dimension " + dimensionId + " владелец не назначен"
+                    );
+                }
+
+                if (!assignment.nodeId().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException(
+                            "Dimension " + dimensionId
+                                    + " принадлежит узлу "
+                                    + assignment.nodeId()
+                                    + ", подготовка должна выполняться на владельце"
+                    );
+                }
+
+                DimensionActivity activity =
+                        loadDimensionActivity(
+                                connection,
+                                config.nodeTimeoutSeconds()
+                        ).get(dimensionId);
+
+                if (activity != null && activity.playerCount() > 0) {
+                    throw new SQLException(
+                            "Dimension " + dimensionId
+                                    + " содержит игроков на узлах "
+                                    + activity.nodeIds()
+                    );
+                }
+
+                DimensionMigration active =
+                        findActiveDimensionMigration(connection, dimensionId, true);
+
+                if (active != null) {
+                    throw new SQLException(
+                            "Для dimension " + dimensionId
+                                    + " уже выполняется migration "
+                                    + active.migrationId()
+                                    + " (" + active.status() + ")"
+                    );
+                }
+
+                String migrationId = UUID.randomUUID().toString();
+                String sql = """
+                        INSERT INTO cluster_dimension_migrations (
+                            migration_id,
+                            dimension_id,
+                            source_node,
+                            target_node,
+                            status,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (
+                            ?, ?, ?, ?, 'PREPARING',
+                            CURRENT_TIMESTAMP(3),
+                            CURRENT_TIMESTAMP(3)
+                        )
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(sql)) {
+                    statement.setString(1, migrationId);
+                    statement.setString(2, dimensionId);
+                    statement.setString(3, config.nodeId());
+                    statement.setString(4, targetNode);
+                    statement.executeUpdate();
+                }
+
+                connection.commit();
+
+                return new DimensionMigration(
+                        migrationId,
+                        dimensionId,
+                        config.nodeId(),
+                        targetNode,
+                        "PREPARING",
+                        null,
+                        null,
+                        null,
+                        0,
+                        null,
+                        Instant.now(),
+                        Instant.now(),
+                        null,
+                        null,
+                        null
+                );
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionMigration markDimensionMigrationReady(
+            ClusterConfig config,
+            String migrationId,
+            String archiveName,
+            String archiveSha256,
+            String contentSha256,
+            long archiveSize
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            String sql = """
+                    UPDATE cluster_dimension_migrations
+                    SET
+                        status = 'READY',
+                        archive_name = ?,
+                        archive_sha256 = ?,
+                        content_sha256 = ?,
+                        archive_size = ?,
+                        error_text = NULL,
+                        ready_at = CURRENT_TIMESTAMP(3),
+                        updated_at = CURRENT_TIMESTAMP(3)
+                    WHERE migration_id = ?
+                      AND source_node = ?
+                      AND status = 'PREPARING'
+                    """;
+
+            try (PreparedStatement statement =
+                         connection.prepareStatement(sql)) {
+                statement.setString(1, archiveName);
+                statement.setString(2, archiveSha256);
+                statement.setString(3, contentSha256);
+                statement.setLong(4, archiveSize);
+                statement.setString(5, migrationId);
+                statement.setString(6, config.nodeId());
+
+                if (statement.executeUpdate() != 1) {
+                    throw new SQLException(
+                            "Не удалось перевести migration "
+                                    + migrationId
+                                    + " в READY"
+                    );
+                }
+            }
+        }
+
+        return findDimensionMigration(config, migrationId);
+    }
+
+    public static DimensionMigration findPendingDimensionMigrationForTarget(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            String sql = """
+                    SELECT
+                        migration_id,
+                        dimension_id,
+                        source_node,
+                        target_node,
+                        status,
+                        archive_name,
+                        archive_sha256,
+                        content_sha256,
+                        archive_size,
+                        error_text,
+                        created_at,
+                        updated_at,
+                        ready_at,
+                        applying_at,
+                        applied_at
+                    FROM cluster_dimension_migrations
+                    WHERE target_node = ?
+                      AND status IN ('READY', 'APPLYING')
+                    ORDER BY created_at
+                    LIMIT 1
+                    """;
+
+            try (PreparedStatement statement =
+                         connection.prepareStatement(sql)) {
+                statement.setString(1, config.nodeId());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    if (!resultSet.next()) {
+                        return null;
+                    }
+                    return readDimensionMigration(resultSet);
+                }
+            }
+        }
+    }
+
+    public static DimensionMigration markDimensionMigrationApplying(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            String sql = """
+                    UPDATE cluster_dimension_migrations
+                    SET
+                        status = 'APPLYING',
+                        applying_at = COALESCE(
+                            applying_at,
+                            CURRENT_TIMESTAMP(3)
+                        ),
+                        updated_at = CURRENT_TIMESTAMP(3)
+                    WHERE migration_id = ?
+                      AND target_node = ?
+                      AND status IN ('READY', 'APPLYING')
+                    """;
+
+            try (PreparedStatement statement =
+                         connection.prepareStatement(sql)) {
+                statement.setString(1, migrationId);
+                statement.setString(2, config.nodeId());
+                if (statement.executeUpdate() != 1) {
+                    throw new SQLException(
+                            "Не удалось захватить migration " + migrationId
+                    );
+                }
+            }
+        }
+
+        return findDimensionMigration(config, migrationId);
+    }
+
+    public static DimensionMigration completeDimensionMigration(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                DimensionMigration migration =
+                        findDimensionMigration(connection, migrationId, true);
+
+                if (migration == null) {
+                    throw new SQLException("Migration не найден: " + migrationId);
+                }
+
+                if (!migration.targetNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException(
+                            "Migration " + migrationId
+                                    + " предназначен для узла "
+                                    + migration.targetNode()
+                    );
+                }
+
+                if (!migration.status().equals("APPLYING")) {
+                    throw new SQLException(
+                            "Migration " + migrationId
+                                    + " имеет status="
+                                    + migration.status()
+                    );
+                }
+
+                String assignmentSql = """
+                        UPDATE dimension_assignments
+                        SET
+                            node_id = ?,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE dimension_id = ?
+                          AND node_id = ?
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(assignmentSql)) {
+                    statement.setString(1, migration.targetNode());
+                    statement.setString(2, migration.dimensionId());
+                    statement.setString(3, migration.sourceNode());
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException(
+                                "Владелец dimension "
+                                        + migration.dimensionId()
+                                        + " изменился во время migration"
+                        );
+                    }
+                }
+
+                String migrationSql = """
+                        UPDATE cluster_dimension_migrations
+                        SET
+                            status = 'APPLIED',
+                            error_text = NULL,
+                            applied_at = CURRENT_TIMESTAMP(3),
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ?
+                          AND status = 'APPLYING'
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(migrationSql)) {
+                    statement.setString(1, migrationId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException(
+                                "Не удалось завершить migration " + migrationId
+                        );
+                    }
+                }
+
+                connection.commit();
+                return findDimensionMigration(config, migrationId);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static void failDimensionMigration(
+            ClusterConfig config,
+            String migrationId,
+            String errorText
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            String sql = """
+                    UPDATE cluster_dimension_migrations
+                    SET
+                        status = 'FAILED',
+                        error_text = ?,
+                        updated_at = CURRENT_TIMESTAMP(3)
+                    WHERE migration_id = ?
+                      AND status IN ('PREPARING', 'READY', 'APPLYING')
+                    """;
+
+            try (PreparedStatement statement =
+                         connection.prepareStatement(sql)) {
+                statement.setString(1, truncate(errorText, 4000));
+                statement.setString(2, migrationId);
+                statement.executeUpdate();
+            }
+        }
+    }
+
+    public static DimensionMigration cancelDimensionMigration(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                DimensionMigration migration =
+                        findDimensionMigration(connection, migrationId, true);
+
+                if (migration == null) {
+                    throw new SQLException("Migration не найден: " + migrationId);
+                }
+
+                if (!migration.sourceNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException(
+                            "Migration можно отменить только на source node "
+                                    + migration.sourceNode()
+                    );
+                }
+
+                if (!migration.status().equals("PREPARING")
+                        && !migration.status().equals("READY")
+                        && !migration.status().equals("FAILED")) {
+                    throw new SQLException(
+                            "Migration со status="
+                                    + migration.status()
+                                    + " нельзя отменить"
+                    );
+                }
+
+                String sql = """
+                        UPDATE cluster_dimension_migrations
+                        SET
+                            status = 'CANCELLED',
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ?
+                          AND status IN ('PREPARING', 'READY', 'FAILED')
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(sql)) {
+                    statement.setString(1, migrationId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException(
+                                "Не удалось отменить migration " + migrationId
+                        );
+                    }
+                }
+
+                connection.commit();
+                return findDimensionMigration(config, migrationId);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionMigration findDimensionMigration(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            return findDimensionMigration(connection, migrationId, false);
+        }
+    }
+
+    public static List<DimensionMigration> listDimensionMigrations(
+            ClusterConfig config,
+            int limit
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeLimit = Math.max(1, Math.min(limit, 100));
+
+        try (Connection connection = open(config)) {
+            String sql = """
+                    SELECT
+                        migration_id,
+                        dimension_id,
+                        source_node,
+                        target_node,
+                        status,
+                        archive_name,
+                        archive_sha256,
+                        content_sha256,
+                        archive_size,
+                        error_text,
+                        created_at,
+                        updated_at,
+                        ready_at,
+                        applying_at,
+                        applied_at
+                    FROM cluster_dimension_migrations
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """;
+
+            List<DimensionMigration> migrations = new ArrayList<>();
+            try (PreparedStatement statement =
+                         connection.prepareStatement(sql)) {
+                statement.setInt(1, safeLimit);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        migrations.add(readDimensionMigration(resultSet));
+                    }
+                }
+            }
+            return List.copyOf(migrations);
+        }
+    }
+
+    public static Set<String> listFrozenMigrationDimensions(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            String sql = """
+                    SELECT migrations.dimension_id
+                    FROM cluster_dimension_migrations AS migrations
+                    INNER JOIN dimension_assignments AS assignments
+                        ON assignments.dimension_id = migrations.dimension_id
+                    WHERE migrations.source_node = ?
+                      AND (
+                            migrations.status IN ('PREPARING', 'READY', 'APPLYING')
+                         OR (
+                                migrations.status = 'APPLIED'
+                            AND assignments.node_id <> ?
+                         )
+                      )
+                    ORDER BY migrations.dimension_id
+                    """;
+
+            Set<String> dimensions = new TreeSet<>();
+            try (PreparedStatement statement =
+                         connection.prepareStatement(sql)) {
+                statement.setString(1, config.nodeId());
+                statement.setString(2, config.nodeId());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        dimensions.add(resultSet.getString("dimension_id"));
+                    }
+                }
+            }
+            return Set.copyOf(dimensions);
+        }
+    }
+
+    public static Set<String> listActiveMigrationDimensions(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            String sql = """
+                    SELECT DISTINCT dimension_id
+                    FROM cluster_dimension_migrations
+                    WHERE status IN ('PREPARING', 'READY', 'APPLYING')
+                    ORDER BY dimension_id
+                    """;
+
+            Set<String> dimensions = new TreeSet<>();
+            try (PreparedStatement statement =
+                         connection.prepareStatement(sql);
+                 ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    dimensions.add(resultSet.getString("dimension_id"));
+                }
+            }
+            return Set.copyOf(dimensions);
+        }
+    }
+
     public static CreatedTransfer createTransfer(
             ClusterConfig config,
             UUID playerUuid,
@@ -1397,6 +2002,13 @@ public final class ClusterDatabase {
                                     + " сейчас OFFLINE: heartbeat старше "
                                     + config.nodeTimeoutSeconds()
                                     + " секунд или узел штатно остановлен"
+                    );
+                }
+
+                if (hasActiveDimensionMigration(connection, dimensionId)) {
+                    throw new SQLException(
+                            "Dimension " + dimensionId
+                                    + " временно недоступен: выполняется migration"
                     );
                 }
 
@@ -2552,6 +3164,159 @@ public final class ClusterDatabase {
 
 
 
+    private static Set<String> loadActiveMigrationDimensions(
+            Connection connection
+    ) throws SQLException {
+        String sql = """
+                SELECT dimension_id
+                FROM cluster_dimension_migrations
+                WHERE status IN ('PREPARING', 'READY', 'APPLYING')
+                ORDER BY dimension_id
+                """;
+
+        Set<String> dimensions = new TreeSet<>();
+        try (PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            while (resultSet.next()) {
+                dimensions.add(resultSet.getString("dimension_id"));
+            }
+        }
+        return Set.copyOf(dimensions);
+    }
+
+    private static DimensionMigration findDimensionMigration(
+            Connection connection,
+            String migrationId,
+            boolean forUpdate
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    migration_id,
+                    dimension_id,
+                    source_node,
+                    target_node,
+                    status,
+                    archive_name,
+                    archive_sha256,
+                    content_sha256,
+                    archive_size,
+                    error_text,
+                    created_at,
+                    updated_at,
+                    ready_at,
+                    applying_at,
+                    applied_at
+                FROM cluster_dimension_migrations
+                WHERE migration_id = ?
+                """ + (forUpdate ? " FOR UPDATE" : "");
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, migrationId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return null;
+                }
+                return readDimensionMigration(resultSet);
+            }
+        }
+    }
+
+    private static DimensionMigration findActiveDimensionMigration(
+            Connection connection,
+            String dimensionId,
+            boolean forUpdate
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    migration_id,
+                    dimension_id,
+                    source_node,
+                    target_node,
+                    status,
+                    archive_name,
+                    archive_sha256,
+                    content_sha256,
+                    archive_size,
+                    error_text,
+                    created_at,
+                    updated_at,
+                    ready_at,
+                    applying_at,
+                    applied_at
+                FROM cluster_dimension_migrations
+                WHERE dimension_id = ?
+                  AND status IN ('PREPARING', 'READY', 'APPLYING')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """ + (forUpdate ? " FOR UPDATE" : "");
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, dimensionId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return null;
+                }
+                return readDimensionMigration(resultSet);
+            }
+        }
+    }
+
+    private static boolean hasActiveDimensionMigration(
+            Connection connection,
+            String dimensionId
+    ) throws SQLException {
+        return findActiveDimensionMigration(
+                connection,
+                dimensionId,
+                false
+        ) != null;
+    }
+
+    private static DimensionMigration readDimensionMigration(
+            ResultSet resultSet
+    ) throws SQLException {
+        return new DimensionMigration(
+                resultSet.getString("migration_id"),
+                resultSet.getString("dimension_id"),
+                resultSet.getString("source_node"),
+                resultSet.getString("target_node"),
+                resultSet.getString("status"),
+                resultSet.getString("archive_name"),
+                resultSet.getString("archive_sha256"),
+                resultSet.getString("content_sha256"),
+                resultSet.getLong("archive_size"),
+                resultSet.getString("error_text"),
+                instantOrNull(resultSet, "created_at"),
+                instantOrNull(resultSet, "updated_at"),
+                instantOrNull(resultSet, "ready_at"),
+                instantOrNull(resultSet, "applying_at"),
+                instantOrNull(resultSet, "applied_at")
+        );
+    }
+
+    private static Instant instantOrNull(
+            ResultSet resultSet,
+            String column
+    ) throws SQLException {
+        java.sql.Timestamp value = resultSet.getTimestamp(column);
+        return value == null ? null : value.toInstant();
+    }
+
+    private static String truncate(
+            String value,
+            int maxLength
+    ) {
+        if (value == null) {
+            return null;
+        }
+        if (value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength);
+    }
+
     private static Connection open(
             ClusterConfig config
     ) throws SQLException {
@@ -2689,6 +3454,45 @@ public final class ClusterDatabase {
 
                     INDEX idx_dimension_activity_seen (
                         last_seen
+                    )
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_dimension_migrations (
+                    migration_id CHAR(36) NOT NULL PRIMARY KEY,
+                    dimension_id VARCHAR(255) NOT NULL,
+                    source_node VARCHAR(64) NOT NULL,
+                    target_node VARCHAR(64) NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    archive_name VARCHAR(255) NULL,
+                    archive_sha256 CHAR(64) NULL,
+                    content_sha256 CHAR(64) NULL,
+                    archive_size BIGINT NOT NULL DEFAULT 0,
+                    error_text TEXT NULL,
+                    created_at TIMESTAMP(3) NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP(3),
+                    updated_at TIMESTAMP(3) NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP(3),
+                    ready_at TIMESTAMP(3) NULL,
+                    applying_at TIMESTAMP(3) NULL,
+                    applied_at TIMESTAMP(3) NULL,
+
+                    INDEX idx_dimension_migration_dimension_status (
+                        dimension_id,
+                        status
+                    ),
+
+                    INDEX idx_dimension_migration_target_status (
+                        target_node,
+                        status
+                    ),
+
+                    INDEX idx_dimension_migration_source_status (
+                        source_node,
+                        status
                     )
                 )
                 ENGINE=InnoDB
@@ -3152,6 +3956,12 @@ public final class ClusterDatabase {
                 LEFT JOIN cluster_nodes AS nodes
                     ON nodes.node_id = assignments.node_id
                 WHERE assignments.pinned = 0
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM cluster_dimension_migrations AS migrations
+                        WHERE migrations.dimension_id = assignments.dimension_id
+                          AND migrations.status IN ('PREPARING', 'READY', 'APPLYING')
+                  )
                   AND (nodes.node_id IS NULL
                    OR nodes.stopped_at IS NOT NULL
                    OR nodes.last_seen < TIMESTAMPADD(
@@ -3864,6 +4674,7 @@ public final class ClusterDatabase {
         ASSIGN,
         MOVE,
         SKIP_PINNED,
+        SKIP_MIGRATING,
         SKIP_ACTIVE,
         CONFLICT_ACTIVE
     }
@@ -3893,6 +4704,25 @@ public final class ClusterDatabase {
             List<DimensionPlanEntry> entries,
             List<PlanningNodeStatus> nodes,
             Instant createdAt
+    ) {
+    }
+
+    public record DimensionMigration(
+            String migrationId,
+            String dimensionId,
+            String sourceNode,
+            String targetNode,
+            String status,
+            String archiveName,
+            String archiveSha256,
+            String contentSha256,
+            long archiveSize,
+            String errorText,
+            Instant createdAt,
+            Instant updatedAt,
+            Instant readyAt,
+            Instant applyingAt,
+            Instant appliedAt
     ) {
     }
 

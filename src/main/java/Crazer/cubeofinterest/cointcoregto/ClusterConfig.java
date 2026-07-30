@@ -32,6 +32,7 @@ public final class ClusterConfig {
     private final int maxPlayerDataBytes;
     private final boolean syncForgeCapabilities;
     private final boolean dimensionTickIsolation;
+    private final Path dimensionMigrationStagingPath;
 
     private ClusterConfig(
             boolean enabled,
@@ -52,7 +53,8 @@ public final class ClusterConfig {
             boolean syncPlayerData,
             int maxPlayerDataBytes,
             boolean syncForgeCapabilities,
-            boolean dimensionTickIsolation
+            boolean dimensionTickIsolation,
+            Path dimensionMigrationStagingPath
     ) {
         this.enabled = enabled;
         this.nodeId = nodeId;
@@ -73,6 +75,7 @@ public final class ClusterConfig {
         this.maxPlayerDataBytes = maxPlayerDataBytes;
         this.syncForgeCapabilities = syncForgeCapabilities;
         this.dimensionTickIsolation = dimensionTickIsolation;
+        this.dimensionMigrationStagingPath = dimensionMigrationStagingPath;
     }
 
     public static ClusterConfig load() throws IOException {
@@ -131,7 +134,8 @@ public final class ClusterConfig {
                                 "dimension_tick_isolation",
                                 "false"
                         ).trim()
-                )
+                ),
+                optionalPath(properties, "dimension_migration_staging_path")
         );
     }
 
@@ -160,6 +164,29 @@ public final class ClusterConfig {
                             + key
                             + "="
                             + rawValue,
+                    exception
+            );
+        }
+    }
+
+
+    private static Path optionalPath(
+            Properties properties,
+            String key
+    ) throws IOException {
+        String value = properties.getProperty(key, "").trim();
+        if (value.isEmpty()) {
+            return null;
+        }
+
+        try {
+            return Path.of(value).toAbsolutePath().normalize();
+        } catch (Exception exception) {
+            throw new IOException(
+                    "Cluster config property contains an invalid path: "
+                            + key
+                            + "="
+                            + value,
                     exception
             );
         }
@@ -243,6 +270,10 @@ public final class ClusterConfig {
         defaults.setProperty(
                 "dimension_tick_isolation",
                 "false"
+        );
+        defaults.setProperty(
+                "dimension_migration_staging_path",
+                ""
         );
 
         try (OutputStream output = Files.newOutputStream(CONFIG_PATH)) {
@@ -328,5 +359,9 @@ public final class ClusterConfig {
 
     public boolean dimensionTickIsolation() {
         return dimensionTickIsolation;
+    }
+
+    public Path dimensionMigrationStagingPath() {
+        return dimensionMigrationStagingPath;
     }
 }
