@@ -28,6 +28,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -48,8 +49,15 @@ public final class ClusterTestModule {
     private static final AtomicBoolean HEARTBEAT_IN_FLIGHT =
             new AtomicBoolean();
 
+    private static final AtomicBoolean DIMENSION_TICK_GUARD_ACTIVE =
+            new AtomicBoolean();
+
     private static volatile Map<String, String>
             DIMENSION_OWNER_CACHE = Map.of();
+
+    private static final Set<String>
+            DIMENSION_TICK_SUPPRESSION_LOGGED =
+            ConcurrentHashMap.newKeySet();
 
     private static final ConcurrentMap<UUID, DimensionRouteSuppression>
             DIMENSION_ROUTE_SUPPRESSIONS = new ConcurrentHashMap<>();
@@ -90,6 +98,71 @@ public final class ClusterTestModule {
         }
     }
 
+    public static void markDimensionTickGuardActive() {
+        DIMENSION_TICK_GUARD_ACTIVE.set(true);
+    }
+
+    public static boolean shouldSkipDimensionTick(
+            ServerLevel level
+    ) {
+        return INSTANCE.isDimensionTickSuppressed(level);
+    }
+
+    private boolean isDimensionTickSuppressed(
+            ServerLevel level
+    ) {
+        ClusterConfig currentConfig = config;
+
+        if (level == null
+                || currentConfig == null
+                || !currentConfig.enabled()
+                || !currentConfig.dimensionTickIsolation()) {
+            return false;
+        }
+
+        String dimensionId =
+                level.dimension().location().toString();
+
+        String ownerNode =
+                DIMENSION_OWNER_CACHE.get(dimensionId);
+
+        if (!level.players().isEmpty()) {
+            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(
+                    dimensionId
+            );
+            return false;
+        }
+        if (ownerNode == null || ownerNode.isBlank()) {
+            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(
+                    dimensionId
+            );
+            return false;
+        }
+
+        boolean suppressed =
+                !ownerNode.equalsIgnoreCase(
+                        currentConfig.nodeId()
+                );
+
+        if (suppressed) {
+            if (DIMENSION_TICK_SUPPRESSION_LOGGED.add(
+                    dimensionId
+            )) {
+                LOGGER.info(
+                        "Dimension tick isolation enabled: freezing {} on node {} because owner is {}",
+                        dimensionId,
+                        currentConfig.nodeId(),
+                        ownerNode
+                );
+            }
+        } else {
+            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(
+                    dimensionId
+            );
+        }
+
+        return suppressed;
+    }
     public static boolean routeFtbEssentialsTeleport(
             ServerPlayer player,
             ResourceKey<Level> dimension,
@@ -442,6 +515,8 @@ public final class ClusterTestModule {
         heartbeatTickCounter = 0;
         DIMENSION_OWNER_CACHE = Map.of();
         DIMENSION_ROUTE_SUPPRESSIONS.clear();
+        DIMENSION_TICK_SUPPRESSION_LOGGED.clear();
+        DIMENSION_TICK_GUARD_ACTIVE.set(false);
         ClusterTransferGuard.clearAll();
     }
 
@@ -495,6 +570,15 @@ public final class ClusterTestModule {
 
                                             return 1;
                                         })
+                        )
+
+                        .then(
+                                Commands.literal("tickstatus")
+                                        .executes(context ->
+                                                showDimensionTickStatus(
+                                                        context.getSource()
+                                                )
+                                        )
                         )
 
                         .then(
@@ -2889,6 +2973,7 @@ public final class ClusterTestModule {
                     transfer.pitch()
             );
             server.getPlayerList().saveAll();
+
             LOGGER.info(
                     "Applied transfer {} for player {} on node {}, playerDataPresent={}, playerDataApplied={}, playerDataAlreadyApplied={}, playerDataSize={}",
                     transfer.transferId(),
@@ -3430,6 +3515,93 @@ public final class ClusterTestModule {
         return 1;
     }
 
+    private int showDimensionTickStatus(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+
+        if (currentConfig == null) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКонфиг кластера ещё не загружен."
+                    )
+            );
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§6Изоляция тиков измерений: §f"
+                                + currentConfig.dimensionTickIsolation()
+                                + "§7 | mixin active: §f"
+                                + DIMENSION_TICK_GUARD_ACTIVE.get()
+                                + "§7 | узел: §f"
+                                + currentConfig.nodeId()
+                                + "§7 | неизвестный владелец: §aTICKING (fail-open)"
+                ),
+                false
+        );
+
+        int loadedDimensions = 0;
+
+        for (ServerLevel level : server.getAllLevels()) {
+            loadedDimensions++;
+
+            String dimensionId =
+                    level.dimension().location().toString();
+
+            String ownerNode =
+                    DIMENSION_OWNER_CACHE.get(dimensionId);
+
+            boolean suppressed =
+                    isDimensionTickSuppressed(level);
+
+            String state;
+            if (!currentConfig.enabled()) {
+                state = "§eTICKING §7(cluster disabled)";
+            } else if (!currentConfig.dimensionTickIsolation()) {
+                state = "§eTICKING §7(isolation disabled)";
+            } else if (!level.players().isEmpty()) {
+                state = "§eTICKING §7(players present)";
+            } else if (ownerNode == null || ownerNode.isBlank()) {
+                state = "§eTICKING §7(owner unknown)";
+            } else if (suppressed) {
+                state = "§cFROZEN";
+            } else {
+                state = "§aTICKING";
+            }
+
+            String ownerDisplay = ownerNode == null
+                    || ownerNode.isBlank()
+                    ? "§7unknown"
+                    : "§f" + ownerNode;
+
+            source.sendSuccess(
+                    () -> Component.literal(
+                            state
+                                    + " §f"
+                                    + dimensionId
+                                    + "§7 | owner: "
+                                    + ownerDisplay
+                    ),
+                    false
+            );
+        }
+
+        final int loadedCount = loadedDimensions;
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§7Загружено измерений: §f"
+                                + loadedCount
+                ),
+                false
+        );
+
+        return 1;
+    }
+
     private void sendStatus(
             CommandSourceStack source
     ) {
@@ -3473,7 +3645,8 @@ public final class ClusterTestModule {
                                 + currentConfig.transferLockTimeoutSeconds()
                                 + "s§7, backup retention: §f"
                                 + currentConfig.playerBackupRetentionDays()
-                                + " days"
+                                + " days§7, dimension tick isolation: §f"
+                                + currentConfig.dimensionTickIsolation()
                 ),
                 false
         );

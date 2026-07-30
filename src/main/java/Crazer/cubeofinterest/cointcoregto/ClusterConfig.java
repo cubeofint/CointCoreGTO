@@ -31,6 +31,7 @@ public final class ClusterConfig {
     private final boolean syncPlayerData;
     private final int maxPlayerDataBytes;
     private final boolean syncForgeCapabilities;
+    private final boolean dimensionTickIsolation;
 
     private ClusterConfig(
             boolean enabled,
@@ -50,7 +51,8 @@ public final class ClusterConfig {
             boolean failClosedRouting,
             boolean syncPlayerData,
             int maxPlayerDataBytes,
-            boolean syncForgeCapabilities
+            boolean syncForgeCapabilities,
+            boolean dimensionTickIsolation
     ) {
         this.enabled = enabled;
         this.nodeId = nodeId;
@@ -70,6 +72,7 @@ public final class ClusterConfig {
         this.syncPlayerData = syncPlayerData;
         this.maxPlayerDataBytes = maxPlayerDataBytes;
         this.syncForgeCapabilities = syncForgeCapabilities;
+        this.dimensionTickIsolation = dimensionTickIsolation;
     }
 
     public static ClusterConfig load() throws IOException {
@@ -121,6 +124,12 @@ public final class ClusterConfig {
                         properties.getProperty(
                                 "sync_forge_capabilities",
                                 "true"
+                        ).trim()
+                ),
+                Boolean.parseBoolean(
+                        properties.getProperty(
+                                "dimension_tick_isolation",
+                                "false"
                         ).trim()
                 )
         );
@@ -231,6 +240,10 @@ public final class ClusterConfig {
                 "sync_forge_capabilities",
                 "true"
         );
+        defaults.setProperty(
+                "dimension_tick_isolation",
+                "false"
+        );
 
         try (OutputStream output = Files.newOutputStream(CONFIG_PATH)) {
             defaults.store(output, "CointCoreGTO local cluster test configuration");
@@ -311,5 +324,9 @@ public final class ClusterConfig {
 
     public boolean syncForgeCapabilities() {
         return syncForgeCapabilities;
+    }
+
+    public boolean dimensionTickIsolation() {
+        return dimensionTickIsolation;
     }
 }
