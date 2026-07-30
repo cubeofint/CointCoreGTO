@@ -2180,6 +2180,447 @@ public final class ClusterDatabase {
             statement.executeUpdate();
         }
     }
+    public static List<String> listOfflineDimensionOwnerNodes(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT DISTINCT assignments.node_id
+                     FROM dimension_assignments AS assignments
+                     LEFT JOIN cluster_nodes AS nodes ON nodes.node_id = assignments.node_id
+                     WHERE nodes.node_id IS NULL
+                        OR nodes.stopped_at IS NOT NULL
+                        OR nodes.last_seen < TIMESTAMPADD(SECOND, -?, CURRENT_TIMESTAMP(3))
+                     ORDER BY assignments.node_id
+                     """)) {
+            statement.setInt(1, Math.max(1, config.nodeTimeoutSeconds()));
+            List<String> nodes = new ArrayList<>();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    nodes.add(resultSet.getString(1));
+                }
+            }
+            return List.copyOf(nodes);
+        }
+    }
+
+    public static DimensionSnapshot requestDimensionSnapshot(
+            ClusterConfig config,
+            String dimensionId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                lockDimensionAssignments(connection);
+                String owner = findDimensionOwner(connection, dimensionId);
+                if (owner == null) {
+                    throw new SQLException("У dimension нет владельца: " + dimensionId);
+                }
+                if (!owner.equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException("Dimension принадлежит узлу " + owner);
+                }
+                if (hasActiveDimensionMigration(connection, dimensionId)) {
+                    throw new SQLException("Для dimension уже выполняется migration");
+                }
+                if (hasActiveDimensionFailover(connection, dimensionId)) {
+                    throw new SQLException("Для dimension уже выполняется failover");
+                }
+                if (hasActiveDimensionPlayers(connection, dimensionId, config.nodeTimeoutSeconds())) {
+                    throw new SQLException("В dimension находятся игроки");
+                }
+                String snapshotId = UUID.randomUUID().toString();
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        INSERT INTO cluster_dimension_snapshots (
+                            snapshot_id, dimension_id, source_node, status
+                        ) VALUES (?, ?, ?, 'PREPARING')
+                        """)) {
+                    statement.setString(1, snapshotId);
+                    statement.setString(2, dimensionId);
+                    statement.setString(3, config.nodeId());
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                return findDimensionSnapshot(config, snapshotId);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionSnapshot markDimensionSnapshotReady(
+            ClusterConfig config,
+            String snapshotId,
+            String archiveName,
+            String archiveSha256,
+            String contentSha256,
+            long archiveSize
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_dimension_snapshots
+                     SET status = 'READY', archive_name = ?, archive_sha256 = ?,
+                         content_sha256 = ?, archive_size = ?, error_text = NULL,
+                         ready_at = CURRENT_TIMESTAMP(3), updated_at = CURRENT_TIMESTAMP(3)
+                     WHERE snapshot_id = ? AND source_node = ? AND status = 'PREPARING'
+                     """)) {
+            statement.setString(1, archiveName);
+            statement.setString(2, archiveSha256);
+            statement.setString(3, contentSha256);
+            statement.setLong(4, archiveSize);
+            statement.setString(5, snapshotId);
+            statement.setString(6, config.nodeId());
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("Не удалось завершить snapshot " + snapshotId);
+            }
+        }
+        return findDimensionSnapshot(config, snapshotId);
+    }
+
+    public static void failDimensionSnapshot(
+            ClusterConfig config,
+            String snapshotId,
+            String errorText
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_dimension_snapshots
+                     SET status = 'FAILED', error_text = ?, updated_at = CURRENT_TIMESTAMP(3)
+                     WHERE snapshot_id = ? AND status = 'PREPARING'
+                     """)) {
+            statement.setString(1, truncate(errorText, 8000));
+            statement.setString(2, snapshotId);
+            statement.executeUpdate();
+        }
+    }
+
+    public static DimensionSnapshot findDimensionSnapshot(
+            ClusterConfig config,
+            String snapshotId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            return findDimensionSnapshot(connection, snapshotId, false);
+        }
+    }
+
+    public static List<DimensionSnapshot> listDimensionSnapshots(
+            ClusterConfig config,
+            int limit
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT snapshot_id, dimension_id, source_node, status,
+                            archive_name, archive_sha256, content_sha256, archive_size,
+                            error_text, created_at, updated_at, ready_at
+                     FROM cluster_dimension_snapshots
+                     ORDER BY created_at DESC
+                     LIMIT ?
+                     """)) {
+            statement.setInt(1, safeLimit);
+            List<DimensionSnapshot> snapshots = new ArrayList<>();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    snapshots.add(readDimensionSnapshot(resultSet));
+                }
+            }
+            return List.copyOf(snapshots);
+        }
+    }
+
+    public static List<FailoverPreviewEntry> previewDimensionFailover(
+            ClusterConfig config,
+            String sourceNode
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            if (isNodeOnline(connection, sourceNode, config.nodeTimeoutSeconds())) {
+                throw new SQLException("Узел " + sourceNode + " находится ONLINE");
+            }
+            List<String> dimensions = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT dimension_id
+                    FROM dimension_assignments
+                    WHERE node_id = ?
+                    ORDER BY dimension_id
+                    """)) {
+                statement.setString(1, sourceNode);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        dimensions.add(resultSet.getString("dimension_id"));
+                    }
+                }
+            }
+            List<FailoverPreviewEntry> entries = new ArrayList<>();
+            for (String dimensionId : dimensions) {
+                DimensionSnapshot snapshot = findLatestReadyDimensionSnapshot(
+                        connection,
+                        dimensionId,
+                        sourceNode
+                );
+                LeastAssignedNode target = findLeastAssignedNode(
+                        connection,
+                        config.nodeTimeoutSeconds()
+                );
+                String reason = null;
+                if (snapshot == null) {
+                    reason = "нет READY snapshot";
+                } else if (target == null) {
+                    reason = "нет ONLINE target node";
+                } else if (hasActiveDimensionMigration(connection, dimensionId)) {
+                    reason = "активна migration";
+                } else if (hasActiveDimensionFailover(connection, dimensionId)) {
+                    reason = "активен failover";
+                }
+                entries.add(new FailoverPreviewEntry(
+                        dimensionId,
+                        sourceNode,
+                        target == null ? null : target.nodeId(),
+                        snapshot == null ? null : snapshot.snapshotId(),
+                        snapshot == null ? null : snapshot.readyAt(),
+                        reason == null,
+                        reason
+                ));
+            }
+            return List.copyOf(entries);
+        }
+    }
+
+    public static List<DimensionFailover> prepareDimensionFailover(
+            ClusterConfig config,
+            String sourceNode
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                lockClusterNodes(connection);
+                lockDimensionAssignments(connection);
+                if (isNodeOnline(connection, sourceNode, config.nodeTimeoutSeconds())) {
+                    throw new SQLException("Узел " + sourceNode + " находится ONLINE");
+                }
+                List<String> dimensions = new ArrayList<>();
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        SELECT dimension_id
+                        FROM dimension_assignments
+                        WHERE node_id = ?
+                        ORDER BY dimension_id
+                        FOR UPDATE
+                        """)) {
+                    statement.setString(1, sourceNode);
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        while (resultSet.next()) {
+                            dimensions.add(resultSet.getString("dimension_id"));
+                        }
+                    }
+                }
+                List<DimensionFailover> failovers = new ArrayList<>();
+                for (String dimensionId : dimensions) {
+                    if (hasActiveDimensionMigration(connection, dimensionId)
+                            || hasActiveDimensionFailover(connection, dimensionId)) {
+                        continue;
+                    }
+                    DimensionSnapshot snapshot = findLatestReadyDimensionSnapshot(
+                            connection,
+                            dimensionId,
+                            sourceNode
+                    );
+                    LeastAssignedNode target = findLeastAssignedNode(
+                            connection,
+                            config.nodeTimeoutSeconds()
+                    );
+                    if (snapshot == null || target == null) {
+                        continue;
+                    }
+                    String failoverId = UUID.randomUUID().toString();
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            INSERT INTO cluster_dimension_failovers (
+                                failover_id, dimension_id, source_node, target_node,
+                                snapshot_id, status
+                            ) VALUES (?, ?, ?, ?, ?, 'READY')
+                            """)) {
+                        statement.setString(1, failoverId);
+                        statement.setString(2, dimensionId);
+                        statement.setString(3, sourceNode);
+                        statement.setString(4, target.nodeId());
+                        statement.setString(5, snapshot.snapshotId());
+                        statement.executeUpdate();
+                    }
+                    failovers.add(new DimensionFailover(
+                            failoverId,
+                            dimensionId,
+                            sourceNode,
+                            target.nodeId(),
+                            snapshot.snapshotId(),
+                            "READY",
+                            null,
+                            Instant.now(),
+                            Instant.now(),
+                            null,
+                            null
+                    ));
+                }
+                connection.commit();
+                return List.copyOf(failovers);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionFailover findPendingDimensionFailoverForTarget(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT failover_id, dimension_id, source_node, target_node,
+                            snapshot_id, status, error_text, created_at, updated_at,
+                            applying_at, applied_at
+                     FROM cluster_dimension_failovers
+                     WHERE target_node = ? AND status = 'READY'
+                     ORDER BY created_at
+                     LIMIT 1
+                     """)) {
+            statement.setString(1, config.nodeId());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readDimensionFailover(resultSet) : null;
+            }
+        }
+    }
+
+    public static DimensionFailover markDimensionFailoverApplying(
+            ClusterConfig config,
+            String failoverId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_dimension_failovers
+                     SET status = 'APPLYING', applying_at = CURRENT_TIMESTAMP(3),
+                         updated_at = CURRENT_TIMESTAMP(3), error_text = NULL
+                     WHERE failover_id = ? AND target_node = ? AND status = 'READY'
+                     """)) {
+            statement.setString(1, failoverId);
+            statement.setString(2, config.nodeId());
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("Failover уже не READY: " + failoverId);
+            }
+        }
+        return findDimensionFailover(config, failoverId);
+    }
+
+    public static DimensionFailover completeDimensionFailover(
+            ClusterConfig config,
+            String failoverId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                DimensionFailover failover = findDimensionFailover(connection, failoverId, true);
+                if (failover == null || !"APPLYING".equals(failover.status())) {
+                    throw new SQLException("Failover не находится в APPLYING: " + failoverId);
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE dimension_assignments
+                        SET node_id = ?, updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE dimension_id = ? AND node_id = ?
+                        """)) {
+                    statement.setString(1, failover.targetNode());
+                    statement.setString(2, failover.dimensionId());
+                    statement.setString(3, failover.sourceNode());
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("Владелец dimension изменился во время failover");
+                    }
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_failovers
+                        SET status = 'APPLIED', applied_at = CURRENT_TIMESTAMP(3),
+                            updated_at = CURRENT_TIMESTAMP(3), error_text = NULL
+                        WHERE failover_id = ? AND status = 'APPLYING'
+                        """)) {
+                    statement.setString(1, failoverId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("Не удалось завершить failover " + failoverId);
+                    }
+                }
+                connection.commit();
+                return findDimensionFailover(config, failoverId);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static void failDimensionFailover(
+            ClusterConfig config,
+            String failoverId,
+            String errorText
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_dimension_failovers
+                     SET status = 'FAILED', error_text = ?, updated_at = CURRENT_TIMESTAMP(3)
+                     WHERE failover_id = ? AND status IN ('READY', 'APPLYING')
+                     """)) {
+            statement.setString(1, truncate(errorText, 8000));
+            statement.setString(2, failoverId);
+            statement.executeUpdate();
+        }
+    }
+
+    public static DimensionFailover findDimensionFailover(
+            ClusterConfig config,
+            String failoverId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            return findDimensionFailover(connection, failoverId, false);
+        }
+    }
+
+    public static List<DimensionFailover> listDimensionFailovers(
+            ClusterConfig config,
+            int limit
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT failover_id, dimension_id, source_node, target_node,
+                            snapshot_id, status, error_text, created_at, updated_at,
+                            applying_at, applied_at
+                     FROM cluster_dimension_failovers
+                     ORDER BY created_at DESC
+                     LIMIT ?
+                     """)) {
+            statement.setInt(1, safeLimit);
+            List<DimensionFailover> failovers = new ArrayList<>();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    failovers.add(readDimensionFailover(resultSet));
+                }
+            }
+            return List.copyOf(failovers);
+        }
+    }
+
     public static void failDimensionMigration(
             ClusterConfig config,
             String migrationId,
@@ -3779,6 +4220,142 @@ public final class ClusterDatabase {
         }
     }
 
+    private static boolean hasActiveDimensionPlayers(
+            Connection connection,
+            String dimensionId,
+            int timeoutSeconds
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT COALESCE(SUM(player_count), 0)
+                FROM cluster_dimension_activity
+                WHERE dimension_id = ?
+                  AND last_seen >= TIMESTAMPADD(SECOND, -?, CURRENT_TIMESTAMP(3))
+                """)) {
+            statement.setString(1, dimensionId);
+            statement.setInt(2, Math.max(1, timeoutSeconds));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                resultSet.next();
+                return resultSet.getInt(1) > 0;
+            }
+        }
+    }
+
+    private static boolean hasActiveDimensionFailover(
+            Connection connection,
+            String dimensionId
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT 1
+                FROM cluster_dimension_failovers
+                WHERE dimension_id = ? AND status IN ('READY', 'APPLYING')
+                LIMIT 1
+                """)) {
+            statement.setString(1, dimensionId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+        }
+    }
+
+    private static DimensionSnapshot findDimensionSnapshot(
+            Connection connection,
+            String snapshotId,
+            boolean forUpdate
+    ) throws SQLException {
+        String sql = """
+                SELECT snapshot_id, dimension_id, source_node, status,
+                       archive_name, archive_sha256, content_sha256, archive_size,
+                       error_text, created_at, updated_at, ready_at
+                FROM cluster_dimension_snapshots
+                WHERE snapshot_id = ?
+                """ + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, snapshotId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readDimensionSnapshot(resultSet) : null;
+            }
+        }
+    }
+
+    private static DimensionSnapshot findLatestReadyDimensionSnapshot(
+            Connection connection,
+            String dimensionId,
+            String sourceNode
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT snapshot_id, dimension_id, source_node, status,
+                       archive_name, archive_sha256, content_sha256, archive_size,
+                       error_text, created_at, updated_at, ready_at
+                FROM cluster_dimension_snapshots
+                WHERE dimension_id = ? AND source_node = ? AND status = 'READY'
+                ORDER BY ready_at DESC
+                LIMIT 1
+                """)) {
+            statement.setString(1, dimensionId);
+            statement.setString(2, sourceNode);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readDimensionSnapshot(resultSet) : null;
+            }
+        }
+    }
+
+    private static DimensionFailover findDimensionFailover(
+            Connection connection,
+            String failoverId,
+            boolean forUpdate
+    ) throws SQLException {
+        String sql = """
+                SELECT failover_id, dimension_id, source_node, target_node,
+                       snapshot_id, status, error_text, created_at, updated_at,
+                       applying_at, applied_at
+                FROM cluster_dimension_failovers
+                WHERE failover_id = ?
+                """ + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, failoverId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readDimensionFailover(resultSet) : null;
+            }
+        }
+    }
+
+    private static DimensionSnapshot readDimensionSnapshot(
+            ResultSet resultSet
+    ) throws SQLException {
+        return new DimensionSnapshot(
+                resultSet.getString("snapshot_id"),
+                resultSet.getString("dimension_id"),
+                resultSet.getString("source_node"),
+                resultSet.getString("status"),
+                resultSet.getString("archive_name"),
+                resultSet.getString("archive_sha256"),
+                resultSet.getString("content_sha256"),
+                resultSet.getLong("archive_size"),
+                resultSet.getString("error_text"),
+                instantOrNull(resultSet, "created_at"),
+                instantOrNull(resultSet, "updated_at"),
+                instantOrNull(resultSet, "ready_at")
+        );
+    }
+
+    private static DimensionFailover readDimensionFailover(
+            ResultSet resultSet
+    ) throws SQLException {
+        return new DimensionFailover(
+                resultSet.getString("failover_id"),
+                resultSet.getString("dimension_id"),
+                resultSet.getString("source_node"),
+                resultSet.getString("target_node"),
+                resultSet.getString("snapshot_id"),
+                resultSet.getString("status"),
+                resultSet.getString("error_text"),
+                instantOrNull(resultSet, "created_at"),
+                instantOrNull(resultSet, "updated_at"),
+                instantOrNull(resultSet, "applying_at"),
+                instantOrNull(resultSet, "applied_at")
+        );
+    }
+
     private static DimensionMigration readDimensionMigration(
             ResultSet resultSet
     ) throws SQLException {
@@ -4023,6 +4600,50 @@ public final class ClusterDatabase {
                         source_node,
                         status
                     )
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_dimension_snapshots (
+                    snapshot_id CHAR(36) NOT NULL PRIMARY KEY,
+                    dimension_id VARCHAR(255) NOT NULL,
+                    source_node VARCHAR(64) NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    archive_name VARCHAR(255) NULL,
+                    archive_sha256 CHAR(64) NULL,
+                    content_sha256 CHAR(64) NULL,
+                    archive_size BIGINT NOT NULL DEFAULT 0,
+                    error_text TEXT NULL,
+                    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    ready_at TIMESTAMP(3) NULL,
+
+                    INDEX idx_dimension_snapshot_dimension (dimension_id, status, ready_at),
+                    INDEX idx_dimension_snapshot_source (source_node, status, ready_at)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_dimension_failovers (
+                    failover_id CHAR(36) NOT NULL PRIMARY KEY,
+                    dimension_id VARCHAR(255) NOT NULL,
+                    source_node VARCHAR(64) NOT NULL,
+                    target_node VARCHAR(64) NOT NULL,
+                    snapshot_id CHAR(36) NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    error_text TEXT NULL,
+                    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    applying_at TIMESTAMP(3) NULL,
+                    applied_at TIMESTAMP(3) NULL,
+
+                    INDEX idx_dimension_failover_source (source_node, status),
+                    INDEX idx_dimension_failover_target (target_node, status),
+                    INDEX idx_dimension_failover_dimension (dimension_id, status)
                 )
                 ENGINE=InnoDB
                 DEFAULT CHARSET=utf8mb4
@@ -5277,6 +5898,48 @@ public final class ClusterDatabase {
             Instant rollbackApplyingAt,
             Instant rolledBackAt,
             Instant sourceBackupDeletedAt
+    ) {
+    }
+
+    public record DimensionSnapshot(
+            String snapshotId,
+            String dimensionId,
+            String sourceNode,
+            String status,
+            String archiveName,
+            String archiveSha256,
+            String contentSha256,
+            long archiveSize,
+            String errorText,
+            Instant createdAt,
+            Instant updatedAt,
+            Instant readyAt
+    ) {
+    }
+
+    public record FailoverPreviewEntry(
+            String dimensionId,
+            String sourceNode,
+            String targetNode,
+            String snapshotId,
+            Instant snapshotReadyAt,
+            boolean executable,
+            String reason
+    ) {
+    }
+
+    public record DimensionFailover(
+            String failoverId,
+            String dimensionId,
+            String sourceNode,
+            String targetNode,
+            String snapshotId,
+            String status,
+            String errorText,
+            Instant createdAt,
+            Instant updatedAt,
+            Instant applyingAt,
+            Instant appliedAt
     ) {
     }
 

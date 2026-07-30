@@ -167,6 +167,24 @@ public final class ClusterDimensionMigration {
         );
     }
 
+    public static AppliedArchive applySnapshotArchive(
+            MinecraftServer server,
+            ClusterDatabase.DimensionSnapshot snapshot,
+            Path stagingRoot,
+            String operationId
+    ) throws IOException {
+        return applyPayload(
+                server,
+                snapshot.dimensionId(),
+                snapshot.archiveName(),
+                snapshot.archiveSha256(),
+                snapshot.contentSha256(),
+                snapshot.archiveSize(),
+                operationId,
+                stagingRoot
+        );
+    }
+
     public static VerificationResult verifyDimension(
             MinecraftServer server,
             String dimensionId,

@@ -70,8 +70,16 @@ public final class ClusterTestModule {
             DIMENSION_MIGRATION_FROZEN = Set.of();
     private static volatile Set<String>
             DIMENSION_MIGRATION_BLOCKED = Set.of();
+    private static volatile Set<String>
+            DIMENSION_SNAPSHOT_FROZEN = Set.of();
 
     private static final int DIMENSION_LIST_PAGE_SIZE = 12;
+
+    
+
+
+
+
 
     private static final ConcurrentMap<UUID, DimensionRouteSuppression>
             DIMENSION_ROUTE_SUPPRESSIONS = new ConcurrentHashMap<>();
@@ -151,7 +159,8 @@ public final class ClusterTestModule {
         String dimensionId =
                 level.dimension().location().toString();
 
-        if (DIMENSION_MIGRATION_FROZEN.contains(dimensionId)) {
+        if (DIMENSION_MIGRATION_FROZEN.contains(dimensionId)
+                || DIMENSION_SNAPSHOT_FROZEN.contains(dimensionId)) {
             if (DIMENSION_TICK_SUPPRESSION_LOGGED.add(dimensionId)) {
                 LOGGER.info(
                         "Dimension migration freezing {} on source node {}",
@@ -237,7 +246,8 @@ public final class ClusterTestModule {
         String dimensionId =
                 dimension.location().toString();
 
-        if (DIMENSION_MIGRATION_BLOCKED.contains(dimensionId)) {
+        if (DIMENSION_MIGRATION_BLOCKED.contains(dimensionId)
+                || DIMENSION_SNAPSHOT_FROZEN.contains(dimensionId)) {
             player.sendSystemMessage(
                     Component.literal(
                             "§cИзмерение временно недоступно: выполняется безопасная migration."
@@ -423,6 +433,10 @@ public final class ClusterTestModule {
                 return;
             }
 
+            applyPendingDimensionFailoverAtStartup(
+                    event.getServer(),
+                    startupConfig
+            );
             refreshDimensionMigrationFreeze(startupConfig);
             applyPendingDimensionMigrationAtStartup(
                     event.getServer(),
@@ -607,6 +621,7 @@ public final class ClusterTestModule {
         DIMENSION_PLAYER_COUNT_SNAPSHOT = Map.of();
         DIMENSION_MIGRATION_FROZEN = Set.of();
         DIMENSION_MIGRATION_BLOCKED = Set.of();
+        DIMENSION_SNAPSHOT_FROZEN = Set.of();
         DIMENSION_ROUTE_SUPPRESSIONS.clear();
         DIMENSION_TICK_SUPPRESSION_LOGGED.clear();
         DIMENSION_TICK_GUARD_ACTIVE.set(false);
@@ -686,9 +701,83 @@ public final class ClusterTestModule {
                         .then(
                                 Commands.literal("failover")
                                         .executes(context ->
-                                                runFailoverCommand(
+                                                showDimensionFailovers(
                                                         context.getSource()
                                                 )
+                                        )
+                                        .then(
+                                                Commands.literal("preview")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "sourceNode",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                previewDimensionFailover(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "sourceNode"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("execute")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "sourceNode",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                executeDimensionFailover(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "sourceNode"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(context ->
+                                                                showDimensionFailovers(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                        )
+
+                        .then(
+                                Commands.literal("snapshots")
+                                        .then(
+                                                Commands.literal("create")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "dimension",
+                                                                                ResourceLocationArgument.id()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                createDimensionSnapshot(
+                                                                                        context.getSource(),
+                                                                                        ResourceLocationArgument.getId(
+                                                                                                context,
+                                                                                                "dimension"
+                                                                                        ).toString()
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(context ->
+                                                                showDimensionSnapshots(
+                                                                        context.getSource()
+                                                                )
+                                                        )
                                         )
                         )
 
@@ -1558,7 +1647,8 @@ public final class ClusterTestModule {
             return;
         }
 
-        if (DIMENSION_MIGRATION_BLOCKED.contains(loginDimensionId)) {
+        if (DIMENSION_MIGRATION_BLOCKED.contains(loginDimensionId)
+                || DIMENSION_SNAPSHOT_FROZEN.contains(loginDimensionId)) {
             ClusterTransferGuard.unlock(player);
             player.connection.disconnect(
                     Component.literal(
@@ -1793,6 +1883,16 @@ public final class ClusterTestModule {
                                         server.createCommandSourceStack(),
                                         redirectCommand
                                 );
+
+                        
+
+
+
+
+
+
+
+
                         if (redirectResult <= 0) {
                             LOGGER.warn(
                                     "Recovery redirect command returned {} but was dispatched; keeping player {} connected while transfer {} continues to node {}: {}",
@@ -1862,7 +1962,8 @@ public final class ClusterTestModule {
 
         UUID playerUuid = player.getUUID();
 
-        if (DIMENSION_MIGRATION_BLOCKED.contains(dimensionId)) {
+        if (DIMENSION_MIGRATION_BLOCKED.contains(dimensionId)
+                || DIMENSION_SNAPSHOT_FROZEN.contains(dimensionId)) {
             player.connection.disconnect(
                     Component.literal(
                             "Измерение "
@@ -4370,6 +4471,20 @@ public final class ClusterTestModule {
             );
             return;
         }
+
+        
+
+
+
+
+
+
+
+
+
+
+
+
         if (redirectResult <= 0) {
             LOGGER.warn(
                     "Server Redirect command returned {} but was dispatched; keeping transfer {} READY because this redirect implementation may report zero on success: {}",
@@ -4839,6 +4954,9 @@ public final class ClusterTestModule {
                     transfer.yaw(),
                     transfer.pitch()
             );
+
+            
+            
             server.getPlayerList().saveAll();
 
             LOGGER.info(
@@ -5060,6 +5178,443 @@ public final class ClusterTestModule {
         });
     }
 
+    private int createDimensionSnapshot(
+            CommandSourceStack source,
+            String dimensionId
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        if (currentConfig.dimensionMigrationStagingPath() == null) {
+            source.sendFailure(Component.literal("§cВ конфиге не указан dimension_migration_staging_path."));
+            return 0;
+        }
+        ResourceLocation parsed = ResourceLocation.tryParse(dimensionId);
+        if (parsed == null) {
+            source.sendFailure(Component.literal("§cНекорректный dimension id: §f" + dimensionId));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        String normalized = parsed.toString();
+        ServerLevel level = server.getLevel(ResourceKey.create(Registries.DIMENSION, parsed));
+        if (level == null) {
+            source.sendFailure(Component.literal("§cИзмерение не загружено на этом узле."));
+            return 0;
+        }
+        if (!level.players().isEmpty()) {
+            source.sendFailure(Component.literal("§cВ измерении находятся игроки: §f" + level.players().size()));
+            return 0;
+        }
+        try {
+            ClusterDimensionMigration.resolveDimensionPath(server, normalized);
+        } catch (Exception exception) {
+            source.sendFailure(Component.literal("§cSnapshot недоступен: " + exception.getMessage()));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal("§eПодготавливаю snapshot §f" + normalized), false);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                ClusterDatabase.DimensionSnapshot snapshot =
+                        ClusterDatabase.requestDimensionSnapshot(latestConfig, normalized);
+                server.execute(() -> startDimensionSnapshotArchive(
+                        source,
+                        server,
+                        latestConfig,
+                        snapshot
+                ));
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось создать snapshot: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private void startDimensionSnapshotArchive(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ClusterDatabase.DimensionSnapshot snapshot
+    ) {
+        ResourceLocation parsed = ResourceLocation.tryParse(snapshot.dimensionId());
+        ServerLevel level = parsed == null
+                ? null
+                : server.getLevel(ResourceKey.create(Registries.DIMENSION, parsed));
+        if (level == null || !level.players().isEmpty()) {
+            failDimensionSnapshot(
+                    source,
+                    server,
+                    currentConfig,
+                    snapshot,
+                    level == null ? "Измерение не загружено" : "В измерении появились игроки"
+            );
+            return;
+        }
+        addSnapshotFreeze(snapshot.dimensionId());
+        try {
+            if (!server.saveEverything(true, true, true)) {
+                throw new IllegalStateException("MinecraftServer не подтвердил сохранение мира");
+            }
+        } catch (Exception exception) {
+            failDimensionSnapshot(source, server, currentConfig, snapshot, exception.getMessage());
+            return;
+        }
+        source.sendSuccess(() -> Component.literal("§eИзмерение заморожено. Создаю snapshot-архив..."), false);
+        MIGRATION_EXECUTOR.execute(() -> {
+            ClusterDimensionMigration.PreparedArchive archive = null;
+            try {
+                archive = ClusterDimensionMigration.createArchive(
+                        server,
+                        snapshot.dimensionId(),
+                        currentConfig.dimensionMigrationStagingPath(),
+                        "snapshot-" + snapshot.snapshotId()
+                );
+                ClusterDatabase.DimensionSnapshot ready =
+                        ClusterDatabase.markDimensionSnapshotReady(
+                                currentConfig,
+                                snapshot.snapshotId(),
+                                archive.archiveName(),
+                                archive.archiveSha256(),
+                                archive.contentSha256(),
+                                archive.archiveSize()
+                        );
+                removeSnapshotFreeze(snapshot.dimensionId());
+                ClusterDimensionMigration.PreparedArchive finalArchive = archive;
+                server.execute(() -> source.sendSuccess(
+                        () -> Component.literal(
+                                "§aSnapshot READY: §f"
+                                        + ready.snapshotId()
+                                        + " §7| §f"
+                                        + ready.dimensionId()
+                                        + " §7| archive: §f"
+                                        + finalArchive.archiveSize()
+                                        + " bytes"
+                        ),
+                        false
+                ));
+            } catch (Exception exception) {
+                if (archive != null) {
+                    try {
+                        ClusterDimensionMigration.deleteArchive(
+                                currentConfig.dimensionMigrationStagingPath(),
+                                archive.archiveName()
+                        );
+                    } catch (Exception ignored) {
+                    }
+                }
+                failDimensionSnapshot(
+                        source,
+                        server,
+                        currentConfig,
+                        snapshot,
+                        exception.getClass().getSimpleName() + ": " + exception.getMessage()
+                );
+            }
+        });
+    }
+
+    private void failDimensionSnapshot(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ClusterDatabase.DimensionSnapshot snapshot,
+            String error
+    ) {
+        MIGRATION_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.failDimensionSnapshot(
+                        currentConfig,
+                        snapshot.snapshotId(),
+                        error
+                );
+            } catch (Exception exception) {
+                LOGGER.error("Unable to fail dimension snapshot {}", snapshot.snapshotId(), exception);
+            }
+            removeSnapshotFreeze(snapshot.dimensionId());
+            server.execute(() -> source.sendFailure(Component.literal(
+                    "§cSnapshot завершился ошибкой: " + error
+            )));
+        });
+    }
+
+    private int showDimensionSnapshots(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.DimensionSnapshot> snapshots =
+                        ClusterDatabase.listDimensionSnapshots(currentConfig, 50);
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal("§6Последние dimension snapshots:"), false);
+                    if (snapshots.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal("§7Записей нет."), false);
+                        return;
+                    }
+                    for (ClusterDatabase.DimensionSnapshot snapshot : snapshots) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§f"
+                                        + snapshot.snapshotId()
+                                        + " §7| §f"
+                                        + snapshot.dimensionId()
+                                        + " §7| §f"
+                                        + snapshot.sourceNode()
+                                        + " §7| §e"
+                                        + snapshot.status()
+                                        + " §7| §f"
+                                        + snapshot.archiveSize()
+                                        + " bytes"
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось получить snapshots: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int previewDimensionFailover(
+            CommandSourceStack source,
+            String sourceNode
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        source.sendSuccess(() -> Component.literal("§eСтрою безопасный failover-план для §f" + sourceNode), false);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.FailoverPreviewEntry> entries =
+                        ClusterDatabase.previewDimensionFailover(currentConfig, sourceNode);
+                server.execute(() -> {
+                    int ready = 0;
+                    for (ClusterDatabase.FailoverPreviewEntry entry : entries) {
+                        if (entry.executable()) {
+                            ready++;
+                        }
+                    }
+                    int finalReady = ready;
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Failover preview: §aготово "
+                                    + finalReady
+                                    + "§7, пропущено "
+                                    + (entries.size() - finalReady)
+                    ), false);
+                    for (ClusterDatabase.FailoverPreviewEntry entry : entries) {
+                        source.sendSuccess(() -> Component.literal(
+                                (entry.executable() ? "§aREADY " : "§cSKIP ")
+                                        + "§f"
+                                        + entry.dimensionId()
+                                        + (entry.executable()
+                                        ? " §7-> §f" + entry.targetNode() + " §7| snapshot §f" + entry.snapshotId()
+                                        : " §7| " + entry.reason())
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось построить failover-план: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int executeDimensionFailover(
+            CommandSourceStack source,
+            String sourceNode
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        if (currentConfig.dimensionMigrationStagingPath() == null) {
+            source.sendFailure(Component.literal("§cВ конфиге не указан dimension_migration_staging_path."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.DimensionFailover> failovers =
+                        ClusterDatabase.prepareDimensionFailover(currentConfig, sourceNode);
+                server.execute(() -> {
+                    if (failovers.isEmpty()) {
+                        source.sendFailure(Component.literal(
+                                "§cНе создано ни одного failover: проверь preview и READY snapshots."
+                        ));
+                        return;
+                    }
+                    source.sendSuccess(() -> Component.literal(
+                            "§aFailover READY: §f" + failovers.size() + "§a. Перезапусти target node, указанные ниже."
+                    ), false);
+                    for (ClusterDatabase.DimensionFailover failover : failovers) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§f"
+                                        + failover.dimensionId()
+                                        + " §7| §c"
+                                        + failover.sourceNode()
+                                        + " §7-> §a"
+                                        + failover.targetNode()
+                                        + " §7| §f"
+                                        + failover.failoverId()
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cFailover не подготовлен: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int showDimensionFailovers(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.DimensionFailover> failovers =
+                        ClusterDatabase.listDimensionFailovers(currentConfig, 50);
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal("§6Последние dimension failovers:"), false);
+                    if (failovers.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal("§7Записей нет."), false);
+                        return;
+                    }
+                    for (ClusterDatabase.DimensionFailover failover : failovers) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§f"
+                                        + failover.failoverId()
+                                        + " §7| §f"
+                                        + failover.dimensionId()
+                                        + " §7| §f"
+                                        + failover.sourceNode()
+                                        + " -> "
+                                        + failover.targetNode()
+                                        + " §7| §e"
+                                        + failover.status()
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось получить failovers: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private void applyPendingDimensionFailoverAtStartup(
+            MinecraftServer server,
+            ClusterConfig currentConfig
+    ) throws Exception {
+        Path stagingPath = currentConfig.dimensionMigrationStagingPath();
+        while (true) {
+            ClusterDatabase.DimensionFailover pending =
+                    ClusterDatabase.findPendingDimensionFailoverForTarget(currentConfig);
+            if (pending == null) {
+                return;
+            }
+            if (stagingPath == null) {
+                ClusterDatabase.failDimensionFailover(
+                        currentConfig,
+                        pending.failoverId(),
+                        "dimension_migration_staging_path не настроен"
+                );
+                throw new IllegalStateException("dimension_migration_staging_path не настроен");
+            }
+            ClusterDatabase.DimensionFailover applying =
+                    ClusterDatabase.markDimensionFailoverApplying(
+                            currentConfig,
+                            pending.failoverId()
+                    );
+            try {
+                ClusterDatabase.DimensionSnapshot snapshot =
+                        ClusterDatabase.findDimensionSnapshot(
+                                currentConfig,
+                                applying.snapshotId()
+                        );
+                if (snapshot == null || !"READY".equals(snapshot.status())) {
+                    throw new IllegalStateException("READY snapshot не найден: " + applying.snapshotId());
+                }
+                if (!snapshot.dimensionId().equals(applying.dimensionId())
+                        || !snapshot.sourceNode().equalsIgnoreCase(applying.sourceNode())) {
+                    throw new IllegalStateException("Snapshot не соответствует failover");
+                }
+                ClusterDimensionMigration.applySnapshotArchive(
+                        server,
+                        snapshot,
+                        stagingPath,
+                        "failover-" + applying.failoverId()
+                );
+                ClusterDatabase.DimensionFailover applied =
+                        ClusterDatabase.completeDimensionFailover(
+                                currentConfig,
+                                applying.failoverId()
+                        );
+                LOGGER.warn(
+                        "Applied snapshot failover {}: {} {} -> {}",
+                        applied.failoverId(),
+                        applied.dimensionId(),
+                        applied.sourceNode(),
+                        applied.targetNode()
+                );
+            } catch (Exception exception) {
+                ClusterDatabase.failDimensionFailover(
+                        currentConfig,
+                        applying.failoverId(),
+                        exception.getClass().getSimpleName() + ": " + exception.getMessage()
+                );
+                throw exception;
+            }
+        }
+    }
+
+    private static void addSnapshotFreeze(
+            String dimensionId
+    ) {
+        synchronized (ClusterTestModule.class) {
+            Set<String> dimensions = new TreeSet<>(DIMENSION_SNAPSHOT_FROZEN);
+            dimensions.add(dimensionId);
+            DIMENSION_SNAPSHOT_FROZEN = Set.copyOf(dimensions);
+        }
+    }
+
+    private static void removeSnapshotFreeze(
+            String dimensionId
+    ) {
+        synchronized (ClusterTestModule.class) {
+            Set<String> dimensions = new TreeSet<>(DIMENSION_SNAPSHOT_FROZEN);
+            dimensions.remove(dimensionId);
+            DIMENSION_SNAPSHOT_FROZEN = Set.copyOf(dimensions);
+            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(dimensionId);
+        }
+    }
+
     private List<ClusterDatabase.DimensionReassignment>
     performFailover(
             ClusterConfig currentConfig,
@@ -5069,22 +5624,22 @@ public final class ClusterTestModule {
             return List.of();
         }
 
-        List<ClusterDatabase.DimensionReassignment> reassignments =
-                ClusterDatabase.failoverOfflineDimensions(
-                        currentConfig
+        for (String offlineNode : ClusterDatabase.listOfflineDimensionOwnerNodes(currentConfig)) {
+            List<ClusterDatabase.DimensionFailover> failovers =
+                    ClusterDatabase.prepareDimensionFailover(
+                            currentConfig,
+                            offlineNode
+                    );
+            if (!failovers.isEmpty()) {
+                LOGGER.warn(
+                        "Prepared {} snapshot failovers for offline node {}. Restart target nodes to apply them.",
+                        failovers.size(),
+                        offlineNode
                 );
-
-        for (ClusterDatabase.DimensionReassignment reassignment
-                : reassignments) {
-            LOGGER.warn(
-                    "Cluster failover moved dimension {}: {} -> {}",
-                    reassignment.dimensionId(),
-                    reassignment.previousNodeId(),
-                    reassignment.newNodeId()
-            );
+            }
         }
 
-        return reassignments;
+        return List.of();
     }
 
     private int runFailoverCommand(
