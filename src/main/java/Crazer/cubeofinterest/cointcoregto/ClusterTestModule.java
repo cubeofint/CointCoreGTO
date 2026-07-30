@@ -29,6 +29,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -48,6 +50,12 @@ public final class ClusterTestModule {
 
     private static volatile Map<String, String>
             DIMENSION_OWNER_CACHE = Map.of();
+
+    private static final ConcurrentMap<UUID, DimensionRouteSuppression>
+            DIMENSION_ROUTE_SUPPRESSIONS = new ConcurrentHashMap<>();
+
+    private static final long DIMENSION_ROUTE_SUPPRESSION_NANOS =
+            10_000_000_000L;
 
     private static final ExecutorService DATABASE_EXECUTOR =
             Executors.newSingleThreadExecutor(task -> {
@@ -75,6 +83,8 @@ public final class ClusterTestModule {
     }
 
     public static void register() {
+        ClusterTransferGuard.register();
+
         if (REGISTERED.compareAndSet(false, true)) {
             MinecraftForge.EVENT_BUS.register(INSTANCE);
         }
@@ -141,6 +151,19 @@ public final class ClusterTestModule {
         String playerName =
                 player.getGameProfile().getName();
 
+        if (!ClusterTransferGuard.lock(
+                player,
+                currentConfig.transferLockTimeoutSeconds(),
+                "Подготовка межсерверного телепорта"
+        )) {
+            player.sendSystemMessage(
+                    Component.literal(
+                            "§cДругой кластерный переход уже выполняется."
+                    )
+            );
+            return true;
+        }
+
         double targetX = pos.getX() + 0.5D;
         double targetY = pos.getY() + 0.1D;
         double targetZ = pos.getZ() + 0.5D;
@@ -167,6 +190,7 @@ public final class ClusterTestModule {
                     exception
             );
 
+            ClusterTransferGuard.unlock(player);
             player.sendSystemMessage(
                     Component.literal(
                             "§cПеренос отменён: не удалось сохранить данные игрока: "
@@ -279,6 +303,7 @@ public final class ClusterTestModule {
             ServerStartedEvent event
     ) {
         MinecraftServer server = event.getServer();
+        ClusterTransferGuard.clearAll();
         activeServer = server;
         heartbeatTickCounter = 0;
 
@@ -416,6 +441,8 @@ public final class ClusterTestModule {
 
         heartbeatTickCounter = 0;
         DIMENSION_OWNER_CACHE = Map.of();
+        DIMENSION_ROUTE_SUPPRESSIONS.clear();
+        ClusterTransferGuard.clearAll();
     }
 
     @SubscribeEvent
@@ -714,18 +741,19 @@ public final class ClusterTestModule {
         }
 
         UUID playerUuid = player.getUUID();
-        String playerName =
-                player.getGameProfile().getName();
         String loginDimensionId =
                 player.level()
                         .dimension()
                         .location()
                         .toString();
-        double loginX = player.getX();
-        double loginY = player.getY();
-        double loginZ = player.getZ();
-        float loginYaw = player.getYRot();
-        float loginPitch = player.getXRot();
+
+        if (!ClusterTransferGuard.lock(
+                player,
+                currentConfig.transferLockTimeoutSeconds(),
+                "Проверка кластерной сессии"
+        )) {
+            return;
+        }
 
         DATABASE_EXECUTOR.execute(() -> {
             try {
@@ -735,6 +763,11 @@ public final class ClusterTestModule {
                 config = latestConfig;
 
                 if (!latestConfig.enabled()) {
+                    scheduleRouteFailure(
+                            server,
+                            playerUuid,
+                            "Кластерная система отключена."
+                    );
                     return;
                 }
 
@@ -753,6 +786,11 @@ public final class ClusterTestModule {
                             transfer.targetNode()
                     );
 
+                    ClusterTransferGuard.updateReason(
+                            playerUuid,
+                            "Применение данных межсерверного перехода"
+                    );
+
                     server.execute(
                             () -> applyTransfer(
                                     server,
@@ -764,6 +802,49 @@ public final class ClusterTestModule {
                     return;
                 }
 
+                ClusterDatabase.PlayerSessionAcquireResult sessionResult =
+                        ClusterDatabase.acquirePlayerSession(
+                                latestConfig,
+                                playerUuid
+                        );
+
+                if (!sessionResult.acquired()) {
+                    String recoveryRedirectAddress = null;
+
+                    if (sessionResult.targetNode() != null
+                            && !sessionResult.targetNode()
+                            .equalsIgnoreCase(latestConfig.nodeId())) {
+                        try {
+                            recoveryRedirectAddress =
+                                    ClusterDatabase.findOnlineRedirectAddress(
+                                            latestConfig,
+                                            sessionResult.targetNode()
+                                    );
+                        } catch (Exception redirectLookupException) {
+                            LOGGER.warn(
+                                    "Unable to resolve recovery redirect for player {} to node {}",
+                                    playerUuid,
+                                    sessionResult.targetNode(),
+                                    redirectLookupException
+                            );
+                        }
+                    }
+
+                    scheduleSessionRejected(
+                            server,
+                            playerUuid,
+                            sessionResult,
+                            recoveryRedirectAddress
+                    );
+                    return;
+                }
+
+                ClusterDatabase.RecoveryBackup recoveryBackup =
+                        ClusterDatabase.findRecoveryBackup(
+                                latestConfig,
+                                playerUuid
+                        );
+
                 String dimensionOwner =
                         ClusterDatabase.findDimensionOwner(
                                 latestConfig,
@@ -771,40 +852,27 @@ public final class ClusterTestModule {
                         );
 
                 if (dimensionOwner == null) {
-                    return;
+                    removeCachedDimensionOwner(
+                            loginDimensionId
+                    );
+                } else {
+                    updateCachedDimensionOwner(
+                            loginDimensionId,
+                            dimensionOwner
+                    );
                 }
 
-                updateCachedDimensionOwner(
-                        loginDimensionId,
-                        dimensionOwner
-                );
-
-                if (dimensionOwner.equalsIgnoreCase(
-                        latestConfig.nodeId()
-                )) {
-                    return;
-                }
-
-                LOGGER.warn(
-                        "Player {} joined node {} in dimension owned by {}. Redirecting.",
-                        playerUuid,
-                        latestConfig.nodeId(),
-                        dimensionOwner
-                );
-
-                createTransferAndScheduleRedirect(
-                        server,
-                        latestConfig,
-                        playerUuid,
-                        playerName,
-                        dimensionOwner,
-                        loginDimensionId,
-                        loginX,
-                        loginY,
-                        loginZ,
-                        loginYaw,
-                        loginPitch,
-                        null
+                String finalDimensionOwner = dimensionOwner;
+                server.execute(
+                        () -> finishLoginSessionCheck(
+                                server,
+                                latestConfig,
+                                playerUuid,
+                                loginDimensionId,
+                                finalDimensionOwner,
+                                sessionResult,
+                                recoveryBackup
+                        )
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -812,7 +880,426 @@ public final class ClusterTestModule {
                         playerUuid,
                         exception
                 );
+
+                scheduleTransferError(
+                        server,
+                        playerUuid,
+                        exception
+                );
             }
+        });
+    }
+
+    @SubscribeEvent
+    public void onPlayerLoggedOut(
+            PlayerEvent.PlayerLoggedOutEvent event
+    ) {
+        if (!(event.getEntity()
+                instanceof ServerPlayer player)) {
+            return;
+        }
+
+        ClusterTransferGuard.unlock(player.getUUID());
+        DIMENSION_ROUTE_SUPPRESSIONS.remove(player.getUUID());
+
+        ClusterConfig currentConfig = config;
+
+        if (currentConfig == null
+                || !currentConfig.enabled()) {
+            return;
+        }
+
+        UUID playerUuid = player.getUUID();
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.releasePlayerSession(
+                        currentConfig,
+                        playerUuid
+                );
+            } catch (Exception exception) {
+                LOGGER.warn(
+                        "Unable to release cluster player session for {} on node {}",
+                        playerUuid,
+                        currentConfig.nodeId(),
+                        exception
+                );
+            }
+        });
+    }
+
+    private void finishLoginSessionCheck(
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            UUID playerUuid,
+            String loginDimensionId,
+            String dimensionOwner,
+            ClusterDatabase.PlayerSessionAcquireResult sessionResult,
+            ClusterDatabase.RecoveryBackup recoveryBackup
+    ) {
+        ServerPlayer player = server.getPlayerList()
+                .getPlayer(playerUuid);
+
+        if (player == null) {
+            releaseSessionAfterLoginAbort(
+                    currentConfig,
+                    playerUuid
+            );
+            return;
+        }
+
+        if (sessionResult.recovered()) {
+            player.sendSystemMessage(
+                    Component.literal(
+                            "§eКластерная сессия восстановлена после узла §f"
+                                    + sessionResult.previousOwnerNode()
+                                    + "§e (предыдущее состояние: §f"
+                                    + sessionResult.state()
+                                    + "§e)."
+                    )
+            );
+        }
+
+        if (recoveryBackup != null) {
+            applyRecoveryBackup(
+                    server,
+                    currentConfig,
+                    playerUuid,
+                    loginDimensionId,
+                    dimensionOwner,
+                    recoveryBackup
+            );
+            return;
+        }
+
+        continueLoginSessionCheck(
+                server,
+                currentConfig,
+                playerUuid,
+                loginDimensionId,
+                dimensionOwner
+        );
+    }
+
+    private void applyRecoveryBackup(
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            UUID playerUuid,
+            String loginDimensionId,
+            String dimensionOwner,
+            ClusterDatabase.RecoveryBackup recoveryBackup
+    ) {
+        ServerPlayer player = server.getPlayerList()
+                .getPlayer(playerUuid);
+
+        if (player == null) {
+            releaseSessionAfterLoginAbort(
+                    currentConfig,
+                    playerUuid
+            );
+            return;
+        }
+
+        ClusterTransferGuard.updateReason(
+                playerUuid,
+                "Восстановление резервной копии игрока"
+        );
+
+        ClusterPlayerDataCodec.ApplyResult applyResult;
+
+        try {
+            if (recoveryBackup.playerData() == null
+                    || recoveryBackup.playerData().length == 0) {
+                throw new IllegalStateException(
+                        "Резервная копия не содержит player-data"
+                );
+            }
+
+            if (recoveryBackup.playerDataSize()
+                    != recoveryBackup.playerData().length) {
+                throw new IllegalStateException(
+                        "Размер резервной копии не совпадает: declared="
+                                + recoveryBackup.playerDataSize()
+                                + ", actual="
+                                + recoveryBackup.playerData().length
+                );
+            }
+
+            applyResult = ClusterPlayerDataCodec.apply(
+                    player,
+                    recoveryBackup.transferId(),
+                    recoveryBackup.playerDataCodec(),
+                    recoveryBackup.playerData(),
+                    recoveryBackup.playerDataSha256(),
+                    currentConfig.maxPlayerDataBytes()
+            );
+
+            server.getPlayerList().saveAll();
+        } catch (Exception exception) {
+            LOGGER.error(
+                    "Unable to restore player backup {} for {}",
+                    recoveryBackup.backupId(),
+                    playerUuid,
+                    exception
+            );
+
+            player.connection.disconnect(
+                    Component.literal(
+                            "Не удалось восстановить резервную копию данных игрока: "
+                                    + exception.getMessage()
+                                    + "\nОбратитесь к администратору; backup не удалён."
+                    )
+            );
+            return;
+        }
+
+        ClusterTransferGuard.updateReason(
+                playerUuid,
+                "Фиксация восстановленной резервной копии"
+        );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.markRecoveryBackupRestored(
+                        currentConfig,
+                        recoveryBackup.backupId(),
+                        playerUuid
+                );
+
+                server.execute(() -> {
+                    ServerPlayer onlinePlayer = server.getPlayerList()
+                            .getPlayer(playerUuid);
+
+                    if (onlinePlayer == null) {
+                        releaseSessionAfterLoginAbort(
+                                currentConfig,
+                                playerUuid
+                        );
+                        return;
+                    }
+
+                    onlinePlayer.sendSystemMessage(
+                            Component.literal(
+                                    "§eВосстановлена резервная копия transfer §f"
+                                            + recoveryBackup.transferId()
+                                            + "§e с узла §f"
+                                            + recoveryBackup.sourceNode()
+                                            + formatPlayerDataApplyMessage(
+                                            applyResult
+                                    )
+                            )
+                    );
+
+                    continueLoginSessionCheck(
+                            server,
+                            currentConfig,
+                            playerUuid,
+                            loginDimensionId,
+                            dimensionOwner
+                    );
+                });
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to mark player backup {} as restored",
+                        recoveryBackup.backupId(),
+                        exception
+                );
+
+                server.execute(() -> {
+                    ServerPlayer onlinePlayer = server.getPlayerList()
+                            .getPlayer(playerUuid);
+
+                    if (onlinePlayer != null) {
+                        onlinePlayer.connection.disconnect(
+                                Component.literal(
+                                        "Резервная копия применена, но не была "
+                                                + "зафиксирована в базе. Повторите вход "
+                                                + "через несколько секунд."
+                                )
+                        );
+                    } else {
+                        ClusterTransferGuard.unlock(playerUuid);
+                    }
+                });
+            }
+        });
+    }
+
+    private void continueLoginSessionCheck(
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            UUID playerUuid,
+            String loginDimensionId,
+            String dimensionOwner
+    ) {
+        ServerPlayer player = server.getPlayerList()
+                .getPlayer(playerUuid);
+
+        if (player == null) {
+            releaseSessionAfterLoginAbort(
+                    currentConfig,
+                    playerUuid
+            );
+            return;
+        }
+
+        if (dimensionOwner == null
+                || dimensionOwner.equalsIgnoreCase(
+                currentConfig.nodeId()
+        )) {
+            ClusterTransferGuard.unlock(player);
+            return;
+        }
+
+        LOGGER.warn(
+                "Player {} joined node {} in dimension owned by {} without a pending transfer. Disconnecting to prevent a redirect loop.",
+                playerUuid,
+                currentConfig.nodeId(),
+                dimensionOwner
+        );
+
+        ClusterTransferGuard.unlock(player);
+        player.connection.disconnect(
+                Component.literal(
+                        "Вы подключились к узлу "
+                                + currentConfig.nodeId()
+                                + " в измерении "
+                                + loginDimensionId
+                                + ", которое принадлежит узлу "
+                                + dimensionOwner
+                                + ".\nАвтоматический redirect без активного transfer "
+                                + "заблокирован для защиты от бесконечного цикла. "
+                                + "Подключитесь к правильному узлу или выполните "
+                                + "кластерный переход из игры."
+                )
+        );
+    }
+
+    private void releaseSessionAfterLoginAbort(
+            ClusterConfig currentConfig,
+            UUID playerUuid
+    ) {
+        ClusterTransferGuard.unlock(playerUuid);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.releasePlayerSession(
+                        currentConfig,
+                        playerUuid
+                );
+            } catch (Exception exception) {
+                LOGGER.warn(
+                        "Unable to release session after player {} left during login processing",
+                        playerUuid,
+                        exception
+                );
+            }
+        });
+    }
+
+    private void scheduleSessionRejected(
+            MinecraftServer server,
+            UUID playerUuid,
+            ClusterDatabase.PlayerSessionAcquireResult result,
+            String recoveryRedirectAddress
+    ) {
+        server.execute(() -> {
+            ServerPlayer player = server.getPlayerList()
+                    .getPlayer(playerUuid);
+
+            if (player == null) {
+                ClusterTransferGuard.unlock(playerUuid);
+                return;
+            }
+
+            String transferDetails = result.transferId() == null
+                    ? ""
+                    : "\nTransfer: " + result.transferId()
+                    + (result.targetNode() == null
+                    ? ""
+                    : " -> " + result.targetNode());
+
+            if (recoveryRedirectAddress != null
+                    && !recoveryRedirectAddress.isBlank()) {
+                String playerName = player.getGameProfile().getName();
+                String redirectCommand = "redirect "
+                        + playerName
+                        + " "
+                        + recoveryRedirectAddress;
+
+                player.sendSystemMessage(
+                        Component.literal(
+                                "§eНайдена незавершённая кластерная сессия на узле §f"
+                                        + result.targetNode()
+                                        + "§e. Повторно отправляю redirect для завершения transfer."
+                                        + transferDetails
+                                        + "\n§7Не отключайтесь: модифицированное подключение "
+                                        + "может занять некоторое время."
+                        )
+                );
+
+                if (server.getCommands()
+                        .getDispatcher()
+                        .getRoot()
+                        .getChild("redirect") == null) {
+                    LOGGER.error(
+                            "Recovery redirect command is not registered: {}",
+                            redirectCommand
+                    );
+                } else {
+                    ClusterTransferGuard.updateReason(
+                            playerUuid,
+                            "Восстановление незавершённого межсерверного перехода"
+                    );
+
+                    try {
+                        int redirectResult = server.getCommands()
+                                .performPrefixedCommand(
+                                        server.createCommandSourceStack(),
+                                        redirectCommand
+                                );
+                        if (redirectResult <= 0) {
+                            LOGGER.warn(
+                                    "Recovery redirect command returned {} but was dispatched; keeping player {} connected while transfer {} continues to node {}: {}",
+                                    redirectResult,
+                                    playerUuid,
+                                    result.transferId(),
+                                    result.targetNode(),
+                                    redirectCommand
+                            );
+                        } else {
+                            LOGGER.info(
+                                    "Redirected player {} to recover active transfer {} on node {} with result {}",
+                                    playerUuid,
+                                    result.transferId(),
+                                    result.targetNode(),
+                                    redirectResult
+                            );
+                        }
+
+                        return;
+                    } catch (Exception exception) {
+                        LOGGER.error(
+                                "Recovery redirect command threw an exception for player {}: {}",
+                                playerUuid,
+                                redirectCommand,
+                                exception
+                        );
+                    }
+                }
+            }
+
+            player.connection.disconnect(
+                    Component.literal(
+                            "Данные этого игрока уже используются узлом "
+                                    + result.ownerNode()
+                                    + " (state="
+                                    + result.state()
+                                    + ")."
+                                    + transferDetails
+                                    + "\nПовторите вход после завершения перехода "
+                                    + "или истечения lease."
+                    )
+            );
         });
     }
 
@@ -837,6 +1324,21 @@ public final class ClusterTestModule {
                         .location()
                         .toString();
 
+        UUID playerUuid = player.getUUID();
+
+        if (ClusterTransferGuard.isLocked(player)
+                || isDimensionRouteSuppressed(
+                playerUuid,
+                dimensionId
+        )) {
+            LOGGER.debug(
+                    "Suppressed dimension route for player {} to {} while applying an incoming transfer",
+                    playerUuid,
+                    dimensionId
+            );
+            return;
+        }
+
         String cachedOwner =
                 DIMENSION_OWNER_CACHE.get(dimensionId);
 
@@ -858,7 +1360,6 @@ public final class ClusterTestModule {
             return;
         }
 
-        UUID playerUuid = player.getUUID();
         String playerName =
                 player.getGameProfile().getName();
         double x = player.getX();
@@ -866,6 +1367,14 @@ public final class ClusterTestModule {
         double z = player.getZ();
         float yaw = player.getYRot();
         float pitch = player.getXRot();
+
+        if (!ClusterTransferGuard.lock(
+                player,
+                currentConfig.transferLockTimeoutSeconds(),
+                "Проверка владельца измерения"
+        )) {
+            return;
+        }
 
         ClusterPlayerDataCodec.Snapshot playerData;
 
@@ -881,6 +1390,7 @@ public final class ClusterTestModule {
                     exception
             );
 
+            ClusterTransferGuard.unlock(player);
             player.sendSystemMessage(
                     Component.literal(
                             "§cКластерный переход отменён: не удалось сохранить данные игрока: "
@@ -899,6 +1409,11 @@ public final class ClusterTestModule {
                 config = latestConfig;
 
                 if (!latestConfig.enabled()) {
+                    scheduleRouteFailure(
+                            server,
+                            playerUuid,
+                            "Кластерная система отключена."
+                    );
                     return;
                 }
 
@@ -912,6 +1427,16 @@ public final class ClusterTestModule {
                     removeCachedDimensionOwner(
                             dimensionId
                     );
+                    server.execute(() -> {
+                        ServerPlayer onlinePlayer = server
+                                .getPlayerList()
+                                .getPlayer(playerUuid);
+                        if (onlinePlayer != null) {
+                            ClusterTransferGuard.unlock(onlinePlayer);
+                        } else {
+                            ClusterTransferGuard.unlock(playerUuid);
+                        }
+                    });
 
                     return;
                 }
@@ -924,6 +1449,16 @@ public final class ClusterTestModule {
                 if (owner.equalsIgnoreCase(
                         latestConfig.nodeId()
                 )) {
+                    server.execute(() -> {
+                        ServerPlayer onlinePlayer = server
+                                .getPlayerList()
+                                .getPlayer(playerUuid);
+                        if (onlinePlayer != null) {
+                            ClusterTransferGuard.unlock(onlinePlayer);
+                        } else {
+                            ClusterTransferGuard.unlock(playerUuid);
+                        }
+                    });
                     return;
                 }
 
@@ -1463,6 +1998,19 @@ public final class ClusterTestModule {
         float yaw = player.getYRot();
         float pitch = player.getXRot();
 
+        if (!ClusterTransferGuard.lock(
+                player,
+                currentConfig.transferLockTimeoutSeconds(),
+                "Проверка владельца измерения"
+        )) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cДругой кластерный переход уже выполняется."
+                    )
+            );
+            return 0;
+        }
+
         ClusterPlayerDataCodec.Snapshot playerData;
 
         try {
@@ -1471,6 +2019,7 @@ public final class ClusterTestModule {
                     currentConfig
             );
         } catch (Exception exception) {
+            ClusterTransferGuard.unlock(player);
             source.sendFailure(
                     Component.literal(
                             "§cНе удалось сохранить данные игрока перед transfer: "
@@ -1504,22 +2053,13 @@ public final class ClusterTestModule {
                         );
 
                 if (targetNode == null) {
-                    server.execute(() -> {
-                        ServerPlayer onlinePlayer =
-                                server.getPlayerList()
-                                        .getPlayer(playerUuid);
-
-                        if (onlinePlayer != null) {
-                            onlinePlayer.sendSystemMessage(
-                                    Component.literal(
-                                            "§cДля dimension §f"
-                                                    + normalizedDimension
-                                                    + "§c владелец не назначен."
-                                    )
-                            );
-                        }
-                    });
-
+                    scheduleRouteFailure(
+                            server,
+                            playerUuid,
+                            "Для dimension "
+                                    + normalizedDimension
+                                    + " владелец не назначен."
+                    );
                     return;
                 }
 
@@ -1606,6 +2146,19 @@ public final class ClusterTestModule {
         String playerName =
                 player.getGameProfile().getName();
 
+        if (!ClusterTransferGuard.lock(
+                player,
+                currentConfig.transferLockTimeoutSeconds(),
+                "Подготовка межсерверного перехода"
+        )) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cДругой кластерный переход уже выполняется."
+                    )
+            );
+            return 0;
+        }
+
         ClusterPlayerDataCodec.Snapshot playerData;
 
         try {
@@ -1614,6 +2167,7 @@ public final class ClusterTestModule {
                     currentConfig
             );
         } catch (Exception exception) {
+            ClusterTransferGuard.unlock(player);
             source.sendFailure(
                     Component.literal(
                             "§cНе удалось сохранить данные игрока перед transfer: "
@@ -1709,6 +2263,31 @@ public final class ClusterTestModule {
             float pitch,
             ClusterPlayerDataCodec.Snapshot playerData
     ) throws Exception {
+        if (!currentConfig.enabled()) {
+            throw new IllegalStateException(
+                    "Кластерная система отключена"
+            );
+        }
+
+        String assignedOwner =
+                ClusterDatabase.findDimensionOwner(
+                        currentConfig,
+                        dimensionId
+                );
+
+        if (assignedOwner != null
+                && !assignedOwner.equalsIgnoreCase(targetNode)) {
+            throw new IllegalStateException(
+                    "Dimension "
+                            + dimensionId
+                            + " принадлежит узлу "
+                            + assignedOwner
+                            + ", поэтому transfer на "
+                            + targetNode
+                            + " запрещён"
+            );
+        }
+
         ClusterDatabase.CreatedTransfer transfer =
                 ClusterDatabase.createTransfer(
                         currentConfig,
@@ -1740,6 +2319,7 @@ public final class ClusterTestModule {
         server.execute(
                 () -> redirectPlayer(
                         server,
+                        currentConfig,
                         playerUuid,
                         playerName,
                         transfer
@@ -1749,6 +2329,7 @@ public final class ClusterTestModule {
 
     private void redirectPlayer(
             MinecraftServer server,
+            ClusterConfig currentConfig,
             UUID playerUuid,
             String playerName,
             ClusterDatabase.CreatedTransfer transfer
@@ -1796,40 +2377,129 @@ public final class ClusterTestModule {
                 )
         );
 
-        int redirectResult =
-                server.getCommands()
-                        .performPrefixedCommand(
-                                server.createCommandSourceStack(),
-                                redirectCommand
-                        );
-
-        if (redirectResult <= 0) {
+        if (server.getCommands()
+                .getDispatcher()
+                .getRoot()
+                .getChild("redirect") == null) {
             LOGGER.error(
-                    "Server Redirect command returned {}: {}",
-                    redirectResult,
+                    "Server Redirect command is not registered: {}",
                     redirectCommand
             );
-
-            onlinePlayer.sendSystemMessage(
-                    Component.literal(
-                            "§cАвтоматический redirect не выполнился."
-                                    + "\n§eЗапись осталась READY."
-                                    + "\n§eВыполни вручную:"
-                                    + "\n§fredirect "
-                                    + playerName
-                                    + " "
-                                    + transfer.redirectAddress()
-                    )
+            cancelTransferAfterRedirectDispatchFailure(
+                    server,
+                    currentConfig,
+                    playerUuid,
+                    transfer,
+                    "Команда redirect не зарегистрирована на backend-сервере."
             );
-
             return;
         }
 
-        LOGGER.info(
-                "Automatic redirect command executed for player {}: {}",
+        final int redirectResult;
+
+        try {
+            redirectResult = server.getCommands()
+                    .performPrefixedCommand(
+                            server.createCommandSourceStack(),
+                            redirectCommand
+                    );
+        } catch (Exception exception) {
+            LOGGER.error(
+                    "Server Redirect command threw an exception: {}",
+                    redirectCommand,
+                    exception
+            );
+            cancelTransferAfterRedirectDispatchFailure(
+                    server,
+                    currentConfig,
+                    playerUuid,
+                    transfer,
+                    "Команда redirect завершилась исключением: "
+                            + exception.getMessage()
+            );
+            return;
+        }
+        if (redirectResult <= 0) {
+            LOGGER.warn(
+                    "Server Redirect command returned {} but was dispatched; keeping transfer {} READY because this redirect implementation may report zero on success: {}",
+                    redirectResult,
+                    transfer.transferId(),
+                    redirectCommand
+            );
+        } else {
+            LOGGER.info(
+                    "Automatic redirect command executed for player {} with result {}: {}",
+                    playerUuid,
+                    redirectResult,
+                    redirectCommand
+            );
+        }
+    }
+
+    private void cancelTransferAfterRedirectDispatchFailure(
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            UUID playerUuid,
+            ClusterDatabase.CreatedTransfer transfer,
+            String failureMessage
+    ) {
+        ClusterTransferGuard.updateReason(
                 playerUuid,
-                redirectCommand
+                "Отмена неудачного межсерверного перехода"
         );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.cancelReadyTransfer(
+                        currentConfig,
+                        transfer.transferId(),
+                        playerUuid
+                );
+
+                server.execute(() -> {
+                    ServerPlayer player = server.getPlayerList()
+                            .getPlayer(playerUuid);
+
+                    if (player == null) {
+                        ClusterTransferGuard.unlock(playerUuid);
+                        return;
+                    }
+
+                    ClusterTransferGuard.unlock(player);
+                    player.sendSystemMessage(
+                            Component.literal(
+                                    "§cАвтоматический redirect не выполнился: §f"
+                                            + failureMessage
+                                            + "\n§aTransfer безопасно отменён; "
+                                            + "сессия возвращена текущему узлу."
+                            )
+                    );
+                });
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to cancel READY transfer {} after redirect dispatch failure",
+                        transfer.transferId(),
+                        exception
+                );
+
+                server.execute(() -> {
+                    ServerPlayer player = server.getPlayerList()
+                            .getPlayer(playerUuid);
+
+                    if (player != null) {
+                        player.connection.disconnect(
+                                Component.literal(
+                                        "Не удалось выполнить redirect и безопасно "
+                                                + "отменить transfer. Повторите вход "
+                                                + "через несколько секунд."
+                                )
+                        );
+                    } else {
+                        ClusterTransferGuard.unlock(playerUuid);
+                    }
+                });
+            }
+        });
     }
 
     private void teleportLocally(
@@ -1848,47 +2518,51 @@ public final class ClusterTestModule {
                         .getPlayer(playerUuid);
 
         if (player == null) {
-            return;
-        }
-
-        ResourceLocation dimensionLocation =
-                ResourceLocation.tryParse(dimensionId);
-
-        if (dimensionLocation == null) {
-            player.sendSystemMessage(
-                    Component.literal(
-                            "§cНекорректный dimension id: §f"
-                                    + dimensionId
-                    )
-            );
-
-            return;
-        }
-
-        ResourceKey<Level> dimensionKey =
-                ResourceKey.create(
-                        Registries.DIMENSION,
-                        dimensionLocation
-                );
-
-        ServerLevel targetLevel =
-                server.getLevel(dimensionKey);
-
-        if (targetLevel == null) {
-            player.sendSystemMessage(
-                    Component.literal(
-                            "§cDimension §f"
-                                    + dimensionId
-                                    + "§c назначена текущему узлу §f"
-                                    + currentConfig.nodeId()
-                                    + "§c, но измерение на нём не загружено."
-                    )
-            );
-
+            ClusterTransferGuard.unlock(playerUuid);
             return;
         }
 
         try {
+            ResourceLocation dimensionLocation =
+                    ResourceLocation.tryParse(dimensionId);
+
+            if (dimensionLocation == null) {
+                player.sendSystemMessage(
+                        Component.literal(
+                                "§cНекорректный dimension id: §f"
+                                        + dimensionId
+                        )
+                );
+                return;
+            }
+
+            ResourceKey<Level> dimensionKey =
+                    ResourceKey.create(
+                            Registries.DIMENSION,
+                            dimensionLocation
+                    );
+
+            ServerLevel targetLevel =
+                    server.getLevel(dimensionKey);
+
+            if (targetLevel == null) {
+                player.sendSystemMessage(
+                        Component.literal(
+                                "§cDimension §f"
+                                        + dimensionId
+                                        + "§c назначена текущему узлу §f"
+                                        + currentConfig.nodeId()
+                                        + "§c, но измерение на нём не загружено."
+                        )
+                );
+                return;
+            }
+
+            suppressDimensionRoute(
+                    playerUuid,
+                    dimensionId
+            );
+
             player.teleportTo(
                     targetLevel,
                     x,
@@ -1930,6 +2604,8 @@ public final class ClusterTestModule {
                                     + exception.getMessage()
                     )
             );
+        } finally {
+            ClusterTransferGuard.unlock(player);
         }
     }
 
@@ -1949,49 +2625,52 @@ public final class ClusterTestModule {
                         .getPlayer(playerUuid);
 
         if (player == null) {
-            return;
-        }
-
-        ResourceLocation dimensionLocation =
-                ResourceLocation.tryParse(dimensionId);
-
-        if (dimensionLocation == null) {
-            scheduleRouteFailure(
-                    server,
-                    playerUuid,
-                    "Некорректный dimension id: "
-                            + dimensionId
-            );
-
-            return;
-        }
-
-        ResourceKey<Level> dimensionKey =
-                ResourceKey.create(
-                        Registries.DIMENSION,
-                        dimensionLocation
-                );
-
-        ServerLevel targetLevel =
-                server.getLevel(dimensionKey);
-
-        if (targetLevel == null) {
-            scheduleRouteFailure(
-                    server,
-                    playerUuid,
-                    "Dimension "
-                            + dimensionId
-                            + " назначена текущему узлу "
-                            + currentConfig.nodeId()
-                            + ", но не загружена на нём."
-            );
-
+            ClusterTransferGuard.unlock(playerUuid);
             return;
         }
 
         try {
-            int experienceLevel =
-                    player.experienceLevel;
+            ResourceLocation dimensionLocation =
+                    ResourceLocation.tryParse(dimensionId);
+
+            if (dimensionLocation == null) {
+                player.sendSystemMessage(
+                        Component.literal(
+                                "§cНекорректный dimension id: §f"
+                                        + dimensionId
+                        )
+                );
+                return;
+            }
+
+            ResourceKey<Level> dimensionKey =
+                    ResourceKey.create(
+                            Registries.DIMENSION,
+                            dimensionLocation
+                    );
+
+            ServerLevel targetLevel =
+                    server.getLevel(dimensionKey);
+
+            if (targetLevel == null) {
+                player.sendSystemMessage(
+                        Component.literal(
+                                "§cDimension "
+                                        + dimensionId
+                                        + " назначена текущему узлу "
+                                        + currentConfig.nodeId()
+                                        + ", но не загружена на нём."
+                        )
+                );
+                return;
+            }
+
+            int experienceLevel = player.experienceLevel;
+
+            suppressDimensionRoute(
+                    playerUuid,
+                    dimensionId
+            );
 
             player.teleportTo(
                     targetLevel,
@@ -2002,8 +2681,7 @@ public final class ClusterTestModule {
                     pitch
             );
 
-            player.experienceLevel =
-                    experienceLevel;
+            player.experienceLevel = experienceLevel;
         } catch (Exception exception) {
             LOGGER.error(
                     "Unable to finish local FTB Essentials teleport for player {} to {}",
@@ -2012,12 +2690,14 @@ public final class ClusterTestModule {
                     exception
             );
 
-            scheduleRouteFailure(
-                    server,
-                    playerUuid,
-                    "Ошибка локальной телепортации: "
-                            + exception.getMessage()
+            player.sendSystemMessage(
+                    Component.literal(
+                            "§cОшибка локальной телепортации: "
+                                    + exception.getMessage()
+                    )
             );
+        } finally {
+            ClusterTransferGuard.unlock(player);
         }
     }
 
@@ -2079,11 +2759,14 @@ public final class ClusterTestModule {
                             .getPlayer(playerUuid);
 
             if (onlinePlayer != null) {
+                ClusterTransferGuard.unlock(onlinePlayer);
                 onlinePlayer.sendSystemMessage(
                         Component.literal(
                                 "§c" + message
                         )
                 );
+            } else {
+                ClusterTransferGuard.unlock(playerUuid);
             }
         });
     }
@@ -2099,9 +2782,11 @@ public final class ClusterTestModule {
                             .getPlayer(playerUuid);
 
             if (onlinePlayer == null) {
+                ClusterTransferGuard.unlock(playerUuid);
                 return;
             }
 
+            ClusterTransferGuard.unlock(onlinePlayer);
             onlinePlayer.sendSystemMessage(
                     Component.literal(
                             "§cНе удалось создать или выполнить маршрут: "
@@ -2138,11 +2823,11 @@ public final class ClusterTestModule {
 
         if (player == null) {
             failTransfer(
+                    server,
                     currentConfig,
                     transfer,
                     "Игрок вышел до применения transfer"
             );
-
             return;
         }
 
@@ -2153,12 +2838,12 @@ public final class ClusterTestModule {
 
         if (dimensionLocation == null) {
             failTransfer(
+                    server,
                     currentConfig,
                     transfer,
                     "Некорректный dimension id: "
                             + transfer.dimensionId()
             );
-
             return;
         }
 
@@ -2173,21 +2858,12 @@ public final class ClusterTestModule {
 
         if (targetLevel == null) {
             failTransfer(
+                    server,
                     currentConfig,
                     transfer,
                     "Измерение отсутствует на узле: "
                             + transfer.dimensionId()
             );
-
-            player.sendSystemMessage(
-                    Component.literal(
-                            "§cTransfer найден, но измерение §f"
-                                    + transfer.dimensionId()
-                                    + "§c отсутствует на узле §f"
-                                    + currentConfig.nodeId()
-                    )
-            );
-
             return;
         }
 
@@ -2199,6 +2875,11 @@ public final class ClusterTestModule {
                             transfer
                     );
 
+            suppressDimensionRoute(
+                    transfer.playerUuid(),
+                    transfer.dimensionId()
+            );
+
             player.teleportTo(
                     targetLevel,
                     transfer.x(),
@@ -2207,25 +2888,7 @@ public final class ClusterTestModule {
                     transfer.yaw(),
                     transfer.pitch()
             );
-
-            // Persist both the restored state and the replay-protection marker
-            // before the DB claim can become stale and be retried.
             server.getPlayerList().saveAll();
-
-            player.sendSystemMessage(
-                    Component.literal(
-                            "§aTransfer выполнен: §f"
-                                    + transfer.sourceNode()
-                                    + " §7-> §f"
-                                    + transfer.targetNode()
-                                    + "§a, dimension: §f"
-                                    + transfer.dimensionId()
-                                    + formatPlayerDataApplyMessage(
-                                            playerDataResult
-                                    )
-                    )
-            );
-
             LOGGER.info(
                     "Applied transfer {} for player {} on node {}, playerDataPresent={}, playerDataApplied={}, playerDataAlreadyApplied={}, playerDataSize={}",
                     transfer.transferId(),
@@ -2237,34 +2900,83 @@ public final class ClusterTestModule {
                     playerDataResult.compressedSize()
             );
 
+            ClusterTransferGuard.updateReason(
+                    transfer.playerUuid(),
+                    "Фиксация кластерной сессии"
+            );
+
             DATABASE_EXECUTOR.execute(() -> {
                 try {
                     ClusterDatabase.markConsumed(
                             currentConfig,
-                            transfer.transferId()
+                            transfer.transferId(),
+                            transfer.playerUuid()
                     );
+
+                    server.execute(() -> {
+                        ServerPlayer onlinePlayer =
+                                server.getPlayerList()
+                                        .getPlayer(transfer.playerUuid());
+
+                        if (onlinePlayer == null) {
+                            ClusterTransferGuard.unlock(
+                                    transfer.playerUuid()
+                            );
+                            return;
+                        }
+
+                        ClusterTransferGuard.unlock(onlinePlayer);
+                        onlinePlayer.sendSystemMessage(
+                                Component.literal(
+                                        "§aTransfer выполнен: §f"
+                                                + transfer.sourceNode()
+                                                + " §7-> §f"
+                                                + transfer.targetNode()
+                                                + "§a, dimension: §f"
+                                                + transfer.dimensionId()
+                                                + formatPlayerDataApplyMessage(
+                                                playerDataResult
+                                        )
+                                )
+                        );
+                    });
                 } catch (Exception exception) {
                     LOGGER.error(
                             "Unable to mark transfer {} as CONSUMED",
                             transfer.transferId(),
                             exception
                     );
+
+                    server.execute(() -> {
+                        ServerPlayer onlinePlayer =
+                                server.getPlayerList()
+                                        .getPlayer(transfer.playerUuid());
+
+                        if (onlinePlayer != null) {
+                            onlinePlayer.connection.disconnect(
+                                    Component.literal(
+                                            "Данные transfer применены, но кластерная "
+                                                    + "сессия не была зафиксирована. "
+                                                    + "Вы отключены для защиты от дюпа. "
+                                                    + "Повторите вход через несколько секунд."
+                                    )
+                            );
+                        } else {
+                            ClusterTransferGuard.unlock(
+                                    transfer.playerUuid()
+                            );
+                        }
+                    });
                 }
             });
         } catch (Exception exception) {
             failTransfer(
+                    server,
                     currentConfig,
                     transfer,
                     exception.getClass().getSimpleName()
                             + ": "
                             + exception.getMessage()
-            );
-
-            player.sendSystemMessage(
-                    Component.literal(
-                            "§cОшибка применения transfer: "
-                                    + exception.getMessage()
-                    )
             );
         }
     }
@@ -2342,6 +3054,7 @@ public final class ClusterTestModule {
     }
 
     private void failTransfer(
+            MinecraftServer server,
             ClusterConfig currentConfig,
             ClusterDatabase.PendingTransfer transfer,
             String reason
@@ -2353,11 +3066,17 @@ public final class ClusterTestModule {
                 reason
         );
 
+        ClusterTransferGuard.updateReason(
+                transfer.playerUuid(),
+                "Отмена повреждённого transfer"
+        );
+
         DATABASE_EXECUTOR.execute(() -> {
             try {
                 ClusterDatabase.markFailed(
                         currentConfig,
-                        transfer.transferId()
+                        transfer.transferId(),
+                        transfer.playerUuid()
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -2365,6 +3084,26 @@ public final class ClusterTestModule {
                         transfer.transferId(),
                         exception
                 );
+            } finally {
+                server.execute(() -> {
+                    ServerPlayer player = server.getPlayerList()
+                            .getPlayer(transfer.playerUuid());
+
+                    if (player == null) {
+                        ClusterTransferGuard.unlock(
+                                transfer.playerUuid()
+                        );
+                        return;
+                    }
+
+                    player.connection.disconnect(
+                            Component.literal(
+                                    "Не удалось безопасно применить transfer: "
+                                            + reason
+                                            + "\nИгрок отключён для защиты данных."
+                            )
+                    );
+                });
             }
         });
     }
@@ -2728,7 +3467,13 @@ public final class ClusterTestModule {
                                 + currentConfig.syncForgeCapabilities()
                                 + "§7, max player-data: §f"
                                 + currentConfig.maxPlayerDataBytes()
-                                + " bytes"
+                                + " bytes§7, session lease: §f"
+                                + currentConfig.playerSessionLeaseSeconds()
+                                + "s§7, transfer lock timeout: §f"
+                                + currentConfig.transferLockTimeoutSeconds()
+                                + "s§7, backup retention: §f"
+                                + currentConfig.playerBackupRetentionDays()
+                                + " days"
                 ),
                 false
         );
@@ -2763,6 +3508,54 @@ public final class ClusterTestModule {
                     false
             );
         }
+    }
+
+    private static void suppressDimensionRoute(
+            UUID playerUuid,
+            String dimensionId
+    ) {
+        if (playerUuid == null
+                || dimensionId == null
+                || dimensionId.isBlank()) {
+            return;
+        }
+
+        DIMENSION_ROUTE_SUPPRESSIONS.put(
+                playerUuid,
+                new DimensionRouteSuppression(
+                        dimensionId,
+                        System.nanoTime()
+                                + DIMENSION_ROUTE_SUPPRESSION_NANOS
+                )
+        );
+    }
+
+    private static boolean isDimensionRouteSuppressed(
+            UUID playerUuid,
+            String dimensionId
+    ) {
+        DimensionRouteSuppression suppression =
+                DIMENSION_ROUTE_SUPPRESSIONS.get(playerUuid);
+
+        if (suppression == null) {
+            return false;
+        }
+
+        if (System.nanoTime() > suppression.expiresAtNanos()) {
+            DIMENSION_ROUTE_SUPPRESSIONS.remove(
+                    playerUuid,
+                    suppression
+            );
+            return false;
+        }
+
+        return suppression.dimensionId().equals(dimensionId);
+    }
+
+    private record DimensionRouteSuppression(
+            String dimensionId,
+            long expiresAtNanos
+    ) {
     }
 
     private static void broadcastToOperators(

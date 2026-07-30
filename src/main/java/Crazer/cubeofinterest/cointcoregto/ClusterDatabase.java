@@ -46,7 +46,9 @@ public final class ClusterDatabase {
         try (Connection connection = open(config)) {
             expireTransfers(connection);
             recoverStaleClaims(connection, config);
+            cleanupExpiredBackups(connection, config);
             upsertNode(connection, config, server);
+            refreshPlayerSessionLeases(connection, config, server);
 
             return readTestResult(connection, config);
         }
@@ -59,7 +61,26 @@ public final class ClusterDatabase {
         ensureSchema(config);
 
         try (Connection connection = open(config)) {
+            expireTransfers(connection);
+            recoverStaleClaims(connection, config);
+            cleanupExpiredBackups(connection, config);
             upsertNode(connection, config, server);
+            refreshPlayerSessionLeases(connection, config, server);
+        }
+    }
+
+    public static String findOnlineRedirectAddress(
+            ClusterConfig config,
+            String nodeId
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            return findOnlineNodeRedirectAddress(
+                    connection,
+                    nodeId,
+                    config.nodeTimeoutSeconds()
+            );
         }
     }
 
@@ -194,20 +215,43 @@ public final class ClusterDatabase {
     ) throws SQLException {
         ensureSchema(config);
 
-        String sql = """
-                UPDATE cluster_nodes
-                SET
-                    player_count = 0,
-                    stopped_at = CURRENT_TIMESTAMP(3)
-                WHERE node_id = ?
-                """;
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
 
-        try (Connection connection = open(config);
-             PreparedStatement statement =
-                     connection.prepareStatement(sql)) {
+            try {
+                String nodeSql = """
+                        UPDATE cluster_nodes
+                        SET
+                            player_count = 0,
+                            stopped_at = CURRENT_TIMESTAMP(3)
+                        WHERE node_id = ?
+                        """;
 
-            statement.setString(1, config.nodeId());
-            statement.executeUpdate();
+                try (PreparedStatement statement =
+                             connection.prepareStatement(nodeSql)) {
+                    statement.setString(1, config.nodeId());
+                    statement.executeUpdate();
+                }
+
+                String sessionsSql = """
+                        DELETE FROM cluster_player_sessions
+                        WHERE owner_node = ?
+                          AND state = 'ONLINE'
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(sessionsSql)) {
+                    statement.setString(1, config.nodeId());
+                    statement.executeUpdate();
+                }
+
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
         }
     }
 
@@ -516,6 +560,7 @@ public final class ClusterDatabase {
             try {
                 expireTransfers(connection);
                 recoverStaleClaims(connection, config);
+                cleanupExpiredBackups(connection, config);
 
                 String redirectAddress =
                         findOnlineNodeRedirectAddress(
@@ -543,7 +588,17 @@ public final class ClusterDatabase {
                     );
                 }
 
-                cancelReadyTransfers(connection, playerUuid);
+                cancelReadyTransfers(
+                        connection,
+                        config,
+                        playerUuid
+                );
+
+                ensureSourceSessionForTransfer(
+                        connection,
+                        config,
+                        playerUuid
+                );
 
                 String transferId = UUID.randomUUID().toString();
 
@@ -594,29 +649,7 @@ public final class ClusterDatabase {
                     statement.setFloat(9, yaw);
                     statement.setFloat(10, pitch);
 
-                    if (playerData == null) {
-                        statement.setNull(11, Types.LONGVARBINARY);
-                        statement.setNull(12, Types.CHAR);
-                        statement.setInt(13, 0);
-                        statement.setInt(14, 0);
-                    } else {
-                        statement.setBytes(
-                                11,
-                                playerData.compressedNbt()
-                        );
-                        statement.setString(
-                                12,
-                                playerData.sha256()
-                        );
-                        statement.setInt(
-                                13,
-                                playerData.codecVersion()
-                        );
-                        statement.setInt(
-                                14,
-                                playerData.compressedSize()
-                        );
-                    }
+                    bindPlayerData(statement, 11, playerData);
 
                     statement.setInt(
                             15,
@@ -624,6 +657,24 @@ public final class ClusterDatabase {
                     );
                     statement.executeUpdate();
                 }
+
+                if (playerData != null) {
+                    insertPlayerDataBackup(
+                            connection,
+                            config,
+                            playerUuid,
+                            transferId,
+                            playerData
+                    );
+                }
+
+                markSessionTransferring(
+                        connection,
+                        config,
+                        playerUuid,
+                        transferId,
+                        targetNode
+                );
 
                 connection.commit();
 
@@ -718,6 +769,12 @@ public final class ClusterDatabase {
                     return null;
                 }
 
+                claimSessionForTransfer(
+                        connection,
+                        config,
+                        transfer
+                );
+
                 String claimSql = """
                         UPDATE pending_transfers
                         SET
@@ -756,60 +813,932 @@ public final class ClusterDatabase {
         }
     }
 
-    public static void markConsumed(
+    public static PlayerSessionAcquireResult acquirePlayerSession(
             ClusterConfig config,
-            String transferId
+            UUID playerUuid
     ) throws SQLException {
-        updateClaimedStatus(
-                config,
-                transferId,
-                "CONSUMED"
-        );
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                expireTransfers(connection);
+                recoverStaleClaims(connection, config);
+
+                PlayerSessionRow session = selectPlayerSessionForUpdate(
+                        connection,
+                        config,
+                        playerUuid
+                );
+
+                if (session == null) {
+                    insertOnlinePlayerSession(
+                            connection,
+                            config,
+                            playerUuid
+                    );
+
+                    connection.commit();
+                    return PlayerSessionAcquireResult.acquired(
+                            config.nodeId()
+                    );
+                }
+
+                boolean ownedByCurrentNode =
+                        session.ownerNode().equalsIgnoreCase(
+                                config.nodeId()
+                        );
+
+                if (ownedByCurrentNode
+                        && "ONLINE".equals(session.state())) {
+                    activateOnlinePlayerSession(
+                            connection,
+                            config,
+                            playerUuid
+                    );
+
+                    connection.commit();
+                    return PlayerSessionAcquireResult.acquired(
+                            config.nodeId()
+                    );
+                }
+
+                if (!session.leaseActive()
+                        || !session.ownerNodeOnline()) {
+                    activateOnlinePlayerSession(
+                            connection,
+                            config,
+                            playerUuid
+                    );
+
+                    connection.commit();
+                    return PlayerSessionAcquireResult.recovered(
+                            config.nodeId(),
+                            session.ownerNode(),
+                            session.state()
+                    );
+                }
+
+                connection.commit();
+                return PlayerSessionAcquireResult.denied(
+                        session.ownerNode(),
+                        session.state(),
+                        session.transferId(),
+                        session.targetNode(),
+                        session.leaseExpiresAt()
+                );
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
     }
 
-    public static void markFailed(
+    public static void releasePlayerSession(
             ClusterConfig config,
-            String transferId
-    ) throws SQLException {
-        updateClaimedStatus(
-                config,
-                transferId,
-                "FAILED"
-        );
-    }
-
-    private static void updateClaimedStatus(
-            ClusterConfig config,
-            String transferId,
-            String newStatus
+            UUID playerUuid
     ) throws SQLException {
         ensureSchema(config);
 
         String sql = """
-                UPDATE pending_transfers
-                SET
-                    status = ?,
-                    claimed_at = NULL,
-                    player_data = NULL,
-                    applied_at = CASE
-                        WHEN ? = 'CONSUMED'
-                        THEN CURRENT_TIMESTAMP(3)
-                        ELSE applied_at
-                    END
-                WHERE transfer_id = ?
-                  AND status = 'CLAIMED'
+                DELETE FROM cluster_player_sessions
+                WHERE player_uuid = ?
+                  AND owner_node = ?
+                  AND state = 'ONLINE'
                 """;
 
         try (Connection connection = open(config);
              PreparedStatement statement =
                      connection.prepareStatement(sql)) {
 
-            statement.setString(1, newStatus);
-            statement.setString(2, newStatus);
-            statement.setString(3, transferId);
+            statement.setString(1, playerUuid.toString());
+            statement.setString(2, config.nodeId());
             statement.executeUpdate();
         }
     }
+
+    public static RecoveryBackup findRecoveryBackup(
+            ClusterConfig config,
+            UUID playerUuid
+    ) throws SQLException {
+        ensureSchema(config);
+
+        String sql = """
+                SELECT
+                    backups.backup_id,
+                    backups.player_uuid,
+                    backups.transfer_id,
+                    backups.source_node,
+                    backups.player_data,
+                    backups.player_data_sha256,
+                    backups.player_data_codec,
+                    backups.player_data_size,
+                    backups.created_at,
+                    backups.expires_at
+                FROM cluster_player_backups AS backups
+                INNER JOIN pending_transfers AS transfers
+                    ON transfers.transfer_id = backups.transfer_id
+                WHERE backups.player_uuid = ?
+                  AND backups.restored_at IS NULL
+                  AND backups.expires_at > CURRENT_TIMESTAMP(3)
+                  AND transfers.status IN ('FAILED', 'EXPIRED')
+                ORDER BY backups.created_at DESC
+                LIMIT 1
+                """;
+
+        try (Connection connection = open(config);
+             PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, playerUuid.toString());
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return null;
+                }
+
+                return new RecoveryBackup(
+                        resultSet.getLong("backup_id"),
+                        UUID.fromString(
+                                resultSet.getString("player_uuid")
+                        ),
+                        resultSet.getString("transfer_id"),
+                        resultSet.getString("source_node"),
+                        resultSet.getBytes("player_data"),
+                        resultSet.getString("player_data_sha256"),
+                        resultSet.getInt("player_data_codec"),
+                        resultSet.getInt("player_data_size"),
+                        resultSet.getTimestamp("created_at").toInstant(),
+                        resultSet.getTimestamp("expires_at").toInstant()
+                );
+            }
+        }
+    }
+
+    public static void markRecoveryBackupRestored(
+            ClusterConfig config,
+            long backupId,
+            UUID playerUuid
+    ) throws SQLException {
+        ensureSchema(config);
+
+        String sql = """
+                UPDATE cluster_player_backups
+                SET
+                    restored_at = CURRENT_TIMESTAMP(3),
+                    restore_node = ?
+                WHERE backup_id = ?
+                  AND player_uuid = ?
+                  AND restored_at IS NULL
+                """;
+
+        try (Connection connection = open(config);
+             PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, config.nodeId());
+            statement.setLong(2, backupId);
+            statement.setString(3, playerUuid.toString());
+
+            int updated = statement.executeUpdate();
+
+            if (updated != 1) {
+                throw new SQLException(
+                        "Не удалось отметить backup "
+                                + backupId
+                                + " как восстановленный"
+                );
+            }
+        }
+    }
+
+    public static void cancelReadyTransfer(
+            ClusterConfig config,
+            String transferId,
+            UUID playerUuid
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                String transferSql = """
+                        UPDATE pending_transfers
+                        SET
+                            status = 'CANCELLED',
+                            claimed_at = NULL,
+                            player_data = NULL
+                        WHERE transfer_id = ?
+                          AND player_uuid = ?
+                          AND source_node = ?
+                          AND status = 'READY'
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(transferSql)) {
+                    statement.setString(1, transferId);
+                    statement.setString(2, playerUuid.toString());
+                    statement.setString(3, config.nodeId());
+                    statement.executeUpdate();
+                }
+
+                String sessionSql = """
+                        UPDATE cluster_player_sessions
+                        SET
+                            state = 'ONLINE',
+                            transfer_id = NULL,
+                            target_node = NULL,
+                            lease_expires_at = TIMESTAMPADD(
+                                SECOND,
+                                ?,
+                                CURRENT_TIMESTAMP(3)
+                            ),
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE player_uuid = ?
+                          AND owner_node = ?
+                          AND transfer_id = ?
+                          AND state = 'TRANSFERRING'
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(sessionSql)) {
+                    statement.setInt(
+                            1,
+                            config.playerSessionLeaseSeconds()
+                    );
+                    statement.setString(2, playerUuid.toString());
+                    statement.setString(3, config.nodeId());
+                    statement.setString(4, transferId);
+                    statement.executeUpdate();
+                }
+
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static void markConsumed(
+            ClusterConfig config,
+            String transferId,
+            UUID playerUuid
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                String transferSql = """
+                        UPDATE pending_transfers
+                        SET
+                            status = 'CONSUMED',
+                            claimed_at = NULL,
+                            player_data = NULL,
+                            applied_at = CURRENT_TIMESTAMP(3)
+                        WHERE transfer_id = ?
+                          AND player_uuid = ?
+                          AND target_node = ?
+                          AND status = 'CLAIMED'
+                        """;
+
+                int updated;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(transferSql)) {
+                    statement.setString(1, transferId);
+                    statement.setString(2, playerUuid.toString());
+                    statement.setString(3, config.nodeId());
+                    updated = statement.executeUpdate();
+                }
+
+                if (updated != 1
+                        && !isTransferAlreadyConsumed(
+                        connection,
+                        transferId,
+                        playerUuid,
+                        config.nodeId()
+                )) {
+                    throw new SQLException(
+                            "Не удалось завершить transfer " + transferId
+                    );
+                }
+
+                activateOnlinePlayerSessionAfterTransfer(
+                        connection,
+                        config,
+                        playerUuid,
+                        transferId
+                );
+
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static void markFailed(
+            ClusterConfig config,
+            String transferId,
+            UUID playerUuid
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                String transferSql = """
+                        UPDATE pending_transfers
+                        SET
+                            status = 'FAILED',
+                            claimed_at = NULL,
+                            player_data = NULL
+                        WHERE transfer_id = ?
+                          AND player_uuid = ?
+                          AND status = 'CLAIMED'
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(transferSql)) {
+                    statement.setString(1, transferId);
+                    statement.setString(2, playerUuid.toString());
+                    statement.executeUpdate();
+                }
+
+                String sessionSql = """
+                        DELETE FROM cluster_player_sessions
+                        WHERE player_uuid = ?
+                          AND transfer_id = ?
+                        """;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement(sessionSql)) {
+                    statement.setString(1, playerUuid.toString());
+                    statement.setString(2, transferId);
+                    statement.executeUpdate();
+                }
+
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+
+    private static void bindPlayerData(
+            PreparedStatement statement,
+            int firstParameter,
+            ClusterPlayerDataCodec.Snapshot playerData
+    ) throws SQLException {
+        if (playerData == null) {
+            statement.setNull(firstParameter, Types.LONGVARBINARY);
+            statement.setNull(firstParameter + 1, Types.CHAR);
+            statement.setInt(firstParameter + 2, 0);
+            statement.setInt(firstParameter + 3, 0);
+            return;
+        }
+
+        statement.setBytes(
+                firstParameter,
+                playerData.compressedNbt()
+        );
+        statement.setString(
+                firstParameter + 1,
+                playerData.sha256()
+        );
+        statement.setInt(
+                firstParameter + 2,
+                playerData.codecVersion()
+        );
+        statement.setInt(
+                firstParameter + 3,
+                playerData.compressedSize()
+        );
+    }
+
+    private static void insertPlayerDataBackup(
+            Connection connection,
+            ClusterConfig config,
+            UUID playerUuid,
+            String transferId,
+            ClusterPlayerDataCodec.Snapshot playerData
+    ) throws SQLException {
+        String sql = """
+                INSERT IGNORE INTO cluster_player_backups (
+                    player_uuid,
+                    transfer_id,
+                    source_node,
+                    player_data,
+                    player_data_sha256,
+                    player_data_codec,
+                    player_data_size,
+                    created_at,
+                    expires_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?,
+                    CURRENT_TIMESTAMP(3),
+                    TIMESTAMPADD(
+                        DAY,
+                        ?,
+                        CURRENT_TIMESTAMP(3)
+                    )
+                )
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, playerUuid.toString());
+            statement.setString(2, transferId);
+            statement.setString(3, config.nodeId());
+            statement.setBytes(4, playerData.compressedNbt());
+            statement.setString(5, playerData.sha256());
+            statement.setInt(6, playerData.codecVersion());
+            statement.setInt(7, playerData.compressedSize());
+            statement.setInt(8, config.playerBackupRetentionDays());
+            statement.executeUpdate();
+        }
+    }
+
+    private static void cleanupExpiredBackups(
+            Connection connection,
+            ClusterConfig config
+    ) throws SQLException {
+        String sql = """
+                DELETE FROM cluster_player_backups
+                WHERE expires_at <= CURRENT_TIMESTAMP(3)
+                   OR created_at <= TIMESTAMPADD(
+                        DAY,
+                        -?,
+                        CURRENT_TIMESTAMP(3)
+                   )
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setInt(1, config.playerBackupRetentionDays());
+            statement.executeUpdate();
+        }
+    }
+
+    private static void refreshPlayerSessionLeases(
+            Connection connection,
+            ClusterConfig config,
+            MinecraftServer server
+    ) throws SQLException {
+        String sql = """
+                UPDATE cluster_player_sessions
+                SET
+                    lease_expires_at = TIMESTAMPADD(
+                        SECOND,
+                        ?,
+                        CURRENT_TIMESTAMP(3)
+                    ),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                WHERE player_uuid = ?
+                  AND owner_node = ?
+                  AND state IN ('ONLINE', 'CLAIMING')
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            for (var player : server.getPlayerList().getPlayers()) {
+                statement.setInt(
+                        1,
+                        config.playerSessionLeaseSeconds()
+                );
+                statement.setString(
+                        2,
+                        player.getUUID().toString()
+                );
+                statement.setString(3, config.nodeId());
+                statement.addBatch();
+            }
+
+            statement.executeBatch();
+        }
+    }
+
+    private static void ensureSourceSessionForTransfer(
+            Connection connection,
+            ClusterConfig config,
+            UUID playerUuid
+    ) throws SQLException {
+        PlayerSessionRow session = selectPlayerSessionForUpdate(
+                connection,
+                config,
+                playerUuid
+        );
+
+        if (session == null) {
+            insertOnlinePlayerSession(
+                    connection,
+                    config,
+                    playerUuid
+            );
+            return;
+        }
+
+        boolean ownedByCurrentNode =
+                session.ownerNode().equalsIgnoreCase(
+                        config.nodeId()
+                );
+
+        if (ownedByCurrentNode
+                && "ONLINE".equals(session.state())) {
+            return;
+        }
+
+        if (!session.leaseActive()
+                || !session.ownerNodeOnline()) {
+            activateOnlinePlayerSession(
+                    connection,
+                    config,
+                    playerUuid
+            );
+            return;
+        }
+
+        throw new SQLException(
+                "Состояние игрока заблокировано узлом "
+                        + session.ownerNode()
+                        + " (state="
+                        + session.state()
+                        + ", transfer="
+                        + session.transferId()
+                        + ")"
+        );
+    }
+
+    private static PlayerSessionRow selectPlayerSessionForUpdate(
+            Connection connection,
+            ClusterConfig config,
+            UUID playerUuid
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    sessions.owner_node,
+                    sessions.state,
+                    sessions.transfer_id,
+                    sessions.target_node,
+                    sessions.lease_expires_at,
+                    CASE
+                        WHEN sessions.lease_expires_at
+                             > CURRENT_TIMESTAMP(3)
+                        THEN 1
+                        ELSE 0
+                    END AS lease_active,
+                    CASE
+                        WHEN nodes.node_id IS NOT NULL
+                         AND nodes.stopped_at IS NULL
+                         AND nodes.last_seen >= TIMESTAMPADD(
+                            SECOND,
+                            -?,
+                            CURRENT_TIMESTAMP(3)
+                         )
+                        THEN 1
+                        ELSE 0
+                    END AS owner_online
+                FROM cluster_player_sessions AS sessions
+                LEFT JOIN cluster_nodes AS nodes
+                    ON nodes.node_id = sessions.owner_node
+                WHERE sessions.player_uuid = ?
+                FOR UPDATE
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setInt(1, config.nodeTimeoutSeconds());
+            statement.setString(2, playerUuid.toString());
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return null;
+                }
+
+                return new PlayerSessionRow(
+                        resultSet.getString("owner_node"),
+                        resultSet.getString("state"),
+                        resultSet.getString("transfer_id"),
+                        resultSet.getString("target_node"),
+                        resultSet.getTimestamp(
+                                "lease_expires_at"
+                        ).toInstant(),
+                        resultSet.getBoolean("lease_active"),
+                        resultSet.getBoolean("owner_online")
+                );
+            }
+        }
+    }
+
+    private static void insertOnlinePlayerSession(
+            Connection connection,
+            ClusterConfig config,
+            UUID playerUuid
+    ) throws SQLException {
+        String sql = """
+                INSERT INTO cluster_player_sessions (
+                    player_uuid,
+                    owner_node,
+                    state,
+                    transfer_id,
+                    target_node,
+                    lease_expires_at,
+                    updated_at
+                )
+                VALUES (
+                    ?, ?, 'ONLINE', NULL, NULL,
+                    TIMESTAMPADD(
+                        SECOND,
+                        ?,
+                        CURRENT_TIMESTAMP(3)
+                    ),
+                    CURRENT_TIMESTAMP(3)
+                )
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, playerUuid.toString());
+            statement.setString(2, config.nodeId());
+            statement.setInt(
+                    3,
+                    config.playerSessionLeaseSeconds()
+            );
+            statement.executeUpdate();
+        }
+    }
+
+    private static void activateOnlinePlayerSession(
+            Connection connection,
+            ClusterConfig config,
+            UUID playerUuid
+    ) throws SQLException {
+        String sql = """
+                INSERT INTO cluster_player_sessions (
+                    player_uuid,
+                    owner_node,
+                    state,
+                    transfer_id,
+                    target_node,
+                    lease_expires_at,
+                    updated_at
+                )
+                VALUES (
+                    ?, ?, 'ONLINE', NULL, NULL,
+                    TIMESTAMPADD(
+                        SECOND,
+                        ?,
+                        CURRENT_TIMESTAMP(3)
+                    ),
+                    CURRENT_TIMESTAMP(3)
+                )
+                ON DUPLICATE KEY UPDATE
+                    owner_node = VALUES(owner_node),
+                    state = 'ONLINE',
+                    transfer_id = NULL,
+                    target_node = NULL,
+                    lease_expires_at = VALUES(lease_expires_at),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, playerUuid.toString());
+            statement.setString(2, config.nodeId());
+            statement.setInt(
+                    3,
+                    config.playerSessionLeaseSeconds()
+            );
+            statement.executeUpdate();
+        }
+    }
+
+    private static void markSessionTransferring(
+            Connection connection,
+            ClusterConfig config,
+            UUID playerUuid,
+            String transferId,
+            String targetNode
+    ) throws SQLException {
+        String sql = """
+                UPDATE cluster_player_sessions
+                SET
+                    state = 'TRANSFERRING',
+                    transfer_id = ?,
+                    target_node = ?,
+                    lease_expires_at = TIMESTAMPADD(
+                        SECOND,
+                        ?,
+                        CURRENT_TIMESTAMP(3)
+                    ),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                WHERE player_uuid = ?
+                  AND owner_node = ?
+                  AND state = 'ONLINE'
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, transferId);
+            statement.setString(2, targetNode);
+            statement.setInt(3, config.transferTtlSeconds());
+            statement.setString(4, playerUuid.toString());
+            statement.setString(5, config.nodeId());
+
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException(
+                        "Не удалось заблокировать сессию игрока для transfer "
+                                + transferId
+                );
+            }
+        }
+    }
+
+    private static void claimSessionForTransfer(
+            Connection connection,
+            ClusterConfig config,
+            PendingTransfer transfer
+    ) throws SQLException {
+        PlayerSessionRow session = selectPlayerSessionForUpdate(
+                connection,
+                config,
+                transfer.playerUuid()
+        );
+
+        boolean matchingTransfer = session != null
+                && transfer.transferId().equals(
+                session.transferId()
+        )
+                && transfer.targetNode().equalsIgnoreCase(
+                config.nodeId()
+        )
+                && ("TRANSFERRING".equals(session.state())
+                || "CLAIMING".equals(session.state()));
+
+        if (session != null
+                && !matchingTransfer
+                && session.leaseActive()
+                && session.ownerNodeOnline()) {
+            throw new SQLException(
+                    "Игрок уже активен на узле "
+                            + session.ownerNode()
+                            + " (state="
+                            + session.state()
+                            + ")"
+            );
+        }
+
+        String sql = """
+                INSERT INTO cluster_player_sessions (
+                    player_uuid,
+                    owner_node,
+                    state,
+                    transfer_id,
+                    target_node,
+                    lease_expires_at,
+                    updated_at
+                )
+                VALUES (
+                    ?, ?, 'CLAIMING', ?, ?,
+                    TIMESTAMPADD(
+                        SECOND,
+                        ?,
+                        CURRENT_TIMESTAMP(3)
+                    ),
+                    CURRENT_TIMESTAMP(3)
+                )
+                ON DUPLICATE KEY UPDATE
+                    owner_node = VALUES(owner_node),
+                    state = 'CLAIMING',
+                    transfer_id = VALUES(transfer_id),
+                    target_node = VALUES(target_node),
+                    lease_expires_at = VALUES(lease_expires_at),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(
+                    1,
+                    transfer.playerUuid().toString()
+            );
+            statement.setString(2, config.nodeId());
+            statement.setString(3, transfer.transferId());
+            statement.setString(4, transfer.targetNode());
+            statement.setInt(
+                    5,
+                    config.playerSessionLeaseSeconds()
+            );
+            statement.executeUpdate();
+        }
+    }
+
+    private static void activateOnlinePlayerSessionAfterTransfer(
+            Connection connection,
+            ClusterConfig config,
+            UUID playerUuid,
+            String transferId
+    ) throws SQLException {
+        String sql = """
+                UPDATE cluster_player_sessions
+                SET
+                    state = 'ONLINE',
+                    transfer_id = NULL,
+                    target_node = NULL,
+                    lease_expires_at = TIMESTAMPADD(
+                        SECOND,
+                        ?,
+                        CURRENT_TIMESTAMP(3)
+                    ),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                WHERE player_uuid = ?
+                  AND owner_node = ?
+                  AND transfer_id = ?
+                  AND state = 'CLAIMING'
+                """;
+
+        int updated;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setInt(
+                    1,
+                    config.playerSessionLeaseSeconds()
+            );
+            statement.setString(2, playerUuid.toString());
+            statement.setString(3, config.nodeId());
+            statement.setString(4, transferId);
+            updated = statement.executeUpdate();
+        }
+
+        if (updated == 1) {
+            return;
+        }
+
+        PlayerSessionRow session = selectPlayerSessionForUpdate(
+                connection,
+                config,
+                playerUuid
+        );
+
+        if (session != null
+                && session.ownerNode().equalsIgnoreCase(
+                config.nodeId()
+        )
+                && "ONLINE".equals(session.state())) {
+            return;
+        }
+
+        throw new SQLException(
+                "Не удалось активировать сессию после transfer "
+                        + transferId
+        );
+    }
+
+    private static boolean isTransferAlreadyConsumed(
+            Connection connection,
+            String transferId,
+            UUID playerUuid,
+            String targetNode
+    ) throws SQLException {
+        String sql = """
+                SELECT 1
+                FROM pending_transfers
+                WHERE transfer_id = ?
+                  AND player_uuid = ?
+                  AND target_node = ?
+                  AND status = 'CONSUMED'
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, transferId);
+            statement.setString(2, playerUuid.toString());
+            statement.setString(3, targetNode);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+        }
+    }
+
+
 
     private static Connection open(
             ClusterConfig config
@@ -962,6 +1891,64 @@ public final class ClusterDatabase {
                 ENGINE=InnoDB
                 DEFAULT CHARSET=utf8mb4
                 """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_player_sessions (
+                    player_uuid CHAR(36) NOT NULL PRIMARY KEY,
+                    owner_node VARCHAR(64) NOT NULL,
+                    state VARCHAR(24) NOT NULL,
+                    transfer_id CHAR(36) NULL,
+                    target_node VARCHAR(64) NULL,
+                    lease_expires_at TIMESTAMP(3) NOT NULL,
+                    updated_at TIMESTAMP(3) NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP(3),
+
+                    INDEX idx_player_sessions_owner_state (
+                        owner_node,
+                        state
+                    ),
+
+                    INDEX idx_player_sessions_transfer (
+                        transfer_id
+                    )
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_player_backups (
+                    backup_id BIGINT NOT NULL AUTO_INCREMENT
+                        PRIMARY KEY,
+                    player_uuid CHAR(36) NOT NULL,
+                    transfer_id CHAR(36) NOT NULL,
+                    source_node VARCHAR(64) NOT NULL,
+                    player_data LONGBLOB NOT NULL,
+                    player_data_sha256 CHAR(64) NOT NULL,
+                    player_data_codec INT NOT NULL,
+                    player_data_size INT NOT NULL,
+                    created_at TIMESTAMP(3) NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP(3),
+                    expires_at TIMESTAMP(3) NOT NULL,
+                    restored_at TIMESTAMP(3) NULL,
+                    restore_node VARCHAR(64) NULL,
+
+                    UNIQUE INDEX uq_player_backup_transfer (
+                        transfer_id
+                    ),
+
+                    INDEX idx_player_backup_player_created (
+                        player_uuid,
+                        created_at
+                    ),
+
+                    INDEX idx_player_backup_expires (
+                        expires_at
+                    )
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
         }
 
         ensureColumnExists(
@@ -1018,6 +2005,20 @@ public final class ClusterDatabase {
                 "pending_transfers",
                 "player_data_size",
                 "INT NOT NULL DEFAULT 0"
+        );
+
+        ensureColumnExists(
+                connection,
+                "cluster_player_backups",
+                "restored_at",
+                "TIMESTAMP(3) NULL"
+        );
+
+        ensureColumnExists(
+                connection,
+                "cluster_player_backups",
+                "restore_node",
+                "VARCHAR(64) NULL"
         );
     }
 
@@ -1422,25 +2423,55 @@ public final class ClusterDatabase {
 
     private static void cancelReadyTransfers(
             Connection connection,
+            ClusterConfig config,
             UUID playerUuid
     ) throws SQLException {
-        String sql = """
+        String sessionSql = """
+                UPDATE cluster_player_sessions AS sessions
+                INNER JOIN pending_transfers AS transfers
+                    ON transfers.transfer_id = sessions.transfer_id
+                SET
+                    sessions.state = 'ONLINE',
+                    sessions.transfer_id = NULL,
+                    sessions.target_node = NULL,
+                    sessions.lease_expires_at = TIMESTAMPADD(
+                        SECOND,
+                        ?,
+                        CURRENT_TIMESTAMP(3)
+                    ),
+                    sessions.updated_at = CURRENT_TIMESTAMP(3)
+                WHERE transfers.player_uuid = ?
+                  AND transfers.source_node = ?
+                  AND transfers.status = 'READY'
+                  AND sessions.owner_node = ?
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sessionSql)) {
+            statement.setInt(
+                    1,
+                    config.playerSessionLeaseSeconds()
+            );
+            statement.setString(2, playerUuid.toString());
+            statement.setString(3, config.nodeId());
+            statement.setString(4, config.nodeId());
+            statement.executeUpdate();
+        }
+
+        String transferSql = """
                 UPDATE pending_transfers
                 SET
                     status = 'CANCELLED',
                     player_data = NULL
                 WHERE player_uuid = ?
+                  AND source_node = ?
                   AND status = 'READY'
                 """;
 
         try (PreparedStatement statement =
-                     connection.prepareStatement(sql)) {
-
-            statement.setString(
-                    1,
-                    playerUuid.toString()
-            );
-
+                     connection.prepareStatement(transferSql)) {
+            statement.setString(1, playerUuid.toString());
+            statement.setString(2, config.nodeId());
             statement.executeUpdate();
         }
     }
@@ -1448,7 +2479,21 @@ public final class ClusterDatabase {
     private static void expireTransfers(
             Connection connection
     ) throws SQLException {
-        String sql = """
+        String sessionSql = """
+                DELETE sessions
+                FROM cluster_player_sessions AS sessions
+                INNER JOIN pending_transfers AS transfers
+                    ON transfers.transfer_id = sessions.transfer_id
+                WHERE transfers.status IN ('READY', 'CLAIMED')
+                  AND transfers.expires_at <= CURRENT_TIMESTAMP(3)
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sessionSql)) {
+            statement.executeUpdate();
+        }
+
+        String transferSql = """
                 UPDATE pending_transfers
                 SET
                     status = 'EXPIRED',
@@ -1459,8 +2504,7 @@ public final class ClusterDatabase {
                 """;
 
         try (PreparedStatement statement =
-                     connection.prepareStatement(sql)) {
-
+                     connection.prepareStatement(transferSql)) {
             statement.executeUpdate();
         }
     }
@@ -1469,7 +2513,33 @@ public final class ClusterDatabase {
             Connection connection,
             ClusterConfig config
     ) throws SQLException {
-        String sql = """
+        String sessionSql = """
+                UPDATE cluster_player_sessions AS sessions
+                INNER JOIN pending_transfers AS transfers
+                    ON transfers.transfer_id = sessions.transfer_id
+                SET
+                    sessions.owner_node = transfers.source_node,
+                    sessions.state = 'TRANSFERRING',
+                    sessions.target_node = transfers.target_node,
+                    sessions.lease_expires_at = transfers.expires_at,
+                    sessions.updated_at = CURRENT_TIMESTAMP(3)
+                WHERE transfers.status = 'CLAIMED'
+                  AND transfers.claimed_at IS NOT NULL
+                  AND transfers.claimed_at <= TIMESTAMPADD(
+                        SECOND,
+                        -?,
+                        CURRENT_TIMESTAMP(3)
+                  )
+                  AND transfers.expires_at > CURRENT_TIMESTAMP(3)
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sessionSql)) {
+            statement.setInt(1, config.staleClaimSeconds());
+            statement.executeUpdate();
+        }
+
+        String transferSql = """
                 UPDATE pending_transfers
                 SET
                     status = 'READY',
@@ -1485,13 +2555,8 @@ public final class ClusterDatabase {
                 """;
 
         try (PreparedStatement statement =
-                     connection.prepareStatement(sql)) {
-
-            statement.setInt(
-                    1,
-                    config.staleClaimSeconds()
-            );
-
+                     connection.prepareStatement(transferSql)) {
+            statement.setInt(1, config.staleClaimSeconds());
             statement.executeUpdate();
         }
     }
@@ -1630,6 +2695,93 @@ public final class ClusterDatabase {
             String previousNodeId,
             String newNodeId,
             Instant reassignedAt
+    ) {
+    }
+
+    private record PlayerSessionRow(
+            String ownerNode,
+            String state,
+            String transferId,
+            String targetNode,
+            Instant leaseExpiresAt,
+            boolean leaseActive,
+            boolean ownerNodeOnline
+    ) {
+    }
+
+    public record PlayerSessionAcquireResult(
+            boolean acquired,
+            boolean recovered,
+            String ownerNode,
+            String previousOwnerNode,
+            String state,
+            String transferId,
+            String targetNode,
+            Instant leaseExpiresAt
+    ) {
+        private static PlayerSessionAcquireResult acquired(
+                String ownerNode
+        ) {
+            return new PlayerSessionAcquireResult(
+                    true,
+                    false,
+                    ownerNode,
+                    null,
+                    "ONLINE",
+                    null,
+                    null,
+                    null
+            );
+        }
+
+        private static PlayerSessionAcquireResult recovered(
+                String ownerNode,
+                String previousOwnerNode,
+                String previousState
+        ) {
+            return new PlayerSessionAcquireResult(
+                    true,
+                    true,
+                    ownerNode,
+                    previousOwnerNode,
+                    previousState,
+                    null,
+                    null,
+                    null
+            );
+        }
+
+        private static PlayerSessionAcquireResult denied(
+                String ownerNode,
+                String state,
+                String transferId,
+                String targetNode,
+                Instant leaseExpiresAt
+        ) {
+            return new PlayerSessionAcquireResult(
+                    false,
+                    false,
+                    ownerNode,
+                    null,
+                    state,
+                    transferId,
+                    targetNode,
+                    leaseExpiresAt
+            );
+        }
+    }
+
+    public record RecoveryBackup(
+            long backupId,
+            UUID playerUuid,
+            String transferId,
+            String sourceNode,
+            byte[] playerData,
+            String playerDataSha256,
+            int playerDataCodec,
+            int playerDataSize,
+            Instant createdAt,
+            Instant expiresAt
     ) {
     }
 

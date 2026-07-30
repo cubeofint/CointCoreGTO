@@ -23,6 +23,9 @@ public final class ClusterConfig {
     private final int nodeTimeoutSeconds;
     private final int transferTtlSeconds;
     private final int staleClaimSeconds;
+    private final int playerSessionLeaseSeconds;
+    private final int transferLockTimeoutSeconds;
+    private final int playerBackupRetentionDays;
     private final boolean automaticFailover;
     private final boolean failClosedRouting;
     private final boolean syncPlayerData;
@@ -40,6 +43,9 @@ public final class ClusterConfig {
             int nodeTimeoutSeconds,
             int transferTtlSeconds,
             int staleClaimSeconds,
+            int playerSessionLeaseSeconds,
+            int transferLockTimeoutSeconds,
+            int playerBackupRetentionDays,
             boolean automaticFailover,
             boolean failClosedRouting,
             boolean syncPlayerData,
@@ -56,6 +62,9 @@ public final class ClusterConfig {
         this.nodeTimeoutSeconds = nodeTimeoutSeconds;
         this.transferTtlSeconds = transferTtlSeconds;
         this.staleClaimSeconds = staleClaimSeconds;
+        this.playerSessionLeaseSeconds = playerSessionLeaseSeconds;
+        this.transferLockTimeoutSeconds = transferLockTimeoutSeconds;
+        this.playerBackupRetentionDays = playerBackupRetentionDays;
         this.automaticFailover = automaticFailover;
         this.failClosedRouting = failClosedRouting;
         this.syncPlayerData = syncPlayerData;
@@ -82,6 +91,9 @@ public final class ClusterConfig {
                 positiveInt(properties, "node_timeout_seconds", 15),
                 positiveInt(properties, "transfer_ttl_seconds", 300),
                 positiveInt(properties, "stale_claim_seconds", 30),
+                positiveInt(properties, "player_session_lease_seconds", 30),
+                positiveInt(properties, "transfer_lock_timeout_seconds", 90),
+                positiveInt(properties, "player_backup_retention_days", 7),
                 Boolean.parseBoolean(
                         properties.getProperty(
                                 "automatic_failover",
@@ -205,6 +217,9 @@ public final class ClusterConfig {
         defaults.setProperty("node_timeout_seconds", "15");
         defaults.setProperty("transfer_ttl_seconds", "300");
         defaults.setProperty("stale_claim_seconds", "30");
+        defaults.setProperty("player_session_lease_seconds", "30");
+        defaults.setProperty("transfer_lock_timeout_seconds", "90");
+        defaults.setProperty("player_backup_retention_days", "7");
         defaults.setProperty("automatic_failover", "true");
         defaults.setProperty("fail_closed_routing", "true");
         defaults.setProperty("sync_player_data", "true");
@@ -264,6 +279,18 @@ public final class ClusterConfig {
 
     public int staleClaimSeconds() {
         return staleClaimSeconds;
+    }
+
+    public int playerSessionLeaseSeconds() {
+        return playerSessionLeaseSeconds;
+    }
+
+    public int transferLockTimeoutSeconds() {
+        return transferLockTimeoutSeconds;
+    }
+
+    public int playerBackupRetentionDays() {
+        return playerBackupRetentionDays;
     }
 
     public boolean automaticFailover() {
