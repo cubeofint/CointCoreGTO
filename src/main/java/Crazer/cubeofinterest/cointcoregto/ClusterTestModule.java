@@ -28,6 +28,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +40,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 public final class ClusterTestModule {
     private static final Logger LOGGER =
@@ -54,6 +56,9 @@ public final class ClusterTestModule {
             new AtomicBoolean();
 
     private static final AtomicBoolean DIMENSION_TICK_GUARD_ACTIVE =
+            new AtomicBoolean();
+
+    private static final AtomicBoolean SNAPSHOT_OPERATION_IN_FLIGHT =
             new AtomicBoolean();
 
     private static volatile Map<String, String>
@@ -122,6 +127,8 @@ public final class ClusterTestModule {
     private volatile String lastError;
     private volatile MinecraftServer activeServer;
     private volatile boolean heartbeatFailureLogged;
+    private volatile long nextAutomaticSnapshotAtMillis;
+    private volatile String lastAutomaticSnapshotSummary;
     private int heartbeatTickCounter;
 
     private ClusterTestModule() {
@@ -472,6 +479,7 @@ public final class ClusterTestModule {
     ) {
         MinecraftServer server = event.getServer();
         ClusterTransferGuard.clearAll();
+        SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
         activeServer = server;
         heartbeatTickCounter = 0;
         DIMENSION_PLAYER_COUNT_SNAPSHOT =
@@ -499,6 +507,9 @@ public final class ClusterTestModule {
             return;
         }
 
+        nextAutomaticSnapshotAtMillis = System.currentTimeMillis()
+                + config.dimensionSnapshotIntervalMinutes() * 60_000L;
+
         DATABASE_EXECUTOR.execute(
                 () -> runTest(server, false)
         );
@@ -523,6 +534,8 @@ public final class ClusterTestModule {
 
         DIMENSION_PLAYER_COUNT_SNAPSHOT =
                 captureDimensionPlayerCounts(server);
+
+        startAutomaticDimensionSnapshotsIfDue(server, currentConfig);
 
         heartbeatTickCounter++;
 
@@ -625,6 +638,9 @@ public final class ClusterTestModule {
         DIMENSION_ROUTE_SUPPRESSIONS.clear();
         DIMENSION_TICK_SUPPRESSION_LOGGED.clear();
         DIMENSION_TICK_GUARD_ACTIVE.set(false);
+        SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+        nextAutomaticSnapshotAtMillis = 0L;
+        lastAutomaticSnapshotSummary = null;
         ClusterTransferGuard.clearAll();
     }
 
@@ -769,6 +785,30 @@ public final class ClusterTestModule {
                                                                                         ).toString()
                                                                                 )
                                                                         )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("createall")
+                                                        .executes(context ->
+                                                                createAllDimensionSnapshots(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("cleanup")
+                                                        .executes(context ->
+                                                                cleanupDimensionSnapshots(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("schedule")
+                                                        .executes(context ->
+                                                                showDimensionSnapshotSchedule(
+                                                                        context.getSource()
+                                                                )
                                                         )
                                         )
                                         .then(
@@ -5191,8 +5231,13 @@ public final class ClusterTestModule {
             source.sendFailure(Component.literal("§cВ конфиге не указан dimension_migration_staging_path."));
             return 0;
         }
+        if (!SNAPSHOT_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            source.sendFailure(Component.literal("§cУже выполняется операция со snapshots."));
+            return 0;
+        }
         ResourceLocation parsed = ResourceLocation.tryParse(dimensionId);
         if (parsed == null) {
+            SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
             source.sendFailure(Component.literal("§cНекорректный dimension id: §f" + dimensionId));
             return 0;
         }
@@ -5200,16 +5245,19 @@ public final class ClusterTestModule {
         String normalized = parsed.toString();
         ServerLevel level = server.getLevel(ResourceKey.create(Registries.DIMENSION, parsed));
         if (level == null) {
+            SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
             source.sendFailure(Component.literal("§cИзмерение не загружено на этом узле."));
             return 0;
         }
         if (!level.players().isEmpty()) {
+            SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
             source.sendFailure(Component.literal("§cВ измерении находятся игроки: §f" + level.players().size()));
             return 0;
         }
         try {
             ClusterDimensionMigration.resolveDimensionPath(server, normalized);
         } catch (Exception exception) {
+            SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
             source.sendFailure(Component.literal("§cSnapshot недоступен: " + exception.getMessage()));
             return 0;
         }
@@ -5224,9 +5272,13 @@ public final class ClusterTestModule {
                         source,
                         server,
                         latestConfig,
-                        snapshot
+                        snapshot,
+                        success -> SNAPSHOT_OPERATION_IN_FLIGHT.set(false),
+                        false,
+                        true
                 ));
             } catch (Exception exception) {
+                SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
                 server.execute(() -> source.sendFailure(Component.literal(
                         "§cНе удалось создать snapshot: " + exception.getMessage()
                 )));
@@ -5235,11 +5287,347 @@ public final class ClusterTestModule {
         return 1;
     }
 
+    private int createAllDimensionSnapshots(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        if (currentConfig.dimensionMigrationStagingPath() == null) {
+            source.sendFailure(Component.literal("§cВ конфиге не указан dimension_migration_staging_path."));
+            return 0;
+        }
+        if (!SNAPSHOT_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            source.sendFailure(Component.literal("§cУже выполняется операция со snapshots."));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal("§eЗапускаю snapshots всех доступных измерений этого узла..."), false);
+        startDimensionSnapshotBatch(source, source.getServer(), currentConfig, false);
+        return 1;
+    }
+
+    private int cleanupDimensionSnapshots(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        if (currentConfig.dimensionMigrationStagingPath() == null) {
+            source.sendFailure(Component.literal("§cВ конфиге не указан dimension_migration_staging_path."));
+            return 0;
+        }
+        if (!SNAPSHOT_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            source.sendFailure(Component.literal("§cУже выполняется операция со snapshots."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        MIGRATION_EXECUTOR.execute(() -> {
+            try {
+                SnapshotCleanupResult result = cleanupDimensionSnapshotsInternal(currentConfig);
+                server.execute(() -> source.sendSuccess(() -> Component.literal(
+                        "§aОчистка snapshots завершена: §f"
+                                + result.deleted()
+                                + "§a архивов, освобождено §f"
+                                + result.bytes()
+                                + "§a bytes"
+                ), false));
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cОчистка snapshots завершилась ошибкой: " + exception.getMessage()
+                )));
+            } finally {
+                SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+            }
+        });
+        return 1;
+    }
+
+    private int showDimensionSnapshotSchedule(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        long seconds = Math.max(
+                0L,
+                (nextAutomaticSnapshotAtMillis - System.currentTimeMillis() + 999L) / 1000L
+        );
+        source.sendSuccess(() -> Component.literal(
+                "§6Automatic snapshots: §f"
+                        + currentConfig.automaticDimensionSnapshots()
+                        + "§7 | interval: §f"
+                        + currentConfig.dimensionSnapshotIntervalMinutes()
+                        + " min§7 | retention: §f"
+                        + currentConfig.dimensionSnapshotRetentionDays()
+                        + " days§7 | max per dimension: §f"
+                        + currentConfig.dimensionSnapshotMaxPerDimension()
+                        + "§7 | failover max age: §f"
+                        + currentConfig.dimensionSnapshotMaxAgeMinutes()
+                        + " min§7 | next: §f"
+                        + seconds
+                        + "s§7 | busy: §f"
+                        + SNAPSHOT_OPERATION_IN_FLIGHT.get()
+        ), false);
+        if (lastAutomaticSnapshotSummary != null) {
+            source.sendSuccess(() -> Component.literal(
+                    "§7Последний автоматический запуск: §f" + lastAutomaticSnapshotSummary
+            ), false);
+        }
+        return 1;
+    }
+
+    private void startAutomaticDimensionSnapshotsIfDue(
+            MinecraftServer server,
+            ClusterConfig currentConfig
+    ) {
+        if (!currentConfig.automaticDimensionSnapshots()
+                || currentConfig.dimensionMigrationStagingPath() == null
+                || System.currentTimeMillis() < nextAutomaticSnapshotAtMillis) {
+            return;
+        }
+        nextAutomaticSnapshotAtMillis = System.currentTimeMillis()
+                + currentConfig.dimensionSnapshotIntervalMinutes() * 60_000L;
+        if (!SNAPSHOT_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            lastAutomaticSnapshotSummary = "пропущен: другая snapshot-операция уже выполнялась";
+            return;
+        }
+        startDimensionSnapshotBatch(null, server, currentConfig, true);
+    }
+
+    private void startDimensionSnapshotBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            boolean automatic
+    ) {
+        List<String> registered = registeredDimensionIds(server);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.DimensionAssignmentInfo> assignments =
+                        ClusterDatabase.listDimensionAssignments(currentConfig, registered);
+                List<String> dimensions = new ArrayList<>();
+                long dueAfter = currentConfig.dimensionSnapshotIntervalMinutes() * 60_000L;
+                long now = System.currentTimeMillis();
+                for (ClusterDatabase.DimensionAssignmentInfo assignment : assignments) {
+                    if (assignment.nodeId() == null
+                            || !assignment.nodeId().equalsIgnoreCase(currentConfig.nodeId())
+                            || assignment.activePlayers() > 0
+                            || Level.OVERWORLD.location().toString().equals(assignment.dimensionId())) {
+                        continue;
+                    }
+                    if (automatic) {
+                        ClusterDatabase.DimensionSnapshot latest =
+                                ClusterDatabase.findLatestReadyDimensionSnapshot(
+                                        currentConfig,
+                                        assignment.dimensionId(),
+                                        currentConfig.nodeId()
+                                );
+                        if (latest != null
+                                && latest.readyAt() != null
+                                && now - latest.readyAt().toEpochMilli() < dueAfter) {
+                            continue;
+                        }
+                    }
+                    dimensions.add(assignment.dimensionId());
+                }
+                server.execute(() -> {
+                    List<String> available = new ArrayList<>();
+                    for (String dimensionId : dimensions) {
+                        ResourceLocation parsed = ResourceLocation.tryParse(dimensionId);
+                        ServerLevel level = parsed == null
+                                ? null
+                                : server.getLevel(ResourceKey.create(Registries.DIMENSION, parsed));
+                        if (level == null || !level.players().isEmpty()) {
+                            continue;
+                        }
+                        try {
+                            ClusterDimensionMigration.resolveDimensionPath(server, dimensionId);
+                            available.add(dimensionId);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    SnapshotBatchState state = new SnapshotBatchState(available, automatic);
+                    state.skipped = Math.max(0, dimensions.size() - available.size());
+                    if (available.isEmpty()) {
+                        finishDimensionSnapshotBatch(source, server, currentConfig, state);
+                        return;
+                    }
+                    for (String dimensionId : available) {
+                        addSnapshotFreeze(dimensionId);
+                    }
+                    try {
+                        if (!server.saveEverything(true, true, true)) {
+                            throw new IllegalStateException("MinecraftServer не подтвердил сохранение мира");
+                        }
+                    } catch (Exception exception) {
+                        for (String dimensionId : available) {
+                            removeSnapshotFreeze(dimensionId);
+                        }
+                        SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                        lastAutomaticSnapshotSummary = "ошибка сохранения: " + exception.getMessage();
+                        if (source != null) {
+                            source.sendFailure(Component.literal(
+                                    "§cНе удалось сохранить мир перед createall: " + exception.getMessage()
+                            ));
+                        } else {
+                            LOGGER.error("Unable to save worlds before automatic dimension snapshots", exception);
+                        }
+                        return;
+                    }
+                    continueDimensionSnapshotBatch(source, server, currentConfig, state);
+                });
+            } catch (Exception exception) {
+                SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                lastAutomaticSnapshotSummary = "ошибка: " + exception.getMessage();
+                if (source != null) {
+                    server.execute(() -> source.sendFailure(Component.literal(
+                            "§cНе удалось подготовить createall: " + exception.getMessage()
+                    )));
+                } else {
+                    LOGGER.error("Unable to prepare automatic dimension snapshots", exception);
+                }
+            }
+        });
+    }
+
+    private void continueDimensionSnapshotBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            SnapshotBatchState state
+    ) {
+        if (state.index >= state.dimensions.size()) {
+            finishDimensionSnapshotBatch(source, server, currentConfig, state);
+            return;
+        }
+        String dimensionId = state.dimensions.get(state.index++);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.DimensionSnapshot snapshot =
+                        ClusterDatabase.requestDimensionSnapshot(currentConfig, dimensionId);
+                server.execute(() -> startDimensionSnapshotArchive(
+                        null,
+                        server,
+                        currentConfig,
+                        snapshot,
+                        success -> {
+                            if (success) {
+                                state.created++;
+                            } else {
+                                state.failed++;
+                            }
+                            continueDimensionSnapshotBatch(source, server, currentConfig, state);
+                        },
+                        true,
+                        false
+                ));
+            } catch (Exception exception) {
+                state.skipped++;
+                removeSnapshotFreeze(dimensionId);
+                server.execute(() -> continueDimensionSnapshotBatch(
+                        source,
+                        server,
+                        currentConfig,
+                        state
+                ));
+            }
+        });
+    }
+
+    private void finishDimensionSnapshotBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            SnapshotBatchState state
+    ) {
+        for (String dimensionId : state.dimensions) {
+            removeSnapshotFreeze(dimensionId);
+        }
+        MIGRATION_EXECUTOR.execute(() -> {
+            SnapshotCleanupResult cleanup = new SnapshotCleanupResult(0, 0L);
+            String cleanupError = null;
+            try {
+                cleanup = cleanupDimensionSnapshotsInternal(currentConfig);
+            } catch (Exception exception) {
+                cleanupError = exception.getMessage();
+            }
+            SnapshotCleanupResult finalCleanup = cleanup;
+            String finalCleanupError = cleanupError;
+            server.execute(() -> {
+                SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                String summary = "created="
+                        + state.created
+                        + ", skipped="
+                        + state.skipped
+                        + ", failed="
+                        + state.failed
+                        + ", deleted="
+                        + finalCleanup.deleted();
+                if (state.automatic) {
+                    lastAutomaticSnapshotSummary = summary;
+                    LOGGER.info("Automatic dimension snapshots finished: {}", summary);
+                }
+                if (source != null) {
+                    source.sendSuccess(() -> Component.literal(
+                            "§aCreateall завершён: §f"
+                                    + state.created
+                                    + "§a создано, §f"
+                                    + state.skipped
+                                    + "§a пропущено, §f"
+                                    + state.failed
+                                    + "§a ошибок, удалено старых: §f"
+                                    + finalCleanup.deleted()
+                    ), false);
+                    if (finalCleanupError != null) {
+                        source.sendFailure(Component.literal(
+                                "§cОшибка очистки старых snapshots: " + finalCleanupError
+                        ));
+                    }
+                }
+            });
+        });
+    }
+
+    private SnapshotCleanupResult cleanupDimensionSnapshotsInternal(
+            ClusterConfig currentConfig
+    ) throws Exception {
+        List<ClusterDatabase.DimensionSnapshot> candidates =
+                ClusterDatabase.listDimensionSnapshotCleanupCandidates(
+                        currentConfig,
+                        currentConfig.dimensionSnapshotRetentionDays(),
+                        currentConfig.dimensionSnapshotMaxPerDimension()
+                );
+        int deleted = 0;
+        long bytes = 0L;
+        for (ClusterDatabase.DimensionSnapshot snapshot : candidates) {
+            ClusterDimensionMigration.deleteArchive(
+                    currentConfig.dimensionMigrationStagingPath(),
+                    snapshot.archiveName()
+            );
+            ClusterDatabase.markDimensionSnapshotDeleted(
+                    currentConfig,
+                    snapshot.snapshotId()
+            );
+            deleted++;
+            bytes += Math.max(0L, snapshot.archiveSize());
+        }
+        return new SnapshotCleanupResult(deleted, bytes);
+    }
+
     private void startDimensionSnapshotArchive(
             CommandSourceStack source,
             MinecraftServer server,
             ClusterConfig currentConfig,
-            ClusterDatabase.DimensionSnapshot snapshot
+            ClusterDatabase.DimensionSnapshot snapshot,
+            Consumer<Boolean> completion,
+            boolean worldAlreadySaved,
+            boolean announce
     ) {
         ResourceLocation parsed = ResourceLocation.tryParse(snapshot.dimensionId());
         ServerLevel level = parsed == null
@@ -5251,20 +5639,32 @@ public final class ClusterTestModule {
                     server,
                     currentConfig,
                     snapshot,
-                    level == null ? "Измерение не загружено" : "В измерении появились игроки"
+                    level == null ? "Измерение не загружено" : "В измерении появились игроки",
+                    completion
             );
             return;
         }
         addSnapshotFreeze(snapshot.dimensionId());
-        try {
-            if (!server.saveEverything(true, true, true)) {
-                throw new IllegalStateException("MinecraftServer не подтвердил сохранение мира");
+        if (!worldAlreadySaved) {
+            try {
+                if (!server.saveEverything(true, true, true)) {
+                    throw new IllegalStateException("MinecraftServer не подтвердил сохранение мира");
+                }
+            } catch (Exception exception) {
+                failDimensionSnapshot(
+                        source,
+                        server,
+                        currentConfig,
+                        snapshot,
+                        exception.getMessage(),
+                        completion
+                );
+                return;
             }
-        } catch (Exception exception) {
-            failDimensionSnapshot(source, server, currentConfig, snapshot, exception.getMessage());
-            return;
         }
-        source.sendSuccess(() -> Component.literal("§eИзмерение заморожено. Создаю snapshot-архив..."), false);
+        if (announce && source != null) {
+            source.sendSuccess(() -> Component.literal("§eИзмерение заморожено. Создаю snapshot-архив..."), false);
+        }
         MIGRATION_EXECUTOR.execute(() -> {
             ClusterDimensionMigration.PreparedArchive archive = null;
             try {
@@ -5285,18 +5685,23 @@ public final class ClusterTestModule {
                         );
                 removeSnapshotFreeze(snapshot.dimensionId());
                 ClusterDimensionMigration.PreparedArchive finalArchive = archive;
-                server.execute(() -> source.sendSuccess(
-                        () -> Component.literal(
-                                "§aSnapshot READY: §f"
-                                        + ready.snapshotId()
-                                        + " §7| §f"
-                                        + ready.dimensionId()
-                                        + " §7| archive: §f"
-                                        + finalArchive.archiveSize()
-                                        + " bytes"
-                        ),
-                        false
-                ));
+                server.execute(() -> {
+                    if (announce && source != null) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "§aSnapshot READY: §f"
+                                                + ready.snapshotId()
+                                                + " §7| §f"
+                                                + ready.dimensionId()
+                                                + " §7| archive: §f"
+                                                + finalArchive.archiveSize()
+                                                + " bytes"
+                                ),
+                                false
+                        );
+                    }
+                    completion.accept(true);
+                });
             } catch (Exception exception) {
                 if (archive != null) {
                     try {
@@ -5312,7 +5717,8 @@ public final class ClusterTestModule {
                         server,
                         currentConfig,
                         snapshot,
-                        exception.getClass().getSimpleName() + ": " + exception.getMessage()
+                        exception.getClass().getSimpleName() + ": " + exception.getMessage(),
+                        completion
                 );
             }
         });
@@ -5323,7 +5729,8 @@ public final class ClusterTestModule {
             MinecraftServer server,
             ClusterConfig currentConfig,
             ClusterDatabase.DimensionSnapshot snapshot,
-            String error
+            String error,
+            Consumer<Boolean> completion
     ) {
         MIGRATION_EXECUTOR.execute(() -> {
             try {
@@ -5336,9 +5743,14 @@ public final class ClusterTestModule {
                 LOGGER.error("Unable to fail dimension snapshot {}", snapshot.snapshotId(), exception);
             }
             removeSnapshotFreeze(snapshot.dimensionId());
-            server.execute(() -> source.sendFailure(Component.literal(
-                    "§cSnapshot завершился ошибкой: " + error
-            )));
+            server.execute(() -> {
+                if (source != null) {
+                    source.sendFailure(Component.literal(
+                            "§cSnapshot завершился ошибкой: " + error
+                    ));
+                }
+                completion.accept(false);
+            });
         });
     }
 
@@ -5374,6 +5786,15 @@ public final class ClusterTestModule {
                                         + " §7| §f"
                                         + snapshot.archiveSize()
                                         + " bytes"
+                                        + (snapshot.readyAt() == null
+                                        ? ""
+                                        : " §7| age: §f"
+                                        + Math.max(0L, (System.currentTimeMillis() - snapshot.readyAt().toEpochMilli()) / 60_000L)
+                                        + " min"
+                                        + ((System.currentTimeMillis() - snapshot.readyAt().toEpochMilli())
+                                        <= currentConfig.dimensionSnapshotMaxAgeMinutes() * 60_000L
+                                        ? " §aFRESH"
+                                        : " §cSTALE"))
                         ), false);
                     }
                 });
@@ -6354,6 +6775,17 @@ public final class ClusterTestModule {
                                 + (currentConfig.dimensionMigrationStagingPath() == null
                                 ? "not configured"
                                 : currentConfig.dimensionMigrationStagingPath())
+                                + "§7, automatic snapshots: §f"
+                                + currentConfig.automaticDimensionSnapshots()
+                                + "§7, snapshot interval: §f"
+                                + currentConfig.dimensionSnapshotIntervalMinutes()
+                                + " min§7, snapshot retention: §f"
+                                + currentConfig.dimensionSnapshotRetentionDays()
+                                + " days§7, snapshot max per dimension: §f"
+                                + currentConfig.dimensionSnapshotMaxPerDimension()
+                                + "§7, failover snapshot max age: §f"
+                                + currentConfig.dimensionSnapshotMaxAgeMinutes()
+                                + " min"
                 ),
                 false
         );
@@ -6430,6 +6862,29 @@ public final class ClusterTestModule {
         }
 
         return suppression.dimensionId().equals(dimensionId);
+    }
+
+    private static final class SnapshotBatchState {
+        private final List<String> dimensions;
+        private final boolean automatic;
+        private int index;
+        private int created;
+        private int skipped;
+        private int failed;
+
+        private SnapshotBatchState(
+                List<String> dimensions,
+                boolean automatic
+        ) {
+            this.dimensions = dimensions;
+            this.automatic = automatic;
+        }
+    }
+
+    private record SnapshotCleanupResult(
+            int deleted,
+            long bytes
+    ) {
     }
 
     private record DimensionRouteSuppression(

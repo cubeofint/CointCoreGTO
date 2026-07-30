@@ -34,6 +34,11 @@ public final class ClusterConfig {
     private final boolean dimensionTickIsolation;
     private final Path dimensionMigrationStagingPath;
     private final int dimensionMigrationBackupRetentionDays;
+    private final boolean automaticDimensionSnapshots;
+    private final int dimensionSnapshotIntervalMinutes;
+    private final int dimensionSnapshotRetentionDays;
+    private final int dimensionSnapshotMaxPerDimension;
+    private final int dimensionSnapshotMaxAgeMinutes;
 
     private ClusterConfig(
             boolean enabled,
@@ -56,7 +61,12 @@ public final class ClusterConfig {
             boolean syncForgeCapabilities,
             boolean dimensionTickIsolation,
             Path dimensionMigrationStagingPath,
-            int dimensionMigrationBackupRetentionDays
+            int dimensionMigrationBackupRetentionDays,
+            boolean automaticDimensionSnapshots,
+            int dimensionSnapshotIntervalMinutes,
+            int dimensionSnapshotRetentionDays,
+            int dimensionSnapshotMaxPerDimension,
+            int dimensionSnapshotMaxAgeMinutes
     ) {
         this.enabled = enabled;
         this.nodeId = nodeId;
@@ -79,6 +89,11 @@ public final class ClusterConfig {
         this.dimensionTickIsolation = dimensionTickIsolation;
         this.dimensionMigrationStagingPath = dimensionMigrationStagingPath;
         this.dimensionMigrationBackupRetentionDays = dimensionMigrationBackupRetentionDays;
+        this.automaticDimensionSnapshots = automaticDimensionSnapshots;
+        this.dimensionSnapshotIntervalMinutes = dimensionSnapshotIntervalMinutes;
+        this.dimensionSnapshotRetentionDays = dimensionSnapshotRetentionDays;
+        this.dimensionSnapshotMaxPerDimension = dimensionSnapshotMaxPerDimension;
+        this.dimensionSnapshotMaxAgeMinutes = dimensionSnapshotMaxAgeMinutes;
     }
 
     public static ClusterConfig load() throws IOException {
@@ -139,7 +154,12 @@ public final class ClusterConfig {
                         ).trim()
                 ),
                 optionalPath(properties, "dimension_migration_staging_path"),
-                positiveInt(properties, "dimension_migration_backup_retention_days", 7)
+                positiveInt(properties, "dimension_migration_backup_retention_days", 7),
+                Boolean.parseBoolean(properties.getProperty("automatic_dimension_snapshots", "false").trim()),
+                positiveInt(properties, "dimension_snapshot_interval_minutes", 30),
+                positiveInt(properties, "dimension_snapshot_retention_days", 7),
+                positiveInt(properties, "dimension_snapshot_max_per_dimension", 8),
+                positiveInt(properties, "dimension_snapshot_max_age_minutes", 60)
         );
     }
 
@@ -283,6 +303,11 @@ public final class ClusterConfig {
                 "dimension_migration_backup_retention_days",
                 "7"
         );
+        defaults.setProperty("automatic_dimension_snapshots", "false");
+        defaults.setProperty("dimension_snapshot_interval_minutes", "30");
+        defaults.setProperty("dimension_snapshot_retention_days", "7");
+        defaults.setProperty("dimension_snapshot_max_per_dimension", "8");
+        defaults.setProperty("dimension_snapshot_max_age_minutes", "60");
 
         try (OutputStream output = Files.newOutputStream(CONFIG_PATH)) {
             defaults.store(output, "CointCoreGTO local cluster test configuration");
@@ -375,5 +400,25 @@ public final class ClusterConfig {
 
     public int dimensionMigrationBackupRetentionDays() {
         return dimensionMigrationBackupRetentionDays;
+    }
+
+    public boolean automaticDimensionSnapshots() {
+        return automaticDimensionSnapshots;
+    }
+
+    public int dimensionSnapshotIntervalMinutes() {
+        return dimensionSnapshotIntervalMinutes;
+    }
+
+    public int dimensionSnapshotRetentionDays() {
+        return dimensionSnapshotRetentionDays;
+    }
+
+    public int dimensionSnapshotMaxPerDimension() {
+        return dimensionSnapshotMaxPerDimension;
+    }
+
+    public int dimensionSnapshotMaxAgeMinutes() {
+        return dimensionSnapshotMaxAgeMinutes;
     }
 }
