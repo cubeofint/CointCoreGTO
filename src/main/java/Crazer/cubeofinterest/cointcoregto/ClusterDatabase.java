@@ -1513,6 +1513,18 @@ public final class ClusterDatabase {
                         Instant.now(),
                         null,
                         null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        0,
+                        null,
+                        null,
+                        null,
                         null
                 );
             } catch (SQLException exception) {
@@ -1595,7 +1607,19 @@ public final class ClusterDatabase {
                         updated_at,
                         ready_at,
                         applying_at,
-                        applied_at
+                        applied_at,
+                        verified_at,
+                        finalize_ready_at,
+                        finalized_at,
+                        rollback_previous_status,
+                        rollback_archive_name,
+                        rollback_archive_sha256,
+                        rollback_content_sha256,
+                        rollback_archive_size,
+                        rollback_ready_at,
+                        rollback_applying_at,
+                        rolled_back_at,
+                        source_backup_deleted_at
                     FROM cluster_dimension_migrations
                     WHERE target_node = ?
                       AND status IN ('READY', 'APPLYING')
@@ -1740,6 +1764,422 @@ public final class ClusterDatabase {
         }
     }
 
+
+    public static DimensionMigration validateDimensionMigrationVerification(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                lockDimensionAssignments(connection);
+                lockDimensionActivity(connection);
+                DimensionMigration migration = findDimensionMigration(connection, migrationId, true);
+                if (migration == null) {
+                    throw new SQLException("Migration не найден: " + migrationId);
+                }
+                if (!migration.targetNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException("Verify должен выполняться на target node " + migration.targetNode());
+                }
+                if (!migration.status().equals("APPLIED") && !migration.status().equals("VERIFIED")) {
+                    throw new SQLException("Verify недоступен для status=" + migration.status());
+                }
+                DimensionAssignmentRow assignment = findDimensionAssignmentRow(connection, migration.dimensionId());
+                if (assignment == null || !assignment.nodeId().equalsIgnoreCase(migration.targetNode())) {
+                    throw new SQLException("Target node больше не владеет dimension " + migration.dimensionId());
+                }
+                DimensionActivity activity = loadDimensionActivity(connection, config.nodeTimeoutSeconds()).get(migration.dimensionId());
+                if (activity != null && activity.playerCount() > 0) {
+                    throw new SQLException("Dimension содержит игроков на узлах " + activity.nodeIds());
+                }
+                connection.commit();
+                return migration;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionMigration markDimensionMigrationVerified(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            String sql = """
+                    UPDATE cluster_dimension_migrations
+                    SET status = 'VERIFIED', verified_at = CURRENT_TIMESTAMP(3), error_text = NULL, updated_at = CURRENT_TIMESTAMP(3)
+                    WHERE migration_id = ? AND target_node = ? AND status IN ('APPLIED', 'VERIFIED')
+                    """;
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, migrationId);
+                statement.setString(2, config.nodeId());
+                if (statement.executeUpdate() != 1) {
+                    throw new SQLException("Не удалось подтвердить migration " + migrationId);
+                }
+            }
+        }
+        return findDimensionMigration(config, migrationId);
+    }
+
+    public static DimensionMigration requestDimensionMigrationFinalization(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                lockDimensionAssignments(connection);
+                lockDimensionActivity(connection);
+                DimensionMigration migration = findDimensionMigration(connection, migrationId, true);
+                if (migration == null) {
+                    throw new SQLException("Migration не найден: " + migrationId);
+                }
+                if (!migration.sourceNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException("Finalize должен выполняться на source node " + migration.sourceNode());
+                }
+                if (!migration.status().equals("VERIFIED") && !migration.status().equals("FINALIZE_READY")) {
+                    throw new SQLException("Finalize недоступен для status=" + migration.status());
+                }
+                DimensionAssignmentRow assignment = findDimensionAssignmentRow(connection, migration.dimensionId());
+                if (assignment == null || !assignment.nodeId().equalsIgnoreCase(migration.targetNode())) {
+                    throw new SQLException("Target node больше не владеет dimension " + migration.dimensionId());
+                }
+                DimensionActivity activity = loadDimensionActivity(connection, config.nodeTimeoutSeconds()).get(migration.dimensionId());
+                if (activity != null && activity.playerCount() > 0) {
+                    throw new SQLException("Dimension содержит игроков на узлах " + activity.nodeIds());
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations
+                        SET status = 'FINALIZE_READY', finalize_ready_at = COALESCE(finalize_ready_at, CURRENT_TIMESTAMP(3)), updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ? AND status IN ('VERIFIED', 'FINALIZE_READY')
+                        """)) {
+                    statement.setString(1, migrationId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("Не удалось подготовить finalize " + migrationId);
+                    }
+                }
+                connection.commit();
+                return findDimensionMigration(config, migrationId);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionMigration findPendingDimensionFinalizationForSource(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT
+                        migration_id, dimension_id, source_node, target_node, status,
+                        archive_name, archive_sha256, content_sha256, archive_size, error_text,
+                        created_at, updated_at, ready_at, applying_at, applied_at,
+                        verified_at, finalize_ready_at, finalized_at, rollback_previous_status,
+                        rollback_archive_name, rollback_archive_sha256, rollback_content_sha256,
+                        rollback_archive_size, rollback_ready_at, rollback_applying_at,
+                        rolled_back_at, source_backup_deleted_at
+                    FROM cluster_dimension_migrations
+                    WHERE source_node = ? AND status = 'FINALIZE_READY'
+                    ORDER BY created_at
+                    LIMIT 1
+                    """)) {
+                statement.setString(1, config.nodeId());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    return resultSet.next() ? readDimensionMigration(resultSet) : null;
+                }
+            }
+        }
+    }
+
+    public static DimensionMigration completeDimensionMigrationFinalization(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    UPDATE cluster_dimension_migrations
+                    SET status = 'FINALIZED', finalized_at = CURRENT_TIMESTAMP(3), error_text = NULL, updated_at = CURRENT_TIMESTAMP(3)
+                    WHERE migration_id = ? AND source_node = ? AND status = 'FINALIZE_READY'
+                    """)) {
+                statement.setString(1, migrationId);
+                statement.setString(2, config.nodeId());
+                if (statement.executeUpdate() != 1) {
+                    throw new SQLException("Не удалось завершить finalize " + migrationId);
+                }
+            }
+        }
+        return findDimensionMigration(config, migrationId);
+    }
+
+    public static DimensionMigration requestDimensionRollback(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                lockDimensionAssignments(connection);
+                lockDimensionActivity(connection);
+                DimensionMigration migration = findDimensionMigration(connection, migrationId, true);
+                if (migration == null) {
+                    throw new SQLException("Migration не найден: " + migrationId);
+                }
+                if (!migration.targetNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException("Rollback должен выполняться на target node " + migration.targetNode());
+                }
+                boolean alreadyPreparing = migration.status().equals("ROLLBACK_PREPARING");
+                if (!migration.status().equals("APPLIED")
+                        && !migration.status().equals("VERIFIED")
+                        && !migration.status().equals("FINALIZED")
+                        && !alreadyPreparing) {
+                    throw new SQLException("Rollback недоступен для status=" + migration.status());
+                }
+                DimensionAssignmentRow assignment = findDimensionAssignmentRow(connection, migration.dimensionId());
+                if (assignment == null || !assignment.nodeId().equalsIgnoreCase(migration.targetNode())) {
+                    throw new SQLException("Target node больше не владеет dimension " + migration.dimensionId());
+                }
+                DimensionActivity activity = loadDimensionActivity(connection, config.nodeTimeoutSeconds()).get(migration.dimensionId());
+                if (activity != null && activity.playerCount() > 0) {
+                    throw new SQLException("Dimension содержит игроков на узлах " + activity.nodeIds());
+                }
+                if (!alreadyPreparing) {
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            UPDATE cluster_dimension_migrations
+                            SET status = 'ROLLBACK_PREPARING', rollback_previous_status = status,
+                                rollback_archive_name = NULL, rollback_archive_sha256 = NULL,
+                                rollback_content_sha256 = NULL, rollback_archive_size = 0,
+                                rollback_ready_at = NULL, rollback_applying_at = NULL,
+                                rolled_back_at = NULL, error_text = NULL, updated_at = CURRENT_TIMESTAMP(3)
+                            WHERE migration_id = ? AND status IN ('APPLIED', 'VERIFIED', 'FINALIZED')
+                            """)) {
+                        statement.setString(1, migrationId);
+                        if (statement.executeUpdate() != 1) {
+                            throw new SQLException("Не удалось начать rollback " + migrationId);
+                        }
+                    }
+                }
+                connection.commit();
+                return findDimensionMigration(config, migrationId);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionMigration markDimensionRollbackReady(
+            ClusterConfig config,
+            String migrationId,
+            String archiveName,
+            String archiveSha256,
+            String contentSha256,
+            long archiveSize
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    UPDATE cluster_dimension_migrations
+                    SET status = 'ROLLBACK_READY', rollback_archive_name = ?, rollback_archive_sha256 = ?,
+                        rollback_content_sha256 = ?, rollback_archive_size = ?, rollback_ready_at = CURRENT_TIMESTAMP(3),
+                        error_text = NULL, updated_at = CURRENT_TIMESTAMP(3)
+                    WHERE migration_id = ? AND target_node = ? AND status = 'ROLLBACK_PREPARING'
+                    """)) {
+                statement.setString(1, archiveName);
+                statement.setString(2, archiveSha256);
+                statement.setString(3, contentSha256);
+                statement.setLong(4, archiveSize);
+                statement.setString(5, migrationId);
+                statement.setString(6, config.nodeId());
+                if (statement.executeUpdate() != 1) {
+                    throw new SQLException("Не удалось подготовить rollback " + migrationId);
+                }
+            }
+        }
+        return findDimensionMigration(config, migrationId);
+    }
+
+    public static DimensionMigration failDimensionRollback(
+            ClusterConfig config,
+            String migrationId,
+            String errorText
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    UPDATE cluster_dimension_migrations
+                    SET status = COALESCE(rollback_previous_status, 'APPLIED'), error_text = ?, updated_at = CURRENT_TIMESTAMP(3)
+                    WHERE migration_id = ? AND status = 'ROLLBACK_PREPARING'
+                    """)) {
+                statement.setString(1, truncate(errorText, 4000));
+                statement.setString(2, migrationId);
+                statement.executeUpdate();
+            }
+        }
+        return findDimensionMigration(config, migrationId);
+    }
+
+    public static DimensionMigration findPendingDimensionRollbackForSource(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT
+                        migration_id, dimension_id, source_node, target_node, status,
+                        archive_name, archive_sha256, content_sha256, archive_size, error_text,
+                        created_at, updated_at, ready_at, applying_at, applied_at,
+                        verified_at, finalize_ready_at, finalized_at, rollback_previous_status,
+                        rollback_archive_name, rollback_archive_sha256, rollback_content_sha256,
+                        rollback_archive_size, rollback_ready_at, rollback_applying_at,
+                        rolled_back_at, source_backup_deleted_at
+                    FROM cluster_dimension_migrations
+                    WHERE source_node = ? AND status IN ('ROLLBACK_READY', 'ROLLBACK_APPLYING')
+                    ORDER BY created_at
+                    LIMIT 1
+                    """)) {
+                statement.setString(1, config.nodeId());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    return resultSet.next() ? readDimensionMigration(resultSet) : null;
+                }
+            }
+        }
+    }
+
+    public static DimensionMigration markDimensionRollbackApplying(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    UPDATE cluster_dimension_migrations
+                    SET status = 'ROLLBACK_APPLYING', rollback_applying_at = COALESCE(rollback_applying_at, CURRENT_TIMESTAMP(3)), updated_at = CURRENT_TIMESTAMP(3)
+                    WHERE migration_id = ? AND source_node = ? AND status IN ('ROLLBACK_READY', 'ROLLBACK_APPLYING')
+                    """)) {
+                statement.setString(1, migrationId);
+                statement.setString(2, config.nodeId());
+                if (statement.executeUpdate() != 1) {
+                    throw new SQLException("Не удалось захватить rollback " + migrationId);
+                }
+            }
+        }
+        return findDimensionMigration(config, migrationId);
+    }
+
+    public static DimensionMigration completeDimensionRollback(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                lockDimensionAssignments(connection);
+                DimensionMigration migration = findDimensionMigration(connection, migrationId, true);
+                if (migration == null) {
+                    throw new SQLException("Migration не найден: " + migrationId);
+                }
+                if (!migration.sourceNode().equalsIgnoreCase(config.nodeId()) || !migration.status().equals("ROLLBACK_APPLYING")) {
+                    throw new SQLException("Rollback не принадлежит этому source node или имеет неверный status");
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE dimension_assignments
+                        SET node_id = ?, updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE dimension_id = ? AND node_id = ?
+                        """)) {
+                    statement.setString(1, migration.sourceNode());
+                    statement.setString(2, migration.dimensionId());
+                    statement.setString(3, migration.targetNode());
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("Владелец dimension изменился во время rollback");
+                    }
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations
+                        SET status = 'ROLLED_BACK', rolled_back_at = CURRENT_TIMESTAMP(3), error_text = NULL, updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ? AND status = 'ROLLBACK_APPLYING'
+                        """)) {
+                    statement.setString(1, migrationId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("Не удалось завершить rollback " + migrationId);
+                    }
+                }
+                connection.commit();
+                return findDimensionMigration(config, migrationId);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static List<DimensionMigration> listExpiredFinalizedMigrationBackups(
+            ClusterConfig config,
+            int retentionDays
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeDays = Math.max(1, retentionDays);
+        try (Connection connection = open(config)) {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT
+                        migration_id, dimension_id, source_node, target_node, status,
+                        archive_name, archive_sha256, content_sha256, archive_size, error_text,
+                        created_at, updated_at, ready_at, applying_at, applied_at,
+                        verified_at, finalize_ready_at, finalized_at, rollback_previous_status,
+                        rollback_archive_name, rollback_archive_sha256, rollback_content_sha256,
+                        rollback_archive_size, rollback_ready_at, rollback_applying_at,
+                        rolled_back_at, source_backup_deleted_at
+                    FROM cluster_dimension_migrations
+                    WHERE source_node = ? AND status IN ('FINALIZED', 'ROLLED_BACK') AND source_backup_deleted_at IS NULL
+                      AND finalized_at < TIMESTAMPADD(DAY, -?, CURRENT_TIMESTAMP(3))
+                    ORDER BY finalized_at
+                    """)) {
+                statement.setString(1, config.nodeId());
+                statement.setInt(2, safeDays);
+                List<DimensionMigration> result = new ArrayList<>();
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        result.add(readDimensionMigration(resultSet));
+                    }
+                }
+                return List.copyOf(result);
+            }
+        }
+    }
+
+    public static void markFinalizedMigrationBackupDeleted(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_dimension_migrations
+                     SET source_backup_deleted_at = CURRENT_TIMESTAMP(3), updated_at = CURRENT_TIMESTAMP(3)
+                     WHERE migration_id = ? AND source_node = ? AND status IN ('FINALIZED', 'ROLLED_BACK')
+                     """)) {
+            statement.setString(1, migrationId);
+            statement.setString(2, config.nodeId());
+            statement.executeUpdate();
+        }
+    }
     public static void failDimensionMigration(
             ClusterConfig config,
             String migrationId,
@@ -1865,7 +2305,19 @@ public final class ClusterDatabase {
                         updated_at,
                         ready_at,
                         applying_at,
-                        applied_at
+                        applied_at,
+                        verified_at,
+                        finalize_ready_at,
+                        finalized_at,
+                        rollback_previous_status,
+                        rollback_archive_name,
+                        rollback_archive_sha256,
+                        rollback_content_sha256,
+                        rollback_archive_size,
+                        rollback_ready_at,
+                        rollback_applying_at,
+                        rolled_back_at,
+                        source_backup_deleted_at
                     FROM cluster_dimension_migrations
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -1896,14 +2348,22 @@ public final class ClusterDatabase {
                     FROM cluster_dimension_migrations AS migrations
                     INNER JOIN dimension_assignments AS assignments
                         ON assignments.dimension_id = migrations.dimension_id
-                    WHERE migrations.source_node = ?
-                      AND (
-                            migrations.status IN ('PREPARING', 'READY', 'APPLYING')
-                         OR (
-                                migrations.status = 'APPLIED'
-                            AND assignments.node_id <> ?
-                         )
-                      )
+                    WHERE (
+                            migrations.source_node = ?
+                        AND (
+                               migrations.status IN ('PREPARING', 'READY', 'APPLYING')
+                            OR (
+                                   migrations.status IN ('APPLIED', 'VERIFIED', 'FINALIZE_READY', 'FINALIZED', 'ROLLBACK_PREPARING', 'ROLLBACK_READY', 'ROLLBACK_APPLYING')
+                               AND assignments.node_id <> ?
+                            )
+                        )
+                    ) OR (
+                            migrations.target_node = ?
+                        AND (
+                               migrations.status IN ('ROLLBACK_PREPARING', 'ROLLBACK_READY', 'ROLLBACK_APPLYING')
+                            OR (migrations.status = 'ROLLED_BACK' AND assignments.node_id <> ?)
+                        )
+                    )
                     ORDER BY migrations.dimension_id
                     """;
 
@@ -1912,6 +2372,8 @@ public final class ClusterDatabase {
                          connection.prepareStatement(sql)) {
                 statement.setString(1, config.nodeId());
                 statement.setString(2, config.nodeId());
+                statement.setString(3, config.nodeId());
+                statement.setString(4, config.nodeId());
                 try (ResultSet resultSet = statement.executeQuery()) {
                     while (resultSet.next()) {
                         dimensions.add(resultSet.getString("dimension_id"));
@@ -1931,7 +2393,7 @@ public final class ClusterDatabase {
             String sql = """
                     SELECT DISTINCT dimension_id
                     FROM cluster_dimension_migrations
-                    WHERE status IN ('PREPARING', 'READY', 'APPLYING')
+                    WHERE status IN ('PREPARING', 'READY', 'APPLYING', 'ROLLBACK_PREPARING', 'ROLLBACK_READY', 'ROLLBACK_APPLYING')
                     ORDER BY dimension_id
                     """;
 
@@ -2005,7 +2467,7 @@ public final class ClusterDatabase {
                     );
                 }
 
-                if (hasActiveDimensionMigration(connection, dimensionId)) {
+                if (hasBlockingDimensionMigration(connection, dimensionId)) {
                     throw new SQLException(
                             "Dimension " + dimensionId
                                     + " временно недоступен: выполняется migration"
@@ -3170,7 +3632,7 @@ public final class ClusterDatabase {
         String sql = """
                 SELECT dimension_id
                 FROM cluster_dimension_migrations
-                WHERE status IN ('PREPARING', 'READY', 'APPLYING')
+                WHERE status IN ('PREPARING', 'READY', 'APPLYING', 'APPLIED', 'VERIFIED', 'FINALIZE_READY', 'ROLLBACK_PREPARING', 'ROLLBACK_READY', 'ROLLBACK_APPLYING')
                 ORDER BY dimension_id
                 """;
 
@@ -3205,7 +3667,19 @@ public final class ClusterDatabase {
                     updated_at,
                     ready_at,
                     applying_at,
-                    applied_at
+                    applied_at,
+                    verified_at,
+                    finalize_ready_at,
+                    finalized_at,
+                    rollback_previous_status,
+                    rollback_archive_name,
+                    rollback_archive_sha256,
+                    rollback_content_sha256,
+                    rollback_archive_size,
+                    rollback_ready_at,
+                    rollback_applying_at,
+                    rolled_back_at,
+                    source_backup_deleted_at
                 FROM cluster_dimension_migrations
                 WHERE migration_id = ?
                 """ + (forUpdate ? " FOR UPDATE" : "");
@@ -3243,10 +3717,22 @@ public final class ClusterDatabase {
                     updated_at,
                     ready_at,
                     applying_at,
-                    applied_at
+                    applied_at,
+                    verified_at,
+                    finalize_ready_at,
+                    finalized_at,
+                    rollback_previous_status,
+                    rollback_archive_name,
+                    rollback_archive_sha256,
+                    rollback_content_sha256,
+                    rollback_archive_size,
+                    rollback_ready_at,
+                    rollback_applying_at,
+                    rolled_back_at,
+                    source_backup_deleted_at
                 FROM cluster_dimension_migrations
                 WHERE dimension_id = ?
-                  AND status IN ('PREPARING', 'READY', 'APPLYING')
+                  AND status IN ('PREPARING', 'READY', 'APPLYING', 'APPLIED', 'VERIFIED', 'FINALIZE_READY', 'ROLLBACK_PREPARING', 'ROLLBACK_READY', 'ROLLBACK_APPLYING')
                 ORDER BY created_at DESC
                 LIMIT 1
                 """ + (forUpdate ? " FOR UPDATE" : "");
@@ -3274,6 +3760,25 @@ public final class ClusterDatabase {
         ) != null;
     }
 
+    private static boolean hasBlockingDimensionMigration(
+            Connection connection,
+            String dimensionId
+    ) throws SQLException {
+        String sql = """
+                SELECT 1
+                FROM cluster_dimension_migrations
+                WHERE dimension_id = ?
+                  AND status IN ('PREPARING', 'READY', 'APPLYING', 'ROLLBACK_PREPARING', 'ROLLBACK_READY', 'ROLLBACK_APPLYING')
+                LIMIT 1
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, dimensionId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+        }
+    }
+
     private static DimensionMigration readDimensionMigration(
             ResultSet resultSet
     ) throws SQLException {
@@ -3292,7 +3797,19 @@ public final class ClusterDatabase {
                 instantOrNull(resultSet, "updated_at"),
                 instantOrNull(resultSet, "ready_at"),
                 instantOrNull(resultSet, "applying_at"),
-                instantOrNull(resultSet, "applied_at")
+                instantOrNull(resultSet, "applied_at"),
+                instantOrNull(resultSet, "verified_at"),
+                instantOrNull(resultSet, "finalize_ready_at"),
+                instantOrNull(resultSet, "finalized_at"),
+                resultSet.getString("rollback_previous_status"),
+                resultSet.getString("rollback_archive_name"),
+                resultSet.getString("rollback_archive_sha256"),
+                resultSet.getString("rollback_content_sha256"),
+                resultSet.getLong("rollback_archive_size"),
+                instantOrNull(resultSet, "rollback_ready_at"),
+                instantOrNull(resultSet, "rollback_applying_at"),
+                instantOrNull(resultSet, "rolled_back_at"),
+                instantOrNull(resultSet, "source_backup_deleted_at")
         );
     }
 
@@ -3479,6 +3996,18 @@ public final class ClusterDatabase {
                     ready_at TIMESTAMP(3) NULL,
                     applying_at TIMESTAMP(3) NULL,
                     applied_at TIMESTAMP(3) NULL,
+                    verified_at TIMESTAMP(3) NULL,
+                    finalize_ready_at TIMESTAMP(3) NULL,
+                    finalized_at TIMESTAMP(3) NULL,
+                    rollback_previous_status VARCHAR(24) NULL,
+                    rollback_archive_name VARCHAR(255) NULL,
+                    rollback_archive_sha256 CHAR(64) NULL,
+                    rollback_content_sha256 CHAR(64) NULL,
+                    rollback_archive_size BIGINT NOT NULL DEFAULT 0,
+                    rollback_ready_at TIMESTAMP(3) NULL,
+                    rollback_applying_at TIMESTAMP(3) NULL,
+                    rolled_back_at TIMESTAMP(3) NULL,
+                    source_backup_deleted_at TIMESTAMP(3) NULL,
 
                     INDEX idx_dimension_migration_dimension_status (
                         dimension_id,
@@ -3671,6 +4200,19 @@ public final class ClusterDatabase {
                 "restore_node",
                 "VARCHAR(64) NULL"
         );
+
+        ensureColumnExists(connection, "cluster_dimension_migrations", "verified_at", "TIMESTAMP(3) NULL");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "finalize_ready_at", "TIMESTAMP(3) NULL");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "finalized_at", "TIMESTAMP(3) NULL");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "rollback_previous_status", "VARCHAR(24) NULL");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "rollback_archive_name", "VARCHAR(255) NULL");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "rollback_archive_sha256", "CHAR(64) NULL");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "rollback_content_sha256", "CHAR(64) NULL");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "rollback_archive_size", "BIGINT NOT NULL DEFAULT 0");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "rollback_ready_at", "TIMESTAMP(3) NULL");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "rollback_applying_at", "TIMESTAMP(3) NULL");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "rolled_back_at", "TIMESTAMP(3) NULL");
+        ensureColumnExists(connection, "cluster_dimension_migrations", "source_backup_deleted_at", "TIMESTAMP(3) NULL");
     }
 
     private static void refreshDimensionActivity(
@@ -3960,7 +4502,7 @@ public final class ClusterDatabase {
                         SELECT 1
                         FROM cluster_dimension_migrations AS migrations
                         WHERE migrations.dimension_id = assignments.dimension_id
-                          AND migrations.status IN ('PREPARING', 'READY', 'APPLYING')
+                          AND migrations.status IN ('PREPARING', 'READY', 'APPLYING', 'APPLIED', 'VERIFIED', 'FINALIZE_READY', 'ROLLBACK_PREPARING', 'ROLLBACK_READY', 'ROLLBACK_APPLYING')
                   )
                   AND (nodes.node_id IS NULL
                    OR nodes.stopped_at IS NOT NULL
@@ -4722,7 +5264,19 @@ public final class ClusterDatabase {
             Instant updatedAt,
             Instant readyAt,
             Instant applyingAt,
-            Instant appliedAt
+            Instant appliedAt,
+            Instant verifiedAt,
+            Instant finalizeReadyAt,
+            Instant finalizedAt,
+            String rollbackPreviousStatus,
+            String rollbackArchiveName,
+            String rollbackArchiveSha256,
+            String rollbackContentSha256,
+            long rollbackArchiveSize,
+            Instant rollbackReadyAt,
+            Instant rollbackApplyingAt,
+            Instant rolledBackAt,
+            Instant sourceBackupDeletedAt
     ) {
     }
 

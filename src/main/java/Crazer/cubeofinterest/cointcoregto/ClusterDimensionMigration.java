@@ -138,22 +138,134 @@ public final class ClusterDimensionMigration {
             ClusterDatabase.DimensionMigration migration,
             Path stagingRoot
     ) throws IOException {
-        Path archive = safeResolve(stagingRoot, migration.archiveName());
+        return applyPayload(
+                server,
+                migration.dimensionId(),
+                migration.archiveName(),
+                migration.archiveSha256(),
+                migration.contentSha256(),
+                migration.archiveSize(),
+                migration.migrationId(),
+                stagingRoot
+        );
+    }
+
+    public static AppliedArchive applyRollbackArchive(
+            MinecraftServer server,
+            ClusterDatabase.DimensionMigration migration,
+            Path stagingRoot
+    ) throws IOException {
+        return applyPayload(
+                server,
+                migration.dimensionId(),
+                migration.rollbackArchiveName(),
+                migration.rollbackArchiveSha256(),
+                migration.rollbackContentSha256(),
+                migration.rollbackArchiveSize(),
+                migration.migrationId() + "-rollback",
+                stagingRoot
+        );
+    }
+
+    public static VerificationResult verifyDimension(
+            MinecraftServer server,
+            String dimensionId,
+            String expectedSha256
+    ) throws IOException {
+        Path dimension = resolveDimensionPath(server, dimensionId);
+        String first = treeSha256(dimension);
+        String second = treeSha256(dimension);
+        if (!first.equalsIgnoreCase(second)) {
+            throw new IOException("Файлы измерения изменились во время проверки");
+        }
+        return new VerificationResult(
+                first,
+                first.equalsIgnoreCase(expectedSha256)
+        );
+    }
+
+    public static Path finalizeSourceCopy(
+            MinecraftServer server,
+            ClusterDatabase.DimensionMigration migration
+    ) throws IOException {
+        Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
+        Path source = resolveDimensionPath(server, migration.dimensionId());
+        Path relative = worldRoot.relativize(source);
+        Path backupRoot = safeResolve(
+                worldRoot.resolve(".cointcoregto-finalized-migrations"),
+                migration.migrationId()
+        );
+        Path backup = safeResolve(backupRoot, normalizeEntryName(relative));
+
+        if (Files.exists(backup)) {
+            if (Files.exists(source)) {
+                deleteTree(source);
+            }
+            return backup;
+        }
+
+        if (!Files.isDirectory(source)) {
+            throw new IOException("Исходная копия измерения не найдена: " + source);
+        }
+
+        Files.createDirectories(backup.getParent());
+        moveDirectory(source, backup);
+        return backup;
+    }
+
+    public static void deleteFinalizedBackup(
+            MinecraftServer server,
+            String migrationId
+    ) throws IOException {
+        Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
+        deleteTree(safeResolve(
+                worldRoot.resolve(".cointcoregto-finalized-migrations"),
+                migrationId
+        ));
+    }
+
+    public static boolean finalizedBackupExists(
+            MinecraftServer server,
+            ClusterDatabase.DimensionMigration migration
+    ) throws IOException {
+        Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
+        Path source = resolveDimensionPath(server, migration.dimensionId());
+        Path relative = worldRoot.relativize(source);
+        Path backupRoot = safeResolve(
+                worldRoot.resolve(".cointcoregto-finalized-migrations"),
+                migration.migrationId()
+        );
+        return Files.isDirectory(
+                safeResolve(backupRoot, normalizeEntryName(relative))
+        );
+    }
+
+    private static AppliedArchive applyPayload(
+            MinecraftServer server,
+            String dimensionId,
+            String archiveName,
+            String archiveSha256,
+            String contentSha256,
+            long archiveSize,
+            String operationId,
+            Path stagingRoot
+    ) throws IOException {
+        Path archive = safeResolve(stagingRoot, archiveName);
         if (!Files.isRegularFile(archive)) {
             throw new IOException("Архив миграции не найден: " + archive);
         }
 
-        if (Files.size(archive) != migration.archiveSize()) {
+        if (Files.size(archive) != archiveSize) {
             throw new IOException("Размер архива миграции не совпадает");
         }
 
         String actualArchiveSha = sha256(archive);
-        if (!actualArchiveSha.equalsIgnoreCase(migration.archiveSha256())) {
+        if (!actualArchiveSha.equalsIgnoreCase(archiveSha256)) {
             throw new IOException("SHA-256 архива миграции не совпадает");
         }
 
         Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
-        Path target = resolveDimensionPath(server, migration.dimensionId());
+        Path target = resolveDimensionPath(server, dimensionId);
         Path normalizedStaging = stagingRoot.toAbsolutePath().normalize();
         if (normalizedStaging.startsWith(target.toAbsolutePath().normalize())) {
             throw new IOException(
@@ -163,14 +275,14 @@ public final class ClusterDimensionMigration {
 
         if (Files.isDirectory(target)) {
             String targetHash = treeSha256(target);
-            if (targetHash.equalsIgnoreCase(migration.contentSha256())) {
+            if (targetHash.equalsIgnoreCase(contentSha256)) {
                 return new AppliedArchive(target, null, true);
             }
         }
 
         Path workRoot = safeResolve(
                 worldRoot.resolve(".cointcoregto-migrations"),
-                migration.migrationId()
+                operationId
         );
         Path extracted = workRoot.resolve("dimension").normalize();
         deleteTree(workRoot);
@@ -178,7 +290,7 @@ public final class ClusterDimensionMigration {
         extractArchive(archive, extracted);
 
         String extractedHash = treeSha256(extracted);
-        if (!extractedHash.equalsIgnoreCase(migration.contentSha256())) {
+        if (!extractedHash.equalsIgnoreCase(contentSha256)) {
             deleteTree(workRoot);
             throw new IOException("SHA-256 распакованного измерения не совпадает");
         }
@@ -186,7 +298,7 @@ public final class ClusterDimensionMigration {
         Path relativeTarget = worldRoot.relativize(target);
         Path backup = safeResolve(
                 worldRoot.resolve(".cointcoregto-migration-backups")
-                        .resolve(migration.migrationId()),
+                        .resolve(operationId),
                 normalizeEntryName(relativeTarget)
         );
 
@@ -204,7 +316,7 @@ public final class ClusterDimensionMigration {
             Files.createDirectories(target.getParent());
             moveDirectory(extracted, target);
             String installedHash = treeSha256(target);
-            if (!installedHash.equalsIgnoreCase(migration.contentSha256())) {
+            if (!installedHash.equalsIgnoreCase(contentSha256)) {
                 throw new IOException("SHA-256 установленного измерения не совпадает");
             }
         } catch (Exception exception) {
@@ -447,6 +559,12 @@ public final class ClusterDimensionMigration {
                 (byte) (value >>> 8),
                 (byte) value
         };
+    }
+
+    public record VerificationResult(
+            String actualSha256,
+            boolean matchesArchive
+    ) {
     }
 
     public record PreparedArchive(

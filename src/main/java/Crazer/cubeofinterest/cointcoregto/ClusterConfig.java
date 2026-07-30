@@ -33,6 +33,7 @@ public final class ClusterConfig {
     private final boolean syncForgeCapabilities;
     private final boolean dimensionTickIsolation;
     private final Path dimensionMigrationStagingPath;
+    private final int dimensionMigrationBackupRetentionDays;
 
     private ClusterConfig(
             boolean enabled,
@@ -54,7 +55,8 @@ public final class ClusterConfig {
             int maxPlayerDataBytes,
             boolean syncForgeCapabilities,
             boolean dimensionTickIsolation,
-            Path dimensionMigrationStagingPath
+            Path dimensionMigrationStagingPath,
+            int dimensionMigrationBackupRetentionDays
     ) {
         this.enabled = enabled;
         this.nodeId = nodeId;
@@ -76,6 +78,7 @@ public final class ClusterConfig {
         this.syncForgeCapabilities = syncForgeCapabilities;
         this.dimensionTickIsolation = dimensionTickIsolation;
         this.dimensionMigrationStagingPath = dimensionMigrationStagingPath;
+        this.dimensionMigrationBackupRetentionDays = dimensionMigrationBackupRetentionDays;
     }
 
     public static ClusterConfig load() throws IOException {
@@ -135,7 +138,8 @@ public final class ClusterConfig {
                                 "false"
                         ).trim()
                 ),
-                optionalPath(properties, "dimension_migration_staging_path")
+                optionalPath(properties, "dimension_migration_staging_path"),
+                positiveInt(properties, "dimension_migration_backup_retention_days", 7)
         );
     }
 
@@ -275,6 +279,10 @@ public final class ClusterConfig {
                 "dimension_migration_staging_path",
                 ""
         );
+        defaults.setProperty(
+                "dimension_migration_backup_retention_days",
+                "7"
+        );
 
         try (OutputStream output = Files.newOutputStream(CONFIG_PATH)) {
             defaults.store(output, "CointCoreGTO local cluster test configuration");
@@ -363,5 +371,9 @@ public final class ClusterConfig {
 
     public Path dimensionMigrationStagingPath() {
         return dimensionMigrationStagingPath;
+    }
+
+    public int dimensionMigrationBackupRetentionDays() {
+        return dimensionMigrationBackupRetentionDays;
     }
 }
