@@ -874,6 +874,72 @@ public final class ClusterTestModule {
                         )
 
                         .then(
+                                Commands.literal("rebalance")
+                                        .then(
+                                                Commands.literal("preview")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "targetNode",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                previewSafeRebalance(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "targetNode"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("prepare")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "targetNode",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                prepareSafeRebalance(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "targetNode"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(context ->
+                                                                showSafeRebalances(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("cancel")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "operationId",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                cancelSafeRebalance(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "operationId"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                        )
+
+                        .then(
                                 Commands.literal("failover")
                                         .executes(context ->
                                                 showDimensionFailovers(
@@ -6425,24 +6491,30 @@ public final class ClusterTestModule {
         try {
             refreshDimensionMigrationFreeze(currentConfig);
         } catch (Exception exception) {
-            LOGGER.error("Unable to refresh dimension migration freeze after drain", exception);
+            LOGGER.error("Unable to refresh dimension migration freeze after batch operation", exception);
         }
         DRAIN_OPERATION_IN_FLIGHT.set(false);
         SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+        boolean rebalance = "REBALANCE".equals(state.drain.operationType());
+        String operationName = rebalance ? "Безопасная балансировка" : "Drain";
         source.sendSuccess(() -> Component.literal(
-                "§aDrain подготовлен: §f" + state.ready
+                "§a" + operationName + " подготовлен: §f" + state.ready
                         + "§a READY, §f" + state.failed
                         + "§a ошибок, §f" + state.skipped
                         + "§a пропущено. Перезапусти target node §f"
                         + state.drain.targetNode()
                         + "§a."
         ), false);
+        String idLabel = rebalance ? "Rebalance ID" : "Drain ID";
         source.sendSuccess(() -> Component.literal(
-                "§7Drain ID: §f" + state.drain.drainId()
+                "§7" + idLabel + ": §f" + state.drain.drainId()
         ), false);
         if (state.ready == 0) {
+            String action = rebalance
+                    ? "Проверь rebalance status или выполни rebalance cancel."
+                    : "Проверь drain status и выполни resume или cancel.";
             source.sendSuccess(() -> Component.literal(
-                    "§eНи одного архива READY не создано. Проверь drain status и выполни resume или cancel."
+                    "§eНи одного архива READY не создано. " + action
             ), false);
         }
     }
@@ -6607,6 +6679,327 @@ public final class ClusterTestModule {
             } catch (Exception exception) {
                 server.execute(() -> source.sendFailure(Component.literal(
                         "§cНе удалось выполнить drain resume: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int previewSafeRebalance(
+            CommandSourceStack source,
+            String targetNode
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        if (targetNode.equalsIgnoreCase(currentConfig.nodeId())) {
+            source.sendFailure(Component.literal("§cTarget node совпадает с текущим узлом."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        List<String> registeredDimensions = registeredDimensionIds(server);
+        Map<String, Integer> localActivity = captureDimensionPlayerCounts(server);
+        Set<String> locallyAvailable = collectNodeDrainLocalCandidates(server);
+        source.sendSuccess(() -> Component.literal(
+                "§eСтрою безопасный план балансировки: §f"
+                        + currentConfig.nodeId() + " §7-> §f" + targetNode
+        ), false);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                ClusterDatabase.heartbeat(latestConfig, server, localActivity);
+                ClusterDatabase.DimensionPlanResult plan =
+                        ClusterDatabase.planDimensionAssignments(
+                                latestConfig,
+                                registeredDimensions,
+                                true,
+                                false
+                        );
+                boolean targetAvailable = plan.nodes().stream().anyMatch(
+                        node -> node.nodeId().equalsIgnoreCase(targetNode)
+                );
+                if (!targetAvailable) {
+                    throw new IllegalStateException(
+                            "Target node OFFLINE, находится в drain-режиме или не участвует в планировании: "
+                                    + targetNode
+                    );
+                }
+                List<ClusterDatabase.DimensionPlanEntry> selected = plan.entries().stream()
+                        .filter(entry -> entry.action() == ClusterDatabase.DimensionPlanAction.MOVE)
+                        .filter(entry -> currentConfig.nodeId().equalsIgnoreCase(entry.previousNodeId()))
+                        .filter(entry -> targetNode.equalsIgnoreCase(entry.targetNodeId()))
+                        .toList();
+                int ready = 0;
+                int blocked = 0;
+                List<String> lines = new ArrayList<>();
+                for (ClusterDatabase.DimensionPlanEntry entry : selected) {
+                    if (locallyAvailable.contains(entry.dimensionId())) {
+                        ready++;
+                        lines.add("§aREADY §f" + entry.dimensionId()
+                                + " §7| §f" + entry.previousNodeId()
+                                + " §7-> §f" + entry.targetNodeId());
+                    } else {
+                        blocked++;
+                        lines.add("§cBLOCKED §f" + entry.dimensionId()
+                                + " §7| измерение не загружено или папка недоступна");
+                    }
+                }
+                int finalReady = ready;
+                int finalBlocked = blocked;
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Безопасный rebalance preview: §aready=" + finalReady
+                                    + "§7, §cblocked=" + finalBlocked
+                                    + "§7, planned moves=" + selected.size()
+                    ), false);
+                    if (selected.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§aТекущий план уже сбалансирован для направления на §f" + targetNode + "§a."
+                        ), false);
+                    } else {
+                        for (String line : lines) {
+                            source.sendSuccess(() -> Component.literal(line), false);
+                        }
+                    }
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Планируемая нагрузка после операции:"
+                    ), false);
+                    for (ClusterDatabase.PlanningNodeStatus node : plan.nodes()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§f" + node.nodeId()
+                                        + " §7| dimensions: §f" + node.plannedDimensionCount()
+                                        + " §7| players: §f" + node.playerCount()
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось построить безопасный план балансировки: "
+                                + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int prepareSafeRebalance(
+            CommandSourceStack source,
+            String targetNode
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        if (currentConfig.dimensionMigrationStagingPath() == null) {
+            source.sendFailure(Component.literal("§cВ конфиге не указан dimension_migration_staging_path."));
+            return 0;
+        }
+        if (targetNode.equalsIgnoreCase(currentConfig.nodeId())) {
+            source.sendFailure(Component.literal("§cTarget node совпадает с текущим узлом."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        if (!DRAIN_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            source.sendFailure(Component.literal("§cУже выполняется drain или безопасная балансировка."));
+            return 0;
+        }
+        if (!SNAPSHOT_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            DRAIN_OPERATION_IN_FLIGHT.set(false);
+            source.sendFailure(Component.literal("§cСначала дождись завершения snapshot-операции."));
+            return 0;
+        }
+        List<String> registeredDimensions = registeredDimensionIds(server);
+        Map<String, Integer> localActivity = captureDimensionPlayerCounts(server);
+        Set<String> locallyAvailable = collectNodeDrainLocalCandidates(server);
+        source.sendSuccess(() -> Component.literal(
+                "§eПодготавливаю безопасную балансировку: §f"
+                        + currentConfig.nodeId() + " §7-> §f" + targetNode
+        ), false);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                ClusterDatabase.heartbeat(latestConfig, server, localActivity);
+                ClusterDatabase.DimensionPlanResult plan =
+                        ClusterDatabase.planDimensionAssignments(
+                                latestConfig,
+                                registeredDimensions,
+                                true,
+                                false
+                        );
+                boolean targetAvailable = plan.nodes().stream().anyMatch(
+                        node -> node.nodeId().equalsIgnoreCase(targetNode)
+                );
+                if (!targetAvailable) {
+                    throw new IllegalStateException(
+                            "Target node OFFLINE, находится в drain-режиме или не участвует в планировании: "
+                                    + targetNode
+                    );
+                }
+                List<String> selected = plan.entries().stream()
+                        .filter(entry -> entry.action() == ClusterDatabase.DimensionPlanAction.MOVE)
+                        .filter(entry -> latestConfig.nodeId().equalsIgnoreCase(entry.previousNodeId()))
+                        .filter(entry -> targetNode.equalsIgnoreCase(entry.targetNodeId()))
+                        .map(ClusterDatabase.DimensionPlanEntry::dimensionId)
+                        .toList();
+                if (selected.isEmpty()) {
+                    throw new IllegalStateException(
+                            "План не содержит перемещений с "
+                                    + latestConfig.nodeId() + " на " + targetNode
+                    );
+                }
+                ClusterDatabase.NodeDrainPreparationResult result =
+                        ClusterDatabase.prepareSafeRebalance(
+                                latestConfig,
+                                targetNode,
+                                selected,
+                                locallyAvailable
+                        );
+                server.execute(() -> startNodeDrainBatch(
+                        source,
+                        server,
+                        latestConfig,
+                        result
+                ));
+            } catch (Exception exception) {
+                DRAIN_OPERATION_IN_FLIGHT.set(false);
+                SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось подготовить безопасную балансировку: "
+                                + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int showSafeRebalances(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.NodeDrain> operations =
+                        ClusterDatabase.listSafeRebalances(currentConfig, 10);
+                List<ClusterDatabase.DimensionDrainItem> latestItems = operations.isEmpty()
+                        ? List.of()
+                        : ClusterDatabase.listNodeDrainItems(
+                                currentConfig,
+                                operations.get(0).drainId()
+                        );
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Последние безопасные балансировки:"
+                    ), false);
+                    if (operations.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal("§7Записей нет."), false);
+                    }
+                    for (ClusterDatabase.NodeDrain operation : operations) {
+                        String color = switch (operation.status()) {
+                            case "COMPLETED" -> "§a";
+                            case "READY" -> "§e";
+                            case "APPLYING", "PREPARING" -> "§b";
+                            case "PARTIAL", "FAILED" -> "§c";
+                            case "CANCELLED" -> "§7";
+                            default -> "§6";
+                        };
+                        source.sendSuccess(() -> Component.literal(
+                                color + operation.status()
+                                        + " §f" + operation.drainId()
+                                        + " §7| §f" + operation.sourceNode()
+                                        + " §7-> §f" + operation.targetNode()
+                                        + " §7| total=" + operation.totalItems()
+                                        + ", ready=" + operation.readyItems()
+                                        + ", applying=" + operation.applyingItems()
+                                        + ", applied=" + operation.appliedItems()
+                                        + ", skipped=" + operation.cancelledItems()
+                                        + ", failed=" + operation.failedItems()
+                        ), false);
+                    }
+                    if (!latestItems.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§6Элементы последней балансировки:"
+                        ), false);
+                        for (ClusterDatabase.DimensionDrainItem item : latestItems) {
+                            String reason = item.errorText() == null || item.errorText().isBlank()
+                                    ? ""
+                                    : " §7| §f" + item.errorText();
+                            source.sendSuccess(() -> Component.literal(
+                                    "§f" + item.dimensionId()
+                                            + " §7| §e" + item.status()
+                                            + " §7| migration: §f" + item.migrationId()
+                                            + reason
+                            ), false);
+                        }
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось получить status безопасной балансировки: "
+                                + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int cancelSafeRebalance(
+            CommandSourceStack source,
+            String operationId
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.NodeDrain operation =
+                        ClusterDatabase.findNodeDrain(currentConfig, operationId);
+                if (operation == null || !"REBALANCE".equals(operation.operationType())) {
+                    throw new IllegalStateException(
+                            "Безопасная балансировка не найдена: " + operationId
+                    );
+                }
+                ClusterDatabase.NodeDrainCancellationResult result =
+                        ClusterDatabase.cancelNodeDrain(currentConfig, operationId);
+                for (ClusterDatabase.DimensionMigration migration : result.migrations()) {
+                    try {
+                        ClusterDimensionMigration.deleteArchive(
+                                currentConfig.dimensionMigrationStagingPath(),
+                                migration.archiveName()
+                        );
+                    } catch (Exception exception) {
+                        LOGGER.warn(
+                                "Unable to delete cancelled rebalance archive {}",
+                                migration.archiveName(),
+                                exception
+                        );
+                    }
+                    removeMigrationFreeze(migration.dimensionId());
+                }
+                try {
+                    refreshDimensionMigrationFreeze(currentConfig);
+                } catch (Exception exception) {
+                    LOGGER.warn("Unable to refresh migration freeze after rebalance cancel", exception);
+                }
+                server.execute(() -> source.sendSuccess(() -> Component.literal(
+                        "§aБезопасная балансировка отменена: §f" + result.drain().drainId()
+                ), false));
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось отменить безопасную балансировку: "
+                                + exception.getMessage()
                 )));
             }
         });
@@ -8138,7 +8531,8 @@ public final class ClusterTestModule {
                             + operations.activeSnapshots()
                             + operations.activeFailovers()
                             + operations.activeFailbacks()
-                            + operations.activeDrains();
+                            + operations.activeDrains()
+                            + operations.activeRebalances();
                     addHealthMessage(messages,
                             activeOperations == 0
                                     ? HealthSeverity.OK
@@ -8148,6 +8542,7 @@ public final class ClusterTestModule {
                                     + ", failovers=" + operations.activeFailovers()
                                     + ", failbacks=" + operations.activeFailbacks()
                                     + ", drains=" + operations.activeDrains()
+                                    + ", rebalances=" + operations.activeRebalances()
                                     + ", leases=" + operations.activeOperationLeases());
 
                     if (operations.recentFailedOperations() > 0) {
