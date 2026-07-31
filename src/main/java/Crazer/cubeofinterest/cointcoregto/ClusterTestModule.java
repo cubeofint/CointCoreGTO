@@ -69,6 +69,9 @@ public final class ClusterTestModule {
     private static final AtomicBoolean AUTOMATIC_OPERATION_RECOVERY_SCAN_IN_FLIGHT =
             new AtomicBoolean();
 
+    private static final long AUTOMATIC_OPERATION_RECOVERY_WAIT_LOG_INTERVAL_MILLIS =
+            300_000L;
+
     private static volatile Map<String, String>
             DIMENSION_OWNER_CACHE = Map.of();
 
@@ -141,6 +144,8 @@ public final class ClusterTestModule {
     private volatile long lastAutomaticOperationRecoveryScanAtMillis;
     private volatile String lastAutomaticOperationRecoveryScanSummary;
     private volatile String lastAutomaticOperationRecoverySummary;
+    private volatile String lastAutomaticOperationRecoveryWaitKey;
+    private volatile long lastAutomaticOperationRecoveryWaitLoggedAtMillis;
     private int heartbeatTickCounter;
 
     private ClusterTestModule() {
@@ -527,6 +532,7 @@ public final class ClusterTestModule {
         lastAutomaticOperationRecoveryScanAtMillis = 0L;
         lastAutomaticOperationRecoveryScanSummary = null;
         lastAutomaticOperationRecoverySummary = null;
+        clearAutomaticOperationRecoveryWait();
 
         DATABASE_EXECUTOR.execute(() -> {
             runTest(server, false);
@@ -668,6 +674,7 @@ public final class ClusterTestModule {
         lastAutomaticOperationRecoveryScanAtMillis = 0L;
         lastAutomaticOperationRecoveryScanSummary = null;
         lastAutomaticOperationRecoverySummary = null;
+        clearAutomaticOperationRecoveryWait();
         ClusterTransferGuard.clearAll();
     }
 
@@ -6581,40 +6588,54 @@ public final class ClusterTestModule {
                         currentConfig.dimensionMigrationStagingPath(),
                         item.migrationId()
                 );
-                ClusterDatabase.markDimensionMigrationReady(
+                ClusterDatabase.markNodeDrainArchiveReady(
                         currentConfig,
+                        item.drainItemId(),
                         item.migrationId(),
                         archive.archiveName(),
                         archive.archiveSha256(),
                         archive.contentSha256(),
                         archive.archiveSize()
                 );
-                ClusterDatabase.markNodeDrainItemReady(
-                        currentConfig,
-                        item.drainItemId()
-                );
                 state.ready++;
             } catch (Exception exception) {
-                state.failed++;
-                if (archive != null) {
-                    try {
-                        ClusterDimensionMigration.deleteArchive(
-                                currentConfig.dimensionMigrationStagingPath(),
-                                archive.archiveName()
-                        );
-                    } catch (Exception ignored) {
-                    }
-                }
+                Boolean failed = null;
                 try {
-                    ClusterDatabase.failNodeDrainItem(
+                    failed = ClusterDatabase.failNodeDrainPreparationIfPending(
                             currentConfig,
                             item.drainItemId(),
                             exception.getClass().getSimpleName() + ": " + exception.getMessage()
                     );
                 } catch (Exception databaseException) {
-                    LOGGER.error("Unable to fail node drain item {}", item.drainItemId(), databaseException);
+                    exception.addSuppressed(databaseException);
+                    LOGGER.error(
+                            "Unable to reconcile failed node drain preparation {}. "
+                                    + "Archive is kept because READY commit state is unknown.",
+                            item.drainItemId(),
+                            databaseException
+                    );
                 }
-                removeMigrationFreeze(item.dimensionId());
+                if (Boolean.TRUE.equals(failed)) {
+                    state.failed++;
+                    if (archive != null) {
+                        try {
+                            ClusterDimensionMigration.deleteArchive(
+                                    currentConfig.dimensionMigrationStagingPath(),
+                                    archive.archiveName()
+                            );
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    removeMigrationFreeze(item.dimensionId());
+                } else if (Boolean.FALSE.equals(failed)) {
+                    state.ready++;
+                    LOGGER.info(
+                            "Node operation item {} advanced while publishing READY; treating it as successfully published",
+                            item.drainItemId()
+                    );
+                } else {
+                    state.failed++;
+                }
             }
             server.execute(() -> continueNodeDrainBatch(
                     source,
@@ -6996,6 +7017,7 @@ public final class ClusterTestModule {
                             3
                     );
             if (candidates.isEmpty()) {
+                clearAutomaticOperationRecoveryWait();
                 lastAutomaticOperationRecoveryScanSummary = trigger + ": кандидатов нет";
                 if ("startup".equals(trigger)
                         && lastAutomaticOperationRecoverySummary == null) {
@@ -7037,13 +7059,21 @@ public final class ClusterTestModule {
                             + " " + candidate.drainId();
             lastAutomaticOperationRecoverySummary =
                     "найдена " + candidate.operationType() + " " + candidate.drainId();
-            LOGGER.warn(
-                    "Interrupted {} operation {} detected by {} on source node {}; scheduling automatic recovery",
-                    candidate.operationType(),
-                    candidate.drainId(),
-                    trigger,
-                    currentConfig.nodeId()
-            );
+            if ("startup".equals(trigger)) {
+                LOGGER.warn(
+                        "Interrupted {} operation {} detected by startup on source node {}; scheduling automatic recovery",
+                        candidate.operationType(),
+                        candidate.drainId(),
+                        currentConfig.nodeId()
+                );
+            } else {
+                LOGGER.debug(
+                        "Interrupted {} operation {} detected by watchdog on source node {}; scheduling automatic recovery",
+                        candidate.operationType(),
+                        candidate.drainId(),
+                        currentConfig.nodeId()
+                );
+            }
             server.execute(() -> beginNodeOperationRecovery(
                     server.createCommandSourceStack(),
                     server,
@@ -7127,35 +7157,54 @@ public final class ClusterTestModule {
             return 0;
         }
         if (drain && !server.getPlayerList().getPlayers().isEmpty()) {
-            String message = "Drain retry запрещён: на текущем узле ещё находятся игроки.";
+            String message = "На source node ещё находятся игроки: "
+                    + currentConfig.nodeId();
             if (automatic) {
-                lastAutomaticOperationRecoverySummary = "пропущено: на source node находятся игроки";
-                LOGGER.warn(
-                        "Automatic drain recovery {} skipped on {} because players are online",
+                recordAutomaticOperationRecoveryWait(
+                        server,
+                        normalizedType,
                         operationId,
-                        currentConfig.nodeId()
+                        "WAITING_SOURCE_PLAYERS",
+                        message
                 );
+            } else {
+                source.sendFailure(Component.literal(
+                        "§cDrain retry запрещён: на текущем узле ещё находятся игроки."
+                ));
             }
-            source.sendFailure(Component.literal("§c" + message));
             return 0;
         }
         if (!DRAIN_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
             String message = "Уже выполняется drain, rebalance или recovery.";
             if (automatic) {
-                lastAutomaticOperationRecoverySummary = "пропущено: другая node operation уже выполняется";
-                LOGGER.warn("Automatic operation recovery {} skipped: {}", operationId, message);
+                lastAutomaticOperationRecoverySummary =
+                        "WAITING_LOCAL_OPERATION: " + message;
+                lastAutomaticOperationRecoveryScanSummary =
+                        "ожидание WAITING_LOCAL_OPERATION: " + message;
+                LOGGER.debug(
+                        "Automatic operation recovery {} waits for another local node operation",
+                        operationId
+                );
+            } else {
+                source.sendFailure(Component.literal("§c" + message));
             }
-            source.sendFailure(Component.literal("§c" + message));
             return 0;
         }
         if (!SNAPSHOT_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
             DRAIN_OPERATION_IN_FLIGHT.set(false);
             String message = "Сначала дождись завершения snapshot-операции.";
             if (automatic) {
-                lastAutomaticOperationRecoverySummary = "пропущено: snapshot-операция уже выполняется";
-                LOGGER.warn("Automatic operation recovery {} skipped: {}", operationId, message);
+                lastAutomaticOperationRecoverySummary =
+                        "WAITING_SNAPSHOT: " + message;
+                lastAutomaticOperationRecoveryScanSummary =
+                        "ожидание WAITING_SNAPSHOT: " + message;
+                LOGGER.debug(
+                        "Automatic operation recovery {} waits for the local snapshot operation",
+                        operationId
+                );
+            } else {
+                source.sendFailure(Component.literal("§c" + message));
             }
-            source.sendFailure(Component.literal("§c" + message));
             return 0;
         }
 
@@ -7164,19 +7213,7 @@ public final class ClusterTestModule {
         String leaseName = "operation-retry:" + operationId;
         if (automatic) {
             lastAutomaticOperationRecoverySummary =
-                    "запущено: " + normalizedType + " " + operationId;
-            LOGGER.info(
-                    "Starting automatic recovery for {} operation {} on node {}",
-                    normalizedType,
-                    operationId,
-                    currentConfig.nodeId()
-            );
-            broadcastToOperators(
-                    server,
-                    "§eНайдена прерванная " + normalizedType
-                            + " operation §f" + operationId
-                            + "§e. Запускаю автоматический recovery."
-            );
+                    "проверка: " + normalizedType + " " + operationId;
         } else {
             source.sendSuccess(() -> Component.literal(
                     "§eЗапускаю recovery " + displayName + ": §f" + operationId
@@ -7201,7 +7238,8 @@ public final class ClusterTestModule {
                         Math.max(300, latestConfig.automaticFailoverLeaseSeconds())
                 );
                 if (!leaseAcquired) {
-                    throw new IllegalStateException(
+                    throw new ClusterDatabase.NodeOperationRecoveryDeferredException(
+                            "WAITING_LEASE",
                             "Recovery уже выполняется другим координатором"
                     );
                 }
@@ -7212,6 +7250,23 @@ public final class ClusterTestModule {
                                 normalizedType,
                                 locallyAvailableDimensions
                         );
+                if (automatic) {
+                    clearAutomaticOperationRecoveryWait();
+                    lastAutomaticOperationRecoverySummary =
+                            "выполняется: " + normalizedType + " " + operationId;
+                    LOGGER.info(
+                            "Automatic recovery can proceed for {} operation {} on node {}",
+                            normalizedType,
+                            operationId,
+                            latestConfig.nodeId()
+                    );
+                    server.execute(() -> broadcastToOperators(
+                            server,
+                            "§eПрерванная " + normalizedType
+                                    + " operation §f" + operationId
+                                    + "§e готова к продолжению. Запускаю recovery."
+                    ));
+                }
                 if (result.items().isEmpty()) {
                     releaseOperationLeaseQuietly(latestConfig, leaseName);
                     DRAIN_OPERATION_IN_FLIGHT.set(false);
@@ -7257,8 +7312,22 @@ public final class ClusterTestModule {
                 }
                 DRAIN_OPERATION_IN_FLIGHT.set(false);
                 SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                if (automatic
+                        && exception instanceof ClusterDatabase.NodeOperationRecoveryDeferredException deferred) {
+                    recordAutomaticOperationRecoveryWait(
+                            server,
+                            normalizedType,
+                            operationId,
+                            deferred.reasonCode(),
+                            deferred.getMessage()
+                    );
+                    return;
+                }
                 if (automatic) {
                     lastAutomaticOperationRecoverySummary =
+                            "ошибка " + normalizedType + " " + operationId
+                                    + ": " + exception.getMessage();
+                    lastAutomaticOperationRecoveryScanSummary =
                             "ошибка " + normalizedType + " " + operationId
                                     + ": " + exception.getMessage();
                     LOGGER.error(
@@ -7275,6 +7344,62 @@ public final class ClusterTestModule {
             }
         });
         return 1;
+    }
+
+    private void recordAutomaticOperationRecoveryWait(
+            MinecraftServer server,
+            String operationType,
+            String operationId,
+            String reasonCode,
+            String message
+    ) {
+        String normalizedReason = reasonCode == null || reasonCode.isBlank()
+                ? "WAITING"
+                : reasonCode.trim().toUpperCase(java.util.Locale.ROOT);
+        String safeMessage = message == null || message.isBlank()
+                ? "условие для recovery ещё не выполнено"
+                : message;
+        String waitKey = operationType + ":" + operationId + ":"
+                + normalizedReason + ":" + safeMessage;
+        long now = System.currentTimeMillis();
+        boolean logNow;
+        synchronized (this) {
+            logNow = !waitKey.equals(lastAutomaticOperationRecoveryWaitKey)
+                    || now - lastAutomaticOperationRecoveryWaitLoggedAtMillis
+                    >= AUTOMATIC_OPERATION_RECOVERY_WAIT_LOG_INTERVAL_MILLIS;
+            lastAutomaticOperationRecoveryWaitKey = waitKey;
+            if (logNow) {
+                lastAutomaticOperationRecoveryWaitLoggedAtMillis = now;
+            }
+        }
+
+        lastAutomaticOperationRecoverySummary =
+                normalizedReason + " " + operationType + " " + operationId
+                        + ": " + safeMessage;
+        lastAutomaticOperationRecoveryScanSummary =
+                "ожидание " + normalizedReason + ": " + safeMessage;
+
+        if (!logNow) {
+            return;
+        }
+        LOGGER.info(
+                "Automatic recovery waits: reason={}, operationType={}, operationId={}, message={}",
+                normalizedReason,
+                operationType,
+                operationId,
+                safeMessage
+        );
+        server.execute(() -> broadcastToOperators(
+                server,
+                "§eAutomatic recovery ожидает §f" + normalizedReason
+                        + "§e для " + operationType + " §f" + operationId
+                        + "§e: " + safeMessage
+        ));
+    }
+
+    private synchronized void clearAutomaticOperationRecoveryWait() {
+        lastAutomaticOperationRecoveryWaitKey = null;
+        lastAutomaticOperationRecoveryWaitLoggedAtMillis = 0L;
     }
 
     private static void releaseOperationLeaseQuietly(

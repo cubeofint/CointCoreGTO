@@ -1813,6 +1813,339 @@ public final class ClusterDatabase {
         return findDimensionMigration(config, migrationId);
     }
 
+    /**
+     * Publishes the prepared archive and its drain/rebalance item in one transaction.
+     * The target node cannot observe migration=READY while the operation item is
+     * still PREPARING.
+     */
+    public static DimensionDrainItem markNodeDrainArchiveReady(
+            ClusterConfig config,
+            String drainItemId,
+            String migrationId,
+            String archiveName,
+            String archiveSha256,
+            String contentSha256,
+            long archiveSize
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                DimensionDrainItem item = findDimensionDrainItem(
+                        connection,
+                        drainItemId,
+                        true
+                );
+                if (item == null) {
+                    throw new SQLException("Drain item не найден: " + drainItemId);
+                }
+                if (!item.migrationId().equals(migrationId)) {
+                    throw new SQLException(
+                            "Drain item " + drainItemId
+                                    + " связан с другой migration: " + item.migrationId()
+                    );
+                }
+                if (!item.sourceNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException(
+                            "Drain item " + drainItemId
+                                    + " принадлежит source node " + item.sourceNode()
+                    );
+                }
+
+                DimensionMigration migration = findDimensionMigration(
+                        connection,
+                        migrationId,
+                        true
+                );
+                if (migration == null) {
+                    throw new SQLException("Migration не найден: " + migrationId);
+                }
+                if (!migration.sourceNode().equalsIgnoreCase(config.nodeId())
+                        || !migration.dimensionId().equals(item.dimensionId())
+                        || !migration.targetNode().equalsIgnoreCase(item.targetNode())) {
+                    throw new SQLException(
+                            "Migration " + migrationId
+                                    + " не соответствует drain item " + drainItemId
+                    );
+                }
+
+                boolean applied = migration.status().equals("APPLIED")
+                        || migration.status().equals("COMPLETED")
+                        || migration.status().equals("VERIFIED")
+                        || migration.status().equals("FINALIZE_READY")
+                        || migration.status().equals("FINALIZED");
+                if (applied) {
+                    DimensionAssignmentRow assignment = findDimensionAssignmentRow(
+                            connection,
+                            item.dimensionId()
+                    );
+                    if (assignment == null
+                            || !assignment.nodeId().equalsIgnoreCase(item.targetNode())) {
+                        throw new SQLException(
+                                "Migration " + migrationId
+                                        + " уже применена, но owner dimension не совпадает с target"
+                        );
+                    }
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            UPDATE cluster_node_drain_items
+                            SET status = 'APPLIED', error_text = NULL,
+                                applied_at = COALESCE(applied_at, CURRENT_TIMESTAMP(3)),
+                                updated_at = CURRENT_TIMESTAMP(3)
+                            WHERE drain_item_id = ?
+                              AND status <> 'APPLIED'
+                            """)) {
+                        statement.setString(1, drainItemId);
+                        statement.executeUpdate();
+                    }
+                    connection.commit();
+                    return findDimensionDrainItem(config, drainItemId);
+                }
+
+                if (migration.status().equals("APPLYING")) {
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            UPDATE cluster_node_drain_items
+                            SET status = 'APPLYING', error_text = NULL,
+                                updated_at = CURRENT_TIMESTAMP(3)
+                            WHERE drain_item_id = ?
+                              AND status IN ('PREPARING', 'READY', 'APPLYING', 'FAILED')
+                            """)) {
+                        statement.setString(1, drainItemId);
+                        statement.executeUpdate();
+                    }
+                    connection.commit();
+                    return findDimensionDrainItem(config, drainItemId);
+                }
+
+                if (migration.status().equals("READY")) {
+                    if (!item.status().equals("PREPARING")
+                            && !item.status().equals("READY")
+                            && !item.status().equals("FAILED")) {
+                        throw new SQLException(
+                                "Drain item " + drainItemId
+                                        + " имеет несовместимый status=" + item.status()
+                        );
+                    }
+                    if (!item.status().equals("READY")) {
+                        try (PreparedStatement statement = connection.prepareStatement("""
+                                UPDATE cluster_node_drain_items
+                                SET status = 'READY', error_text = NULL,
+                                    updated_at = CURRENT_TIMESTAMP(3)
+                                WHERE drain_item_id = ?
+                                  AND status IN ('PREPARING', 'FAILED')
+                                """)) {
+                            statement.setString(1, drainItemId);
+                            if (statement.executeUpdate() != 1) {
+                                throw new SQLException(
+                                        "Drain item изменился при восстановлении READY: "
+                                                + drainItemId
+                                );
+                            }
+                        }
+                    }
+                    connection.commit();
+                    return findDimensionDrainItem(config, drainItemId);
+                }
+
+                if (!migration.status().equals("PREPARING")) {
+                    throw new SQLException(
+                            "Migration " + migrationId
+                                    + " имеет несовместимый status=" + migration.status()
+                    );
+                }
+                if (!item.status().equals("PREPARING")
+                        && !item.status().equals("READY")) {
+                    throw new SQLException(
+                            "Drain item " + drainItemId
+                                    + " имеет несовместимый status=" + item.status()
+                    );
+                }
+
+                if (migration.status().equals("PREPARING")) {
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            UPDATE cluster_dimension_migrations
+                            SET status = 'READY',
+                                archive_name = ?,
+                                archive_sha256 = ?,
+                                content_sha256 = ?,
+                                archive_size = ?,
+                                error_text = NULL,
+                                ready_at = CURRENT_TIMESTAMP(3),
+                                updated_at = CURRENT_TIMESTAMP(3)
+                            WHERE migration_id = ?
+                              AND source_node = ?
+                              AND status = 'PREPARING'
+                            """)) {
+                        statement.setString(1, archiveName);
+                        statement.setString(2, archiveSha256);
+                        statement.setString(3, contentSha256);
+                        statement.setLong(4, archiveSize);
+                        statement.setString(5, migrationId);
+                        statement.setString(6, config.nodeId());
+                        if (statement.executeUpdate() != 1) {
+                            throw new SQLException(
+                                    "Migration изменилась при атомарной публикации READY: "
+                                            + migrationId
+                            );
+                        }
+                    }
+                }
+
+                if (item.status().equals("PREPARING")) {
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            UPDATE cluster_node_drain_items
+                            SET status = 'READY', error_text = NULL,
+                                updated_at = CURRENT_TIMESTAMP(3)
+                            WHERE drain_item_id = ?
+                              AND source_node = ?
+                              AND status = 'PREPARING'
+                            """)) {
+                        statement.setString(1, drainItemId);
+                        statement.setString(2, config.nodeId());
+                        if (statement.executeUpdate() != 1) {
+                            throw new SQLException(
+                                    "Drain item изменился при атомарной публикации READY: "
+                                            + drainItemId
+                            );
+                        }
+                    }
+                }
+
+                connection.commit();
+                return findDimensionDrainItem(config, drainItemId);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    /**
+     * Marks preparation as failed only while the archive is still unpublished.
+     * If READY/APPLYING/APPLIED became visible after an ambiguous commit, the
+     * operation item is reconciled forward instead of being downgraded to FAILED.
+     */
+    public static boolean failNodeDrainPreparationIfPending(
+            ClusterConfig config,
+            String drainItemId,
+            String errorText
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                DimensionDrainItem item = findDimensionDrainItem(
+                        connection,
+                        drainItemId,
+                        true
+                );
+                if (item == null) {
+                    throw new SQLException("Drain item не найден: " + drainItemId);
+                }
+                DimensionMigration migration = findDimensionMigration(
+                        connection,
+                        item.migrationId(),
+                        true
+                );
+                if (migration == null) {
+                    throw new SQLException(
+                            "Migration не найдена для drain item: " + drainItemId
+                    );
+                }
+
+                boolean published = migration.status().equals("READY")
+                        || migration.status().equals("APPLYING")
+                        || migration.status().equals("APPLIED")
+                        || migration.status().equals("COMPLETED")
+                        || migration.status().equals("VERIFIED")
+                        || migration.status().equals("FINALIZE_READY")
+                        || migration.status().equals("FINALIZED");
+                if (published) {
+                    String itemStatus = switch (migration.status()) {
+                        case "APPLIED", "COMPLETED", "VERIFIED", "FINALIZE_READY", "FINALIZED" -> "APPLIED";
+                        case "APPLYING" -> "APPLYING";
+                        default -> "READY";
+                    };
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            UPDATE cluster_node_drain_items
+                            SET status = ?, error_text = NULL,
+                                applied_at = CASE
+                                    WHEN ? = 'APPLIED'
+                                    THEN COALESCE(applied_at, CURRENT_TIMESTAMP(3))
+                                    ELSE applied_at
+                                END,
+                                updated_at = CURRENT_TIMESTAMP(3)
+                            WHERE drain_item_id = ?
+                              AND status IN ('PREPARING', 'READY', 'APPLYING', 'APPLIED', 'FAILED')
+                            """)) {
+                        statement.setString(1, itemStatus);
+                        statement.setString(2, itemStatus);
+                        statement.setString(3, drainItemId);
+                        statement.executeUpdate();
+                    }
+                    connection.commit();
+                    return false;
+                }
+
+                if (!migration.status().equals("PREPARING")
+                        && !migration.status().equals("FAILED")) {
+                    throw new SQLException(
+                            "Нельзя отметить preparation как FAILED: migration status="
+                                    + migration.status()
+                    );
+                }
+                if (!item.status().equals("PREPARING")
+                        && !item.status().equals("FAILED")) {
+                    throw new SQLException(
+                            "Нельзя отметить preparation как FAILED: item status="
+                                    + item.status()
+                    );
+                }
+
+                String safeError = truncate(errorText, 8000);
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations
+                        SET status = 'FAILED', error_text = ?,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ?
+                          AND status IN ('PREPARING', 'FAILED')
+                        """)) {
+                    statement.setString(1, safeError);
+                    statement.setString(2, migration.migrationId());
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException(
+                                "Migration изменилась при фиксации ошибки: "
+                                        + migration.migrationId()
+                        );
+                    }
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_node_drain_items
+                        SET status = 'FAILED', error_text = ?,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE drain_item_id = ?
+                          AND status IN ('PREPARING', 'FAILED')
+                        """)) {
+                    statement.setString(1, safeError);
+                    statement.setString(2, drainItemId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException(
+                                "Drain item изменился при фиксации ошибки: " + drainItemId
+                        );
+                    }
+                }
+                connection.commit();
+                return true;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
     public static DimensionMigration findPendingDimensionMigrationForTarget(
             ClusterConfig config
     ) throws SQLException {
@@ -3495,24 +3828,34 @@ public final class ClusterDatabase {
                 }
                 if (operationType.equals("DRAIN")
                         && readNodePlayerCount(connection, sourceNode) > 0) {
-                    throw new SQLException("На source node ещё находятся игроки");
+                    throw new NodeOperationRecoveryDeferredException(
+                            "WAITING_SOURCE_PLAYERS",
+                            "На source node ещё находятся игроки: " + sourceNode
+                    );
                 }
-                boolean targetReady = isNodeOnline(
+                if (!isNodeOnline(
                         connection,
                         targetNode,
                         config.nodeTimeoutSeconds()
-                ) && !hasOtherActiveNodeOperation(
+                )) {
+                    throw new NodeOperationRecoveryDeferredException(
+                            "WAITING_TARGET",
+                            "Target node OFFLINE: " + targetNode
+                    );
+                }
+                if (hasOtherActiveNodeOperation(
                         connection,
                         targetNode,
                         operationId
-                );
-                if (!targetReady) {
-                    throw new SQLException(
-                            "Target node OFFLINE или участвует в другой операции: " + targetNode
+                )) {
+                    throw new NodeOperationRecoveryDeferredException(
+                            "WAITING_TARGET_OPERATION",
+                            "Target node участвует в другой активной операции: " + targetNode
                     );
                 }
                 if (hasOtherActiveNodeOperation(connection, sourceNode, operationId)) {
-                    throw new SQLException(
+                    throw new NodeOperationRecoveryDeferredException(
+                            "WAITING_SOURCE_OPERATION",
                             "Source node участвует в другой активной операции: " + sourceNode
                     );
                 }
@@ -8649,6 +8992,25 @@ public final class ClusterDatabase {
             int alreadyApplied,
             int skipped
     ) {
+    }
+
+    public static final class NodeOperationRecoveryDeferredException
+            extends SQLException {
+        private final String reasonCode;
+
+        public NodeOperationRecoveryDeferredException(
+                String reasonCode,
+                String message
+        ) {
+            super(message);
+            this.reasonCode = reasonCode == null || reasonCode.isBlank()
+                    ? "WAITING"
+                    : reasonCode.trim().toUpperCase(Locale.ROOT);
+        }
+
+        public String reasonCode() {
+            return reasonCode;
+        }
     }
 
     public record NodeDrainCancellationResult(
