@@ -286,6 +286,166 @@ public final class ClusterDatabase {
         }
     }
 
+    public static List<DimensionSnapshotCoverage> listDimensionSnapshotCoverage(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT
+                         assignments.dimension_id,
+                         assignments.node_id,
+                         MAX(snapshots.ready_at) AS latest_ready_at
+                     FROM dimension_assignments AS assignments
+                     LEFT JOIN cluster_dimension_snapshots AS snapshots
+                       ON snapshots.dimension_id = assignments.dimension_id
+                      AND snapshots.source_node = assignments.node_id
+                      AND snapshots.status = 'READY'
+                     WHERE assignments.dimension_id <> 'minecraft:overworld'
+                     GROUP BY assignments.dimension_id, assignments.node_id
+                     ORDER BY assignments.dimension_id
+                     """)) {
+            List<DimensionSnapshotCoverage> coverage = new ArrayList<>();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    java.sql.Timestamp latestReady = resultSet.getTimestamp("latest_ready_at");
+                    coverage.add(new DimensionSnapshotCoverage(
+                            resultSet.getString("dimension_id"),
+                            resultSet.getString("node_id"),
+                            latestReady == null ? null : latestReady.toInstant()
+                    ));
+                }
+            }
+            return List.copyOf(coverage);
+        }
+    }
+
+    public static OperationalHealth readOperationalHealth(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+
+        String sql = """
+                SELECT
+                    (SELECT COUNT(*)
+                       FROM pending_transfers
+                      WHERE status IN ('READY', 'CLAIMED')
+                        AND expires_at >= CURRENT_TIMESTAMP(3)) AS active_transfers,
+                    (SELECT COUNT(*)
+                       FROM pending_transfers
+                      WHERE status = 'CLAIMED'
+                        AND claimed_at IS NOT NULL
+                        AND claimed_at < TIMESTAMPADD(SECOND, -?, CURRENT_TIMESTAMP(3))
+                        AND expires_at >= CURRENT_TIMESTAMP(3)) AS stale_claimed_transfers,
+                    (SELECT COUNT(*)
+                       FROM cluster_player_sessions
+                      WHERE lease_expires_at < CURRENT_TIMESTAMP(3)) AS expired_player_sessions,
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_migrations
+                      WHERE status IN (
+                          'PREPARING',
+                          'READY',
+                          'APPLYING',
+                          'FINALIZE_READY',
+                          'ROLLBACK_PREPARING',
+                          'ROLLBACK_READY',
+                          'ROLLBACK_APPLYING'
+                      )) AS active_migrations,
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_snapshots
+                      WHERE status = 'PREPARING') AS active_snapshots,
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_failovers
+                      WHERE status IN ('READY', 'APPLYING')) AS active_failovers,
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_failbacks
+                      WHERE status IN ('PREPARING', 'READY', 'APPLYING')) AS active_failbacks,
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_migrations
+                      WHERE status = 'FAILED'
+                        AND updated_at >= TIMESTAMPADD(DAY, -1, CURRENT_TIMESTAMP(3)))
+                    +
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_snapshots
+                      WHERE status = 'FAILED'
+                        AND updated_at >= TIMESTAMPADD(DAY, -1, CURRENT_TIMESTAMP(3)))
+                    +
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_failovers
+                      WHERE status = 'FAILED'
+                        AND updated_at >= TIMESTAMPADD(DAY, -1, CURRENT_TIMESTAMP(3)))
+                    +
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_failbacks
+                      WHERE status = 'FAILED'
+                        AND updated_at >= TIMESTAMPADD(DAY, -1, CURRENT_TIMESTAMP(3)))
+                    AS recent_failed_operations,
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_migrations
+                      WHERE status IN (
+                          'PREPARING',
+                          'APPLYING',
+                          'ROLLBACK_PREPARING',
+                          'ROLLBACK_APPLYING'
+                      )
+                        AND updated_at < TIMESTAMPADD(MINUTE, -10, CURRENT_TIMESTAMP(3)))
+                    +
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_snapshots
+                      WHERE status = 'PREPARING'
+                        AND updated_at < TIMESTAMPADD(MINUTE, -10, CURRENT_TIMESTAMP(3)))
+                    +
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_failovers
+                      WHERE status = 'APPLYING'
+                        AND updated_at < TIMESTAMPADD(MINUTE, -10, CURRENT_TIMESTAMP(3)))
+                    +
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_failbacks
+                      WHERE status IN ('PREPARING', 'APPLYING')
+                        AND updated_at < TIMESTAMPADD(MINUTE, -10, CURRENT_TIMESTAMP(3)))
+                    AS stuck_operations,
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_failovers AS failovers
+                       JOIN cluster_nodes AS nodes
+                         ON nodes.node_id = failovers.source_node
+                      WHERE failovers.status = 'READY'
+                        AND nodes.stopped_at IS NULL
+                        AND nodes.last_seen >= TIMESTAMPADD(
+                            SECOND,
+                            -?,
+                            CURRENT_TIMESTAMP(3)
+                        )) AS ready_failovers_with_online_source,
+                    (SELECT COUNT(*)
+                       FROM cluster_operation_leases
+                      WHERE lease_until >= CURRENT_TIMESTAMP(3)) AS active_operation_leases
+                """;
+
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, config.staleClaimSeconds());
+            statement.setInt(2, config.nodeTimeoutSeconds());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                resultSet.next();
+                return new OperationalHealth(
+                        resultSet.getInt("active_transfers"),
+                        resultSet.getInt("stale_claimed_transfers"),
+                        resultSet.getInt("expired_player_sessions"),
+                        resultSet.getInt("active_migrations"),
+                        resultSet.getInt("active_snapshots"),
+                        resultSet.getInt("active_failovers"),
+                        resultSet.getInt("active_failbacks"),
+                        resultSet.getInt("recent_failed_operations"),
+                        resultSet.getInt("stuck_operations"),
+                        resultSet.getInt("ready_failovers_with_online_source"),
+                        resultSet.getInt("active_operation_leases"),
+                        Instant.now()
+                );
+            }
+        }
+    }
+
     public static Map<String, String> listDimensionOwners(
             ClusterConfig config
     ) throws SQLException {
@@ -6681,6 +6841,29 @@ public final class ClusterDatabase {
             Instant rollbackApplyingAt,
             Instant rolledBackAt,
             Instant sourceBackupDeletedAt
+    ) {
+    }
+
+    public record DimensionSnapshotCoverage(
+            String dimensionId,
+            String ownerNode,
+            Instant latestReadyAt
+    ) {
+    }
+
+    public record OperationalHealth(
+            int activeTransfers,
+            int staleClaimedTransfers,
+            int expiredPlayerSessions,
+            int activeMigrations,
+            int activeSnapshots,
+            int activeFailovers,
+            int activeFailbacks,
+            int recentFailedOperations,
+            int stuckOperations,
+            int readyFailoversWithOnlineSource,
+            int activeOperationLeases,
+            Instant checkedAt
     ) {
     }
 

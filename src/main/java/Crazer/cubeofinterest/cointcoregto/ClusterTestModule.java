@@ -27,6 +27,7 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -697,6 +698,15 @@ public final class ClusterTestModule {
 
                                             return 1;
                                         })
+                        )
+
+                        .then(
+                                Commands.literal("health")
+                                        .executes(context ->
+                                                showClusterHealth(
+                                                        context.getSource()
+                                                )
+                                        )
                         )
 
                         .then(
@@ -7090,6 +7100,413 @@ public final class ClusterTestModule {
         }
     }
 
+    private int showClusterHealth(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null) {
+            source.sendFailure(Component.literal("§cКонфиг кластера ещё не загружен."));
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        List<String> registeredDimensions = registeredDimensionIds(server);
+        Map<String, Integer> localActivity = captureDimensionPlayerCounts(server);
+        int loadedDimensions = 0;
+        for (ServerLevel ignored : server.getAllLevels()) {
+            loadedDimensions++;
+        }
+        int finalLoadedDimensions = loadedDimensions;
+
+        source.sendSuccess(() -> Component.literal(
+                "§eЗапускаю полную диагностику кластера..."
+        ), false);
+
+        DATABASE_EXECUTOR.execute(() -> {
+            List<HealthMessage> messages = new ArrayList<>();
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+
+                if (latestConfig.enabled()) {
+                    addHealthMessage(messages, HealthSeverity.OK,
+                            "Кластер включён, node=" + latestConfig.nodeId()
+                                    + ", redirect=" + latestConfig.redirectAddress());
+                } else {
+                    addHealthMessage(messages, HealthSeverity.CRITICAL,
+                            "Кластер отключён в " + ClusterConfig.path());
+                }
+
+                if (latestConfig.dimensionTickIsolation()
+                        && DIMENSION_TICK_GUARD_ACTIVE.get()) {
+                    addHealthMessage(messages, HealthSeverity.OK,
+                            "Изоляция тиков включена, mixin активен");
+                } else if (!latestConfig.dimensionTickIsolation()) {
+                    addHealthMessage(messages, HealthSeverity.WARNING,
+                            "Изоляция тиков отключена");
+                } else {
+                    addHealthMessage(messages, HealthSeverity.CRITICAL,
+                            "Изоляция тиков включена, но mixin не активен");
+                }
+
+                if (!latestConfig.failClosedRouting()) {
+                    addHealthMessage(messages, HealthSeverity.WARNING,
+                            "fail_closed_routing выключен");
+                }
+                if (!latestConfig.syncPlayerData()) {
+                    addHealthMessage(messages, HealthSeverity.WARNING,
+                            "Синхронизация данных игрока выключена");
+                } else if (!latestConfig.syncForgeCapabilities()) {
+                    addHealthMessage(messages, HealthSeverity.WARNING,
+                            "Синхронизация Forge capabilities выключена");
+                }
+                if (!latestConfig.automaticDimensionSnapshots()) {
+                    addHealthMessage(messages, HealthSeverity.WARNING,
+                            "Автоматические snapshots выключены");
+                }
+                if (!latestConfig.automaticFailover()) {
+                    addHealthMessage(messages, HealthSeverity.WARNING,
+                            "Автоматический failover выключен");
+                }
+
+                checkHealthStagingPath(messages, latestConfig.dimensionMigrationStagingPath());
+
+                if (latestConfig.enabled()) {
+                    ClusterDatabase.TestResult database = ClusterDatabase.test(
+                            latestConfig,
+                            server,
+                            localActivity
+                    );
+                    List<ClusterDatabase.ClusterNodeStatus> nodes =
+                            ClusterDatabase.listNodes(latestConfig);
+                    List<ClusterDatabase.DimensionAssignmentInfo> assignments =
+                            ClusterDatabase.listDimensionAssignments(
+                                    latestConfig,
+                                    registeredDimensions
+                            );
+                    List<ClusterDatabase.DimensionSnapshotCoverage> coverage =
+                            ClusterDatabase.listDimensionSnapshotCoverage(latestConfig);
+                    ClusterDatabase.OperationalHealth operations =
+                            ClusterDatabase.readOperationalHealth(latestConfig);
+
+                    addHealthMessage(messages, HealthSeverity.OK,
+                            "MySQL доступен: " + database.databaseName()
+                                    + " " + database.databaseVersion()
+                                    + ", schema=" + database.catalog());
+
+                    Map<String, ClusterDatabase.ClusterNodeStatus> nodesById =
+                            new LinkedHashMap<>();
+                    Map<String, List<String>> redirectNodes = new LinkedHashMap<>();
+                    int onlineNodes = 0;
+                    int offlineNodes = 0;
+                    for (ClusterDatabase.ClusterNodeStatus node : nodes) {
+                        nodesById.put(node.nodeId(), node);
+                        redirectNodes.computeIfAbsent(
+                                node.redirectAddress().toLowerCase(java.util.Locale.ROOT),
+                                ignored -> new ArrayList<>()
+                        ).add(node.nodeId());
+                        if (node.online()) {
+                            onlineNodes++;
+                        } else {
+                            offlineNodes++;
+                        }
+                    }
+
+                    ClusterDatabase.ClusterNodeStatus localNode =
+                            nodesById.get(latestConfig.nodeId());
+                    if (localNode == null || !localNode.online()) {
+                        addHealthMessage(messages, HealthSeverity.CRITICAL,
+                                "Текущий узел отсутствует в cluster_nodes или считается OFFLINE");
+                    } else {
+                        addHealthMessage(messages, HealthSeverity.OK,
+                                "Узлы: ONLINE=" + onlineNodes
+                                        + ", OFFLINE=" + offlineNodes
+                                        + ", текущий heartbeat="
+                                        + localNode.heartbeatAgeSeconds() + "s");
+                    }
+
+                    List<String> duplicateRedirects = new ArrayList<>();
+                    for (Map.Entry<String, List<String>> entry : redirectNodes.entrySet()) {
+                        if (entry.getValue().size() > 1) {
+                            duplicateRedirects.add(entry.getKey() + "=" + entry.getValue());
+                        }
+                    }
+                    if (!duplicateRedirects.isEmpty()) {
+                        addHealthMessage(messages, HealthSeverity.CRITICAL,
+                                "Одинаковые redirect_address: "
+                                        + healthPreview(duplicateRedirects, 5));
+                    }
+
+                    Set<String> registeredSet = Set.copyOf(registeredDimensions);
+                    Map<String, ClusterDatabase.DimensionAssignmentInfo> assignmentsById =
+                            new LinkedHashMap<>();
+                    for (ClusterDatabase.DimensionAssignmentInfo assignment : assignments) {
+                        assignmentsById.put(assignment.dimensionId(), assignment);
+                    }
+
+                    List<String> unassigned = new ArrayList<>();
+                    List<String> orphanOwners = new ArrayList<>();
+                    List<String> offlineOwners = new ArrayList<>();
+                    List<String> conflicts = new ArrayList<>();
+                    int assignedRegistered = 0;
+                    int pinned = 0;
+
+                    for (ClusterDatabase.DimensionAssignmentInfo assignment : assignments) {
+                        if (assignment.pinned()) {
+                            pinned++;
+                        }
+                        if (assignment.activeNodes().size() > 1) {
+                            conflicts.add(assignment.dimensionId()
+                                    + "=" + assignment.activeNodes());
+                        }
+                        String owner = assignment.nodeId();
+                        if (owner != null && !owner.isBlank()) {
+                            if (!nodesById.containsKey(owner)) {
+                                orphanOwners.add(assignment.dimensionId() + "->" + owner);
+                            } else if (!nodesById.get(owner).online()) {
+                                offlineOwners.add(assignment.dimensionId() + "->" + owner);
+                            }
+                        }
+                    }
+
+                    for (String dimensionId : registeredDimensions) {
+                        ClusterDatabase.DimensionAssignmentInfo assignment =
+                                assignmentsById.get(dimensionId);
+                        if (assignment == null
+                                || assignment.nodeId() == null
+                                || assignment.nodeId().isBlank()) {
+                            unassigned.add(dimensionId);
+                        } else {
+                            assignedRegistered++;
+                        }
+                    }
+
+                    if (unassigned.isEmpty()) {
+                        addHealthMessage(messages, HealthSeverity.OK,
+                                "Измерения: зарегистрировано=" + registeredDimensions.size()
+                                        + ", назначено=" + assignedRegistered
+                                        + ", pinned=" + pinned
+                                        + ", загружено=" + finalLoadedDimensions);
+                    } else {
+                        addHealthMessage(messages, HealthSeverity.CRITICAL,
+                                "Измерения без владельца: "
+                                        + healthPreview(unassigned, 8));
+                    }
+                    if (!orphanOwners.isEmpty()) {
+                        addHealthMessage(messages, HealthSeverity.CRITICAL,
+                                "Назначения на неизвестные узлы: "
+                                        + healthPreview(orphanOwners, 8));
+                    }
+                    if (!offlineOwners.isEmpty()) {
+                        addHealthMessage(messages, HealthSeverity.WARNING,
+                                "Измерения принадлежат OFFLINE-узлам: "
+                                        + healthPreview(offlineOwners, 8));
+                    }
+                    if (!conflicts.isEmpty()) {
+                        addHealthMessage(messages, HealthSeverity.CRITICAL,
+                                "Конфликты активности измерений: "
+                                        + healthPreview(conflicts, 8));
+                    }
+
+                    long freshCutoff = System.currentTimeMillis()
+                            - latestConfig.dimensionSnapshotMaxAgeMinutes() * 60_000L;
+                    List<String> missingSnapshots = new ArrayList<>();
+                    List<String> staleSnapshots = new ArrayList<>();
+                    int freshSnapshots = 0;
+                    for (ClusterDatabase.DimensionSnapshotCoverage item : coverage) {
+                        if (!registeredSet.contains(item.dimensionId())) {
+                            continue;
+                        }
+                        if (item.latestReadyAt() == null) {
+                            missingSnapshots.add(item.dimensionId());
+                        } else if (item.latestReadyAt().toEpochMilli() < freshCutoff) {
+                            staleSnapshots.add(item.dimensionId());
+                        } else {
+                            freshSnapshots++;
+                        }
+                    }
+                    if (missingSnapshots.isEmpty() && staleSnapshots.isEmpty()) {
+                        addHealthMessage(messages, HealthSeverity.OK,
+                                "Snapshots кроме Overworld: свежих покрытий=" + freshSnapshots
+                                        + ", max age="
+                                        + latestConfig.dimensionSnapshotMaxAgeMinutes()
+                                        + " min");
+                    } else {
+                        if (!missingSnapshots.isEmpty()) {
+                            addHealthMessage(messages, HealthSeverity.WARNING,
+                                    "Нет READY snapshot: "
+                                            + healthPreview(missingSnapshots, 8));
+                        }
+                        if (!staleSnapshots.isEmpty()) {
+                            addHealthMessage(messages, HealthSeverity.WARNING,
+                                    "Устаревшие snapshots: "
+                                            + healthPreview(staleSnapshots, 8));
+                        }
+                    }
+
+                    int activeOperations = operations.activeMigrations()
+                            + operations.activeSnapshots()
+                            + operations.activeFailovers()
+                            + operations.activeFailbacks();
+                    addHealthMessage(messages,
+                            activeOperations == 0
+                                    ? HealthSeverity.OK
+                                    : HealthSeverity.INFO,
+                            "Операции: migrations=" + operations.activeMigrations()
+                                    + ", snapshots=" + operations.activeSnapshots()
+                                    + ", failovers=" + operations.activeFailovers()
+                                    + ", failbacks=" + operations.activeFailbacks()
+                                    + ", leases=" + operations.activeOperationLeases());
+
+                    if (operations.recentFailedOperations() > 0) {
+                        addHealthMessage(messages, HealthSeverity.WARNING,
+                                "Ошибок операций за 24 часа: "
+                                        + operations.recentFailedOperations());
+                    }
+                    if (operations.stuckOperations() > 0) {
+                        addHealthMessage(messages, HealthSeverity.CRITICAL,
+                                "Операции без обновления более 10 минут: "
+                                        + operations.stuckOperations());
+                    }
+                    if (operations.readyFailoversWithOnlineSource() > 0) {
+                        addHealthMessage(messages, HealthSeverity.CRITICAL,
+                                "READY failover при ONLINE source: "
+                                        + operations.readyFailoversWithOnlineSource());
+                    }
+
+                    HealthSeverity transferSeverity =
+                            operations.staleClaimedTransfers() > 0
+                                    || operations.expiredPlayerSessions() > 0
+                                    ? HealthSeverity.WARNING
+                                    : HealthSeverity.OK;
+                    addHealthMessage(messages, transferSeverity,
+                            "Transfers: active=" + operations.activeTransfers()
+                                    + ", stale CLAIMED="
+                                    + operations.staleClaimedTransfers()
+                                    + ", expired sessions="
+                                    + operations.expiredPlayerSessions());
+                }
+            } catch (Exception exception) {
+                LOGGER.error("Cluster health check failed", exception);
+                addHealthMessage(messages, HealthSeverity.CRITICAL,
+                        "Диагностика завершилась ошибкой: "
+                                + exception.getClass().getSimpleName()
+                                + ": " + exception.getMessage());
+            }
+
+            List<HealthMessage> result = List.copyOf(messages);
+            server.execute(() -> sendClusterHealth(source, result));
+        });
+        return 1;
+    }
+
+    private static void checkHealthStagingPath(
+            List<HealthMessage> messages,
+            Path stagingPath
+    ) {
+        if (stagingPath == null) {
+            addHealthMessage(messages, HealthSeverity.CRITICAL,
+                    "dimension_migration_staging_path не настроен");
+            return;
+        }
+        Path absolute = stagingPath.toAbsolutePath().normalize();
+        if (Files.exists(absolute)) {
+            if (!Files.isDirectory(absolute)) {
+                addHealthMessage(messages, HealthSeverity.CRITICAL,
+                        "Staging path не является папкой: " + absolute);
+            } else if (!Files.isReadable(absolute) || !Files.isWritable(absolute)) {
+                addHealthMessage(messages, HealthSeverity.CRITICAL,
+                        "Нет прав чтения или записи staging: " + absolute);
+            } else {
+                addHealthMessage(messages, HealthSeverity.OK,
+                        "Staging доступен для чтения и записи: " + absolute);
+            }
+            return;
+        }
+        Path parent = absolute.getParent();
+        if (parent != null && Files.isDirectory(parent) && Files.isWritable(parent)) {
+            addHealthMessage(messages, HealthSeverity.WARNING,
+                    "Staging ещё не создан, но родительская папка доступна: " + absolute);
+        } else {
+            addHealthMessage(messages, HealthSeverity.CRITICAL,
+                    "Staging недоступен: " + absolute);
+        }
+    }
+
+    private static void addHealthMessage(
+            List<HealthMessage> messages,
+            HealthSeverity severity,
+            String text
+    ) {
+        messages.add(new HealthMessage(severity, text));
+    }
+
+    private static String healthPreview(
+            List<String> values,
+            int limit
+    ) {
+        int safeLimit = Math.max(1, limit);
+        StringBuilder result = new StringBuilder();
+        int shown = Math.min(values.size(), safeLimit);
+        for (int index = 0; index < shown; index++) {
+            if (index > 0) {
+                result.append(", ");
+            }
+            result.append(values.get(index));
+        }
+        if (values.size() > shown) {
+            result.append(" и ещё ").append(values.size() - shown);
+        }
+        return result.toString();
+    }
+
+    private static void sendClusterHealth(
+            CommandSourceStack source,
+            List<HealthMessage> messages
+    ) {
+        int critical = 0;
+        int warnings = 0;
+        for (HealthMessage message : messages) {
+            if (message.severity() == HealthSeverity.CRITICAL) {
+                critical++;
+            } else if (message.severity() == HealthSeverity.WARNING) {
+                warnings++;
+            }
+        }
+
+        String state;
+        if (critical > 0) {
+            state = "§cCRITICAL";
+        } else if (warnings > 0) {
+            state = "§eWARNING";
+        } else {
+            state = "§aHEALTHY";
+        }
+
+        int finalCritical = critical;
+        int finalWarnings = warnings;
+        source.sendSuccess(() -> Component.literal(
+                "§6=== CointCoreGTO Cluster Health ==="
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "§6Итог: " + state
+                        + "§7 | critical: §f" + finalCritical
+                        + "§7 | warnings: §f" + finalWarnings
+        ), false);
+
+        for (HealthMessage message : messages) {
+            String prefix = switch (message.severity()) {
+                case OK -> "§a[OK] ";
+                case INFO -> "§b[INFO] ";
+                case WARNING -> "§e[WARN] ";
+                case CRITICAL -> "§c[CRITICAL] ";
+            };
+            source.sendSuccess(() -> Component.literal(
+                    prefix + "§f" + message.text()
+            ), false);
+        }
+    }
+
     private int showNodes(
             CommandSourceStack source
     ) {
@@ -7425,6 +7842,19 @@ public final class ClusterTestModule {
         }
 
         return suppression.dimensionId().equals(dimensionId);
+    }
+
+    private enum HealthSeverity {
+        OK,
+        INFO,
+        WARNING,
+        CRITICAL
+    }
+
+    private record HealthMessage(
+            HealthSeverity severity,
+            String text
+    ) {
     }
 
     private static final class DimensionFailbackBatchState {
