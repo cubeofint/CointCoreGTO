@@ -3523,6 +3523,7 @@ public final class ClusterDatabase {
                 );
                 List<DimensionDrainItem> retryItems = new ArrayList<>();
                 int alreadyReady = 0;
+                int alreadyApplied = 0;
                 int skipped = 0;
                 List<String> blocked = new ArrayList<>();
 
@@ -3562,6 +3563,28 @@ public final class ClusterDatabase {
                                 continue;
                             }
 
+                            boolean alreadyAppliedState = item.status().equals("APPLIED")
+                                    && (migration.status().equals("APPLIED")
+                                    || migration.status().equals("COMPLETED")
+                                    || migration.status().equals("VERIFIED")
+                                    || migration.status().equals("FINALIZE_READY")
+                                    || migration.status().equals("FINALIZED"));
+                            if (alreadyAppliedState) {
+                                DimensionAssignmentRow assignment = findDimensionAssignmentRow(
+                                        connection,
+                                        item.dimensionId()
+                                );
+                                if (assignment == null
+                                        || !assignment.nodeId().equalsIgnoreCase(targetNode)) {
+                                    blocked.add(
+                                            item.dimensionId()
+                                                    + " (APPLIED item больше не принадлежит target node)"
+                                    );
+                                    continue;
+                                }
+                                alreadyApplied++;
+                                continue;
+                            }
                             if (item.status().equals("READY")
                                     && migration.status().equals("READY")) {
                                 alreadyReady++;
@@ -3700,6 +3723,7 @@ public final class ClusterDatabase {
                         operation,
                         List.copyOf(refreshedItems),
                         alreadyReady,
+                        alreadyApplied,
                         skipped
                 );
             } catch (SQLException exception) {
@@ -8622,6 +8646,7 @@ public final class ClusterDatabase {
             NodeDrain operation,
             List<DimensionDrainItem> items,
             int alreadyReady,
+            int alreadyApplied,
             int skipped
     ) {
     }

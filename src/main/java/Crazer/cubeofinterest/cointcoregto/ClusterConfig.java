@@ -31,6 +31,7 @@ public final class ClusterConfig {
     private final int automaticFailoverLeaseSeconds;
     private final boolean automaticFailoverIncludeCleanStops;
     private final boolean automaticOperationRecovery;
+    private final int automaticOperationRecoveryIntervalSeconds;
     private final boolean failClosedRouting;
     private final boolean syncPlayerData;
     private final int maxPlayerDataBytes;
@@ -63,6 +64,7 @@ public final class ClusterConfig {
             int automaticFailoverLeaseSeconds,
             boolean automaticFailoverIncludeCleanStops,
             boolean automaticOperationRecovery,
+            int automaticOperationRecoveryIntervalSeconds,
             boolean failClosedRouting,
             boolean syncPlayerData,
             int maxPlayerDataBytes,
@@ -94,6 +96,7 @@ public final class ClusterConfig {
         this.automaticFailoverLeaseSeconds = automaticFailoverLeaseSeconds;
         this.automaticFailoverIncludeCleanStops = automaticFailoverIncludeCleanStops;
         this.automaticOperationRecovery = automaticOperationRecovery;
+        this.automaticOperationRecoveryIntervalSeconds = automaticOperationRecoveryIntervalSeconds;
         this.failClosedRouting = failClosedRouting;
         this.syncPlayerData = syncPlayerData;
         this.maxPlayerDataBytes = maxPlayerDataBytes;
@@ -150,6 +153,13 @@ public final class ClusterConfig {
                                 "false"
                         ).trim()
                 ),
+                rangedInt(
+                        properties,
+                        "automatic_operation_recovery_interval_seconds",
+                        60,
+                        15,
+                        3600
+                ),
                 Boolean.parseBoolean(
                         properties.getProperty(
                                 "fail_closed_routing",
@@ -187,6 +197,40 @@ public final class ClusterConfig {
                 positiveInt(properties, "dimension_snapshot_max_per_dimension", 8),
                 positiveInt(properties, "dimension_snapshot_max_age_minutes", 60)
         );
+    }
+
+    private static int rangedInt(
+            Properties properties,
+            String key,
+            int defaultValue,
+            int minimumValue,
+            int maximumValue
+    ) throws IOException {
+        String rawValue = properties
+                .getProperty(key, Integer.toString(defaultValue))
+                .trim();
+
+        try {
+            int value = Integer.parseInt(rawValue);
+            if (value < minimumValue || value > maximumValue) {
+                throw new NumberFormatException(
+                        "value must be between " + minimumValue + " and " + maximumValue
+                );
+            }
+            return value;
+        } catch (NumberFormatException exception) {
+            throw new IOException(
+                    "Cluster config property must be an integer between "
+                            + minimumValue
+                            + " and "
+                            + maximumValue
+                            + ": "
+                            + key
+                            + "="
+                            + rawValue,
+                    exception
+            );
+        }
     }
 
     private static int positiveInt(
@@ -311,6 +355,7 @@ public final class ClusterConfig {
         defaults.setProperty("automatic_failover_lease_seconds", "30");
         defaults.setProperty("automatic_failover_include_clean_stops", "false");
         defaults.setProperty("automatic_operation_recovery", "false");
+        defaults.setProperty("automatic_operation_recovery_interval_seconds", "60");
         defaults.setProperty("fail_closed_routing", "true");
         defaults.setProperty("sync_player_data", "true");
         defaults.setProperty(
@@ -418,6 +463,10 @@ public final class ClusterConfig {
 
     public boolean automaticOperationRecovery() {
         return automaticOperationRecovery;
+    }
+
+    public int automaticOperationRecoveryIntervalSeconds() {
+        return automaticOperationRecoveryIntervalSeconds;
     }
 
     public boolean failClosedRouting() {
