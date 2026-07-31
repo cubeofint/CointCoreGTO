@@ -30,6 +30,7 @@ import org.apache.logging.log4j.Logger;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -59,6 +60,8 @@ public final class ClusterTestModule {
             new AtomicBoolean();
 
     private static final AtomicBoolean SNAPSHOT_OPERATION_IN_FLIGHT =
+            new AtomicBoolean();
+    private static final AtomicBoolean FAILBACK_OPERATION_IN_FLIGHT =
             new AtomicBoolean();
 
     private static volatile Map<String, String>
@@ -769,6 +772,54 @@ public final class ClusterTestModule {
                                                 Commands.literal("watch")
                                                         .executes(context ->
                                                                 showAutomaticFailoverWatch(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                        )
+
+                        .then(
+                                Commands.literal("failback")
+                                        .then(
+                                                Commands.literal("preview")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "recoveredNode",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                previewDimensionFailback(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "recoveredNode"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("prepare")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "recoveredNode",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                prepareDimensionFailback(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "recoveredNode"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(context ->
+                                                                showDimensionFailbacks(
                                                                         context.getSource()
                                                                 )
                                                         )
@@ -3247,7 +3298,7 @@ public final class ClusterTestModule {
                     for (ClusterDatabase.DimensionMigration migration
                             : migrations) {
                         String color = switch (migration.status()) {
-                            case "APPLIED", "VERIFIED", "FINALIZED", "ROLLED_BACK" -> "§a";
+                            case "APPLIED", "COMPLETED", "VERIFIED", "FINALIZED", "ROLLED_BACK" -> "§a";
                             case "FAILED", "CANCELLED" -> "§c";
                             case "READY", "FINALIZE_READY", "ROLLBACK_READY" -> "§e";
                             case "APPLYING", "ROLLBACK_PREPARING", "ROLLBACK_APPLYING" -> "§b";
@@ -5762,6 +5813,395 @@ public final class ClusterTestModule {
         });
     }
 
+    private int previewDimensionFailback(
+            CommandSourceStack source,
+            String recoveredNode
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        source.sendSuccess(() -> Component.literal(
+                "§eПроверяю failback на восстановленный узел §f" + recoveredNode
+        ), false);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                List<ClusterDatabase.FailbackPreviewEntry> entries =
+                        ClusterDatabase.previewDimensionFailback(latestConfig, recoveredNode);
+                server.execute(() -> {
+                    int ready = 0;
+                    for (ClusterDatabase.FailbackPreviewEntry entry : entries) {
+                        if (entry.executable()) {
+                            ready++;
+                        }
+                    }
+                    int finalReady = ready;
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Failback preview: §aready="
+                                    + finalReady
+                                    + "§7, blocked="
+                                    + (entries.size() - finalReady)
+                    ), false);
+                    if (entries.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§7Подходящих APPLIED failover для возврата нет."
+                        ), false);
+                        return;
+                    }
+                    for (ClusterDatabase.FailbackPreviewEntry entry : entries) {
+                        String state = entry.executable() ? "§aREADY" : "§cBLOCKED";
+                        String reason = entry.reason() == null ? "" : " §7| §f" + entry.reason();
+                        source.sendSuccess(() -> Component.literal(
+                                state
+                                        + " §f"
+                                        + entry.dimensionId()
+                                        + " §7| §f"
+                                        + entry.sourceNode()
+                                        + " §7-> §f"
+                                        + entry.targetNode()
+                                        + reason
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось построить failback preview: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int prepareDimensionFailback(
+            CommandSourceStack source,
+            String recoveredNode
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        if (currentConfig.dimensionMigrationStagingPath() == null) {
+            source.sendFailure(Component.literal("§cВ конфиге не указан dimension_migration_staging_path."));
+            return 0;
+        }
+        if (!FAILBACK_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            source.sendFailure(Component.literal("§cУже выполняется failback."));
+            return 0;
+        }
+        if (!SNAPSHOT_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            FAILBACK_OPERATION_IN_FLIGHT.set(false);
+            source.sendFailure(Component.literal("§cСначала дождись завершения snapshot-операции."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        source.sendSuccess(() -> Component.literal(
+                "§eПодготавливаю управляемый failback на узел §f" + recoveredNode
+        ), false);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                ClusterDatabase.FailbackPreparationResult result =
+                        ClusterDatabase.prepareDimensionFailback(latestConfig, recoveredNode);
+                server.execute(() -> {
+                    if (result.failbacks().isEmpty()) {
+                        FAILBACK_OPERATION_IN_FLIGHT.set(false);
+                        SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                        source.sendSuccess(() -> Component.literal(
+                                "§aFailback не подготовлен: подходящих APPLIED failover нет."
+                        ), false);
+                        return;
+                    }
+                    startDimensionFailbackBatch(
+                            source,
+                            server,
+                            latestConfig,
+                            result
+                    );
+                });
+            } catch (Exception exception) {
+                FAILBACK_OPERATION_IN_FLIGHT.set(false);
+                SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось подготовить failback: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private void startDimensionFailbackBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ClusterDatabase.FailbackPreparationResult preparation
+    ) {
+        List<ClusterDatabase.DimensionFailback> available = new ArrayList<>();
+        Map<ClusterDatabase.DimensionFailback, String> rejected = new LinkedHashMap<>();
+        for (ClusterDatabase.DimensionFailback failback : preparation.failbacks()) {
+            ResourceLocation parsed = ResourceLocation.tryParse(failback.dimensionId());
+            ServerLevel level = parsed == null
+                    ? null
+                    : server.getLevel(ResourceKey.create(Registries.DIMENSION, parsed));
+            String reason = null;
+            if (level == null) {
+                reason = "Измерение не загружено";
+            } else if (!level.players().isEmpty()) {
+                reason = "В измерении находятся игроки";
+            } else {
+                try {
+                    ClusterDimensionMigration.resolveDimensionPath(server, failback.dimensionId());
+                } catch (Exception exception) {
+                    reason = exception.getMessage();
+                }
+            }
+            if (reason == null) {
+                available.add(failback);
+            } else {
+                rejected.put(failback, reason);
+            }
+        }
+        if (rejected.isEmpty()) {
+            continueStartDimensionFailbackBatch(
+                    source,
+                    server,
+                    currentConfig,
+                    available,
+                    preparation.skipped()
+            );
+            return;
+        }
+        MIGRATION_EXECUTOR.execute(() -> {
+            for (Map.Entry<ClusterDatabase.DimensionFailback, String> entry : rejected.entrySet()) {
+                try {
+                    ClusterDatabase.failDimensionFailback(
+                            currentConfig,
+                            entry.getKey().failbackId(),
+                            entry.getValue()
+                    );
+                } catch (Exception exception) {
+                    LOGGER.error("Unable to fail dimension failback {}", entry.getKey().failbackId(), exception);
+                }
+            }
+            server.execute(() -> continueStartDimensionFailbackBatch(
+                    source,
+                    server,
+                    currentConfig,
+                    available,
+                    preparation.skipped() + rejected.size()
+            ));
+        });
+    }
+
+    private void continueStartDimensionFailbackBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            List<ClusterDatabase.DimensionFailback> available,
+            int skipped
+    ) {
+        DimensionFailbackBatchState state = new DimensionFailbackBatchState(
+                available,
+                skipped
+        );
+        if (available.isEmpty()) {
+            finishDimensionFailbackBatch(source, server, currentConfig, state);
+            return;
+        }
+        for (ClusterDatabase.DimensionFailback failback : available) {
+            addMigrationFreeze(failback.dimensionId());
+        }
+        try {
+            if (!server.saveEverything(true, true, true)) {
+                throw new IllegalStateException("MinecraftServer не подтвердил сохранение мира");
+            }
+        } catch (Exception exception) {
+            MIGRATION_EXECUTOR.execute(() -> {
+                for (ClusterDatabase.DimensionFailback failback : available) {
+                    try {
+                        ClusterDatabase.failDimensionFailback(
+                                currentConfig,
+                                failback.failbackId(),
+                                exception.getMessage()
+                        );
+                    } catch (Exception databaseException) {
+                        LOGGER.error("Unable to fail dimension failback {}", failback.failbackId(), databaseException);
+                    }
+                }
+                server.execute(() -> {
+                    for (ClusterDatabase.DimensionFailback failback : available) {
+                        removeMigrationFreeze(failback.dimensionId());
+                    }
+                    state.failed += available.size();
+                    finishDimensionFailbackBatch(source, server, currentConfig, state);
+                });
+            });
+            return;
+        }
+        continueDimensionFailbackBatch(source, server, currentConfig, state);
+    }
+
+    private void continueDimensionFailbackBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            DimensionFailbackBatchState state
+    ) {
+        if (state.index >= state.failbacks.size()) {
+            finishDimensionFailbackBatch(source, server, currentConfig, state);
+            return;
+        }
+        ClusterDatabase.DimensionFailback failback = state.failbacks.get(state.index++);
+        MIGRATION_EXECUTOR.execute(() -> {
+            ClusterDimensionMigration.PreparedArchive archive = null;
+            try {
+                archive = ClusterDimensionMigration.createArchive(
+                        server,
+                        failback.dimensionId(),
+                        currentConfig.dimensionMigrationStagingPath(),
+                        failback.migrationId()
+                );
+                ClusterDatabase.markDimensionMigrationReady(
+                        currentConfig,
+                        failback.migrationId(),
+                        archive.archiveName(),
+                        archive.archiveSha256(),
+                        archive.contentSha256(),
+                        archive.archiveSize()
+                );
+                ClusterDatabase.markDimensionFailbackReady(
+                        currentConfig,
+                        failback.failbackId()
+                );
+                state.ready++;
+            } catch (Exception exception) {
+                state.failed++;
+                if (archive != null) {
+                    try {
+                        ClusterDimensionMigration.deleteArchive(
+                                currentConfig.dimensionMigrationStagingPath(),
+                                archive.archiveName()
+                        );
+                    } catch (Exception ignored) {
+                    }
+                }
+                try {
+                    ClusterDatabase.failDimensionFailback(
+                            currentConfig,
+                            failback.failbackId(),
+                            exception.getClass().getSimpleName() + ": " + exception.getMessage()
+                    );
+                } catch (Exception databaseException) {
+                    LOGGER.error("Unable to fail dimension failback {}", failback.failbackId(), databaseException);
+                }
+                removeMigrationFreeze(failback.dimensionId());
+            }
+            server.execute(() -> continueDimensionFailbackBatch(
+                    source,
+                    server,
+                    currentConfig,
+                    state
+            ));
+        });
+    }
+
+    private void finishDimensionFailbackBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            DimensionFailbackBatchState state
+    ) {
+        try {
+            refreshDimensionMigrationFreeze(currentConfig);
+        } catch (Exception exception) {
+            LOGGER.error("Unable to refresh dimension migration freeze after failback", exception);
+        }
+        FAILBACK_OPERATION_IN_FLIGHT.set(false);
+        SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+        source.sendSuccess(() -> Component.literal(
+                "§aFailback подготовлен: §f"
+                        + state.ready
+                        + "§a READY, §f"
+                        + state.failed
+                        + "§a ошибок, §f"
+                        + state.skipped
+                        + "§a пропущено. Перезапусти target node."
+        ), false);
+        for (ClusterDatabase.DimensionFailback failback : state.failbacks) {
+            source.sendSuccess(() -> Component.literal(
+                    "§f"
+                            + failback.dimensionId()
+                            + " §7| §f"
+                            + failback.sourceNode()
+                            + " §7-> §f"
+                            + failback.targetNode()
+                            + " §7| migration: §f"
+                            + failback.migrationId()
+            ), false);
+        }
+    }
+
+    private int showDimensionFailbacks(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.DimensionFailback> failbacks =
+                        ClusterDatabase.listDimensionFailbacks(currentConfig, 50);
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal("§6Последние dimension failbacks:"), false);
+                    if (failbacks.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal("§7Записей нет."), false);
+                        return;
+                    }
+                    for (ClusterDatabase.DimensionFailback failback : failbacks) {
+                        String color = switch (failback.status()) {
+                            case "APPLIED" -> "§a";
+                            case "FAILED" -> "§c";
+                            case "APPLYING" -> "§b";
+                            default -> "§e";
+                        };
+                        String reason = failback.errorText() == null || failback.errorText().isBlank()
+                                ? ""
+                                : " §7| §f" + failback.errorText();
+                        source.sendSuccess(() -> Component.literal(
+                                "§f"
+                                        + failback.failbackId()
+                                        + " §7| §f"
+                                        + failback.dimensionId()
+                                        + " §7| §f"
+                                        + failback.sourceNode()
+                                        + " §7-> §f"
+                                        + failback.targetNode()
+                                        + " §7| "
+                                        + color
+                                        + failback.status()
+                                        + " §7| migration: §f"
+                                        + failback.migrationId()
+                                        + reason
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось получить failbacks: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
     private int showDimensionSnapshots(
             CommandSourceStack source
     ) {
@@ -6985,6 +7425,22 @@ public final class ClusterTestModule {
         }
 
         return suppression.dimensionId().equals(dimensionId);
+    }
+
+    private static final class DimensionFailbackBatchState {
+        private final List<ClusterDatabase.DimensionFailback> failbacks;
+        private final int skipped;
+        private int index;
+        private int ready;
+        private int failed;
+
+        private DimensionFailbackBatchState(
+                List<ClusterDatabase.DimensionFailback> failbacks,
+                int skipped
+        ) {
+            this.failbacks = failbacks;
+            this.skipped = skipped;
+        }
     }
 
     private static final class SnapshotBatchState {

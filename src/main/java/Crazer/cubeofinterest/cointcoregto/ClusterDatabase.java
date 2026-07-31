@@ -1777,6 +1777,46 @@ public final class ClusterDatabase {
                     }
                 }
 
+                boolean managedFailback;
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        SELECT 1
+                        FROM cluster_dimension_failbacks
+                        WHERE migration_id = ?
+                        LIMIT 1
+                        """)) {
+                    statement.setString(1, migrationId);
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        managedFailback = resultSet.next();
+                    }
+                }
+
+                if (managedFailback) {
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            UPDATE cluster_dimension_failbacks
+                            SET status = 'APPLIED', error_text = NULL,
+                                applied_at = COALESCE(applied_at, CURRENT_TIMESTAMP(3)),
+                                updated_at = CURRENT_TIMESTAMP(3)
+                            WHERE migration_id = ?
+                              AND status IN ('READY', 'APPLYING', 'APPLIED')
+                            """)) {
+                        statement.setString(1, migrationId);
+                        statement.executeUpdate();
+                    }
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            UPDATE cluster_dimension_migrations
+                            SET status = 'COMPLETED', error_text = NULL,
+                                updated_at = CURRENT_TIMESTAMP(3)
+                            WHERE migration_id = ? AND status = 'APPLIED'
+                            """)) {
+                        statement.setString(1, migrationId);
+                        if (statement.executeUpdate() != 1) {
+                            throw new SQLException(
+                                    "Не удалось закрыть failback migration " + migrationId
+                            );
+                        }
+                    }
+                }
+
                 connection.commit();
                 return findDimensionMigration(config, migrationId);
             } catch (SQLException exception) {
@@ -2731,6 +2771,258 @@ public final class ClusterDatabase {
         }
     }
 
+    public static List<FailbackPreviewEntry> previewDimensionFailback(
+            ClusterConfig config,
+            String recoveredNode
+    ) throws SQLException {
+        if (recoveredNode == null || recoveredNode.isBlank()) {
+            throw new SQLException("Recovered node is empty");
+        }
+        if (recoveredNode.equalsIgnoreCase(config.nodeId())) {
+            throw new SQLException("Failback должен запускаться на текущем владельце измерений");
+        }
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            boolean recoveredOnline = isNodeOnline(
+                    connection,
+                    recoveredNode,
+                    config.nodeTimeoutSeconds()
+            );
+            Map<String, DimensionActivity> activity = loadDimensionActivity(
+                    connection,
+                    config.nodeTimeoutSeconds()
+            );
+            List<DimensionFailover> candidates = listDimensionFailbackCandidates(
+                    connection,
+                    config.nodeId(),
+                    recoveredNode,
+                    false
+            );
+            List<FailbackPreviewEntry> entries = new ArrayList<>();
+            for (DimensionFailover failover : candidates) {
+                String reason = validateDimensionFailbackCandidate(
+                        connection,
+                        config,
+                        failover,
+                        recoveredOnline,
+                        activity
+                );
+                entries.add(new FailbackPreviewEntry(
+                        failover.failoverId(),
+                        failover.dimensionId(),
+                        config.nodeId(),
+                        recoveredNode,
+                        reason == null,
+                        reason
+                ));
+            }
+            return List.copyOf(entries);
+        }
+    }
+
+    public static FailbackPreparationResult prepareDimensionFailback(
+            ClusterConfig config,
+            String recoveredNode
+    ) throws SQLException {
+        if (recoveredNode == null || recoveredNode.isBlank()) {
+            throw new SQLException("Recovered node is empty");
+        }
+        if (recoveredNode.equalsIgnoreCase(config.nodeId())) {
+            throw new SQLException("Failback должен запускаться на текущем владельце измерений");
+        }
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                lockClusterNodes(connection);
+                lockDimensionAssignments(connection);
+                lockDimensionActivity(connection);
+                boolean recoveredOnline = isNodeOnline(
+                        connection,
+                        recoveredNode,
+                        config.nodeTimeoutSeconds()
+                );
+                if (!recoveredOnline) {
+                    throw new SQLException("Восстановленный узел " + recoveredNode + " не находится ONLINE");
+                }
+                Map<String, DimensionActivity> activity = loadDimensionActivity(
+                        connection,
+                        config.nodeTimeoutSeconds()
+                );
+                List<DimensionFailover> candidates = listDimensionFailbackCandidates(
+                        connection,
+                        config.nodeId(),
+                        recoveredNode,
+                        true
+                );
+                List<DimensionFailback> created = new ArrayList<>();
+                int skipped = 0;
+                for (DimensionFailover failover : candidates) {
+                    String reason = validateDimensionFailbackCandidate(
+                            connection,
+                            config,
+                            failover,
+                            true,
+                            activity
+                    );
+                    if (reason != null) {
+                        skipped++;
+                        continue;
+                    }
+                    String migrationId = UUID.randomUUID().toString();
+                    String failbackId = UUID.randomUUID().toString();
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            INSERT INTO cluster_dimension_migrations (
+                                migration_id, dimension_id, source_node, target_node,
+                                status, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, 'PREPARING', CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
+                            """)) {
+                        statement.setString(1, migrationId);
+                        statement.setString(2, failover.dimensionId());
+                        statement.setString(3, config.nodeId());
+                        statement.setString(4, recoveredNode);
+                        statement.executeUpdate();
+                    }
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            INSERT INTO cluster_dimension_failbacks (
+                                failback_id, failover_id, migration_id, dimension_id,
+                                source_node, target_node, status
+                            ) VALUES (?, ?, ?, ?, ?, ?, 'PREPARING')
+                            """)) {
+                        statement.setString(1, failbackId);
+                        statement.setString(2, failover.failoverId());
+                        statement.setString(3, migrationId);
+                        statement.setString(4, failover.dimensionId());
+                        statement.setString(5, config.nodeId());
+                        statement.setString(6, recoveredNode);
+                        statement.executeUpdate();
+                    }
+                    Instant now = Instant.now();
+                    created.add(new DimensionFailback(
+                            failbackId,
+                            failover.failoverId(),
+                            migrationId,
+                            failover.dimensionId(),
+                            config.nodeId(),
+                            recoveredNode,
+                            "PREPARING",
+                            null,
+                            now,
+                            now,
+                            null
+                    ));
+                }
+                connection.commit();
+                return new FailbackPreparationResult(List.copyOf(created), skipped);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionFailback markDimensionFailbackReady(
+            ClusterConfig config,
+            String failbackId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_dimension_failbacks
+                     SET status = 'READY', error_text = NULL, updated_at = CURRENT_TIMESTAMP(3)
+                     WHERE failback_id = ? AND source_node = ? AND status = 'PREPARING'
+                     """)) {
+            statement.setString(1, failbackId);
+            statement.setString(2, config.nodeId());
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("Failback уже не PREPARING: " + failbackId);
+            }
+        }
+        return findDimensionFailback(config, failbackId);
+    }
+
+    public static void failDimensionFailback(
+            ClusterConfig config,
+            String failbackId,
+            String errorText
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                DimensionFailback failback = findDimensionFailback(connection, failbackId, true);
+                if (failback == null) {
+                    throw new SQLException("Failback не найден: " + failbackId);
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_failbacks
+                        SET status = 'FAILED', error_text = ?, updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE failback_id = ? AND status IN ('PREPARING', 'READY', 'APPLYING')
+                        """)) {
+                    statement.setString(1, truncate(errorText, 8000));
+                    statement.setString(2, failbackId);
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations
+                        SET status = 'FAILED', error_text = ?, updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ? AND status IN ('PREPARING', 'READY', 'APPLYING')
+                        """)) {
+                    statement.setString(1, truncate(errorText, 8000));
+                    statement.setString(2, failback.migrationId());
+                    statement.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionFailback findDimensionFailback(
+            ClusterConfig config,
+            String failbackId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            refreshDimensionFailbackStates(connection);
+            return findDimensionFailback(connection, failbackId, false);
+        }
+    }
+
+    public static List<DimensionFailback> listDimensionFailbacks(
+            ClusterConfig config,
+            int limit
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+        try (Connection connection = open(config)) {
+            refreshDimensionFailbackStates(connection);
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT failback_id, failover_id, migration_id, dimension_id,
+                           source_node, target_node, status, error_text,
+                           created_at, updated_at, applied_at
+                    FROM cluster_dimension_failbacks
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """)) {
+                statement.setInt(1, safeLimit);
+                List<DimensionFailback> result = new ArrayList<>();
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        result.add(readDimensionFailback(resultSet));
+                    }
+                }
+                return List.copyOf(result);
+            }
+        }
+    }
+
     public static DimensionFailover findPendingDimensionFailoverForTarget(
             ClusterConfig config
     ) throws SQLException {
@@ -3036,6 +3328,7 @@ public final class ClusterDatabase {
         ensureSchema(config);
 
         try (Connection connection = open(config)) {
+            refreshDimensionFailbackStates(connection);
             String sql = """
                     SELECT migrations.dimension_id
                     FROM cluster_dimension_migrations AS migrations
@@ -3083,6 +3376,7 @@ public final class ClusterDatabase {
         ensureSchema(config);
 
         try (Connection connection = open(config)) {
+            refreshDimensionFailbackStates(connection);
             String sql = """
                     SELECT DISTINCT dimension_id
                     FROM cluster_dimension_migrations
@@ -4621,6 +4915,157 @@ public final class ClusterDatabase {
         }
     }
 
+    private static List<DimensionFailover> listDimensionFailbackCandidates(
+            Connection connection,
+            String currentNode,
+            String recoveredNode,
+            boolean forUpdate
+    ) throws SQLException {
+        String sql = """
+                SELECT failover_id, dimension_id, source_node, target_node,
+                       snapshot_id, status, error_text, created_at, updated_at,
+                       applying_at, applied_at
+                FROM cluster_dimension_failovers AS failovers
+                WHERE failovers.source_node = ?
+                  AND failovers.target_node = ?
+                  AND failovers.status = 'APPLIED'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM cluster_dimension_failbacks AS failbacks
+                      WHERE failbacks.failover_id = failovers.failover_id
+                        AND failbacks.status IN ('PREPARING', 'READY', 'APPLYING', 'APPLIED')
+                  )
+                ORDER BY failovers.applied_at, failovers.dimension_id
+                """ + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, recoveredNode);
+            statement.setString(2, currentNode);
+            List<DimensionFailover> result = new ArrayList<>();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    result.add(readDimensionFailover(resultSet));
+                }
+            }
+            return List.copyOf(result);
+        }
+    }
+
+    private static String validateDimensionFailbackCandidate(
+            Connection connection,
+            ClusterConfig config,
+            DimensionFailover failover,
+            boolean recoveredOnline,
+            Map<String, DimensionActivity> activity
+    ) throws SQLException {
+        if (!recoveredOnline) {
+            return "recovered node OFFLINE";
+        }
+        if ("minecraft:overworld".equals(failover.dimensionId())) {
+            return "minecraft:overworld не поддерживается";
+        }
+        DimensionAssignmentRow assignment = findDimensionAssignmentRow(
+                connection,
+                failover.dimensionId()
+        );
+        if (assignment == null || !assignment.nodeId().equalsIgnoreCase(config.nodeId())) {
+            return "текущий узел больше не владеет dimension";
+        }
+        DimensionActivity dimensionActivity = activity.get(failover.dimensionId());
+        if (dimensionActivity != null && dimensionActivity.playerCount() > 0) {
+            return "в dimension находятся игроки на узлах " + dimensionActivity.nodeIds();
+        }
+        if (hasActiveDimensionMigration(connection, failover.dimensionId())) {
+            return "активна migration";
+        }
+        if (hasActiveDimensionFailover(connection, failover.dimensionId())) {
+            return "активен failover";
+        }
+        return null;
+    }
+
+    private static void refreshDimensionFailbackStates(
+            Connection connection
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE cluster_dimension_migrations AS migrations
+                JOIN cluster_dimension_failbacks AS failbacks
+                  ON failbacks.migration_id = migrations.migration_id
+                JOIN dimension_assignments AS assignments
+                  ON assignments.dimension_id = migrations.dimension_id
+                 AND assignments.node_id = migrations.target_node
+                SET migrations.status = 'COMPLETED',
+                    migrations.error_text = NULL,
+                    migrations.updated_at = CURRENT_TIMESTAMP(3)
+                WHERE migrations.status = 'APPLIED'
+                  AND failbacks.status IN ('READY', 'APPLYING', 'APPLIED')
+                """)) {
+            statement.executeUpdate();
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE cluster_dimension_failbacks AS failbacks
+                JOIN cluster_dimension_migrations AS migrations
+                  ON migrations.migration_id = failbacks.migration_id
+                SET failbacks.status = CASE
+                        WHEN migrations.status IN ('APPLIED', 'COMPLETED', 'VERIFIED', 'FINALIZE_READY', 'FINALIZED') THEN 'APPLIED'
+                        WHEN migrations.status IN ('FAILED', 'CANCELLED') THEN 'FAILED'
+                        ELSE migrations.status
+                    END,
+                    failbacks.error_text = migrations.error_text,
+                    failbacks.applied_at = CASE
+                        WHEN migrations.status IN ('APPLIED', 'COMPLETED', 'VERIFIED', 'FINALIZE_READY', 'FINALIZED')
+                        THEN COALESCE(failbacks.applied_at, migrations.applied_at, CURRENT_TIMESTAMP(3))
+                        ELSE failbacks.applied_at
+                    END,
+                    failbacks.updated_at = CURRENT_TIMESTAMP(3)
+                WHERE failbacks.status <> CASE
+                        WHEN migrations.status IN ('APPLIED', 'COMPLETED', 'VERIFIED', 'FINALIZE_READY', 'FINALIZED') THEN 'APPLIED'
+                        WHEN migrations.status IN ('FAILED', 'CANCELLED') THEN 'FAILED'
+                        ELSE migrations.status
+                    END
+                   OR NOT (failbacks.error_text <=> migrations.error_text)
+                """)) {
+            statement.executeUpdate();
+        }
+    }
+
+    private static DimensionFailback findDimensionFailback(
+            Connection connection,
+            String failbackId,
+            boolean forUpdate
+    ) throws SQLException {
+        String sql = """
+                SELECT failback_id, failover_id, migration_id, dimension_id,
+                       source_node, target_node, status, error_text,
+                       created_at, updated_at, applied_at
+                FROM cluster_dimension_failbacks
+                WHERE failback_id = ?
+                """ + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, failbackId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readDimensionFailback(resultSet) : null;
+            }
+        }
+    }
+
+    private static DimensionFailback readDimensionFailback(
+            ResultSet resultSet
+    ) throws SQLException {
+        return new DimensionFailback(
+                resultSet.getString("failback_id"),
+                resultSet.getString("failover_id"),
+                resultSet.getString("migration_id"),
+                resultSet.getString("dimension_id"),
+                resultSet.getString("source_node"),
+                resultSet.getString("target_node"),
+                resultSet.getString("status"),
+                resultSet.getString("error_text"),
+                instantOrNull(resultSet, "created_at"),
+                instantOrNull(resultSet, "updated_at"),
+                instantOrNull(resultSet, "applied_at")
+        );
+    }
+
     private static DimensionSnapshot readDimensionSnapshot(
             ResultSet resultSet
     ) throws SQLException {
@@ -4946,6 +5391,29 @@ public final class ClusterDatabase {
                     INDEX idx_dimension_failover_source (source_node, status),
                     INDEX idx_dimension_failover_target (target_node, status),
                     INDEX idx_dimension_failover_dimension (dimension_id, status)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_dimension_failbacks (
+                    failback_id CHAR(36) NOT NULL PRIMARY KEY,
+                    failover_id CHAR(36) NOT NULL,
+                    migration_id CHAR(36) NOT NULL UNIQUE,
+                    dimension_id VARCHAR(255) NOT NULL,
+                    source_node VARCHAR(64) NOT NULL,
+                    target_node VARCHAR(64) NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    error_text TEXT NULL,
+                    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    applied_at TIMESTAMP(3) NULL,
+
+                    INDEX idx_dimension_failback_failover (failover_id, status),
+                    INDEX idx_dimension_failback_source (source_node, status),
+                    INDEX idx_dimension_failback_target (target_node, status),
+                    INDEX idx_dimension_failback_dimension (dimension_id, status)
                 )
                 ENGINE=InnoDB
                 DEFAULT CHARSET=utf8mb4
@@ -6266,6 +6734,37 @@ public final class ClusterDatabase {
             Instant updatedAt,
             Instant applyingAt,
             Instant appliedAt
+    ) {
+    }
+
+    public record FailbackPreviewEntry(
+            String failoverId,
+            String dimensionId,
+            String sourceNode,
+            String targetNode,
+            boolean executable,
+            String reason
+    ) {
+    }
+
+    public record DimensionFailback(
+            String failbackId,
+            String failoverId,
+            String migrationId,
+            String dimensionId,
+            String sourceNode,
+            String targetNode,
+            String status,
+            String errorText,
+            Instant createdAt,
+            Instant updatedAt,
+            Instant appliedAt
+    ) {
+    }
+
+    public record FailbackPreparationResult(
+            List<DimensionFailback> failbacks,
+            int skipped
     ) {
     }
 
