@@ -30,6 +30,7 @@ public final class ClusterConfig {
     private final int automaticFailoverConfirmationSeconds;
     private final int automaticFailoverLeaseSeconds;
     private final boolean automaticFailoverIncludeCleanStops;
+    private final boolean automaticOperationRecovery;
     private final boolean failClosedRouting;
     private final boolean syncPlayerData;
     private final int maxPlayerDataBytes;
@@ -61,6 +62,7 @@ public final class ClusterConfig {
             int automaticFailoverConfirmationSeconds,
             int automaticFailoverLeaseSeconds,
             boolean automaticFailoverIncludeCleanStops,
+            boolean automaticOperationRecovery,
             boolean failClosedRouting,
             boolean syncPlayerData,
             int maxPlayerDataBytes,
@@ -91,6 +93,7 @@ public final class ClusterConfig {
         this.automaticFailoverConfirmationSeconds = automaticFailoverConfirmationSeconds;
         this.automaticFailoverLeaseSeconds = automaticFailoverLeaseSeconds;
         this.automaticFailoverIncludeCleanStops = automaticFailoverIncludeCleanStops;
+        this.automaticOperationRecovery = automaticOperationRecovery;
         this.failClosedRouting = failClosedRouting;
         this.syncPlayerData = syncPlayerData;
         this.maxPlayerDataBytes = maxPlayerDataBytes;
@@ -138,6 +141,12 @@ public final class ClusterConfig {
                 Boolean.parseBoolean(
                         properties.getProperty(
                                 "automatic_failover_include_clean_stops",
+                                "false"
+                        ).trim()
+                ),
+                Boolean.parseBoolean(
+                        properties.getProperty(
+                                "automatic_operation_recovery",
                                 "false"
                         ).trim()
                 ),
@@ -301,6 +310,7 @@ public final class ClusterConfig {
         defaults.setProperty("automatic_failover_confirmation_seconds", "60");
         defaults.setProperty("automatic_failover_lease_seconds", "30");
         defaults.setProperty("automatic_failover_include_clean_stops", "false");
+        defaults.setProperty("automatic_operation_recovery", "false");
         defaults.setProperty("fail_closed_routing", "true");
         defaults.setProperty("sync_player_data", "true");
         defaults.setProperty(
@@ -404,6 +414,10 @@ public final class ClusterConfig {
 
     public boolean automaticFailoverIncludeCleanStops() {
         return automaticFailoverIncludeCleanStops;
+    }
+
+    public boolean automaticOperationRecovery() {
+        return automaticOperationRecovery;
     }
 
     public boolean failClosedRouting() {

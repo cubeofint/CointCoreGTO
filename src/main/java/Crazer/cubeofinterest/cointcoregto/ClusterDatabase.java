@@ -3905,6 +3905,35 @@ public final class ClusterDatabase {
         }
     }
 
+    public static List<NodeDrain> listStartupNodeOperationRecoveryCandidates(
+            ClusterConfig config,
+            int limit
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeLimit = Math.max(1, Math.min(limit, 20));
+        try (Connection connection = open(config)) {
+            refreshNodeDrainStates(connection);
+            try (PreparedStatement statement = connection.prepareStatement(nodeDrainSelectSql() + """
+                    HAVING drains.source_node = ?
+                       AND drains.operation_type IN ('DRAIN', 'REBALANCE')
+                       AND drains.status IN ('PREPARING', 'READY')
+                       AND SUM(CASE WHEN items.status = 'PREPARING' THEN 1 ELSE 0 END) > 0
+                    ORDER BY drains.updated_at ASC, drains.created_at ASC
+                    LIMIT ?
+                    """)) {
+                statement.setString(1, config.nodeId());
+                statement.setInt(2, safeLimit);
+                List<NodeDrain> operations = new ArrayList<>();
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        operations.add(readNodeDrain(resultSet));
+                    }
+                }
+                return List.copyOf(operations);
+            }
+        }
+    }
+
     public static List<DimensionDrainItem> listNodeDrainItems(
             ClusterConfig config,
             String drainId
@@ -6614,8 +6643,8 @@ public final class ClusterDatabase {
                         WHEN drains.status IN ('CANCELLED', 'RESUMED') THEN drains.status
                         WHEN stats.applied_count = stats.total_count THEN CASE WHEN drains.operation_type = 'REBALANCE' THEN 'COMPLETED' ELSE 'DRAINED' END
                         WHEN stats.applying_count > 0 THEN 'APPLYING'
-                        WHEN stats.ready_count > 0 THEN 'READY'
                         WHEN stats.preparing_count > 0 THEN 'PREPARING'
+                        WHEN stats.ready_count > 0 THEN 'READY'
                         WHEN stats.applied_count > 0
                          AND stats.applied_count + stats.failed_count + stats.cancelled_count = stats.total_count
                         THEN 'PARTIAL'
@@ -6636,8 +6665,8 @@ public final class ClusterDatabase {
                       drains.status <> CASE
                           WHEN stats.applied_count = stats.total_count THEN CASE WHEN drains.operation_type = 'REBALANCE' THEN 'COMPLETED' ELSE 'DRAINED' END
                           WHEN stats.applying_count > 0 THEN 'APPLYING'
-                          WHEN stats.ready_count > 0 THEN 'READY'
                           WHEN stats.preparing_count > 0 THEN 'PREPARING'
+                          WHEN stats.ready_count > 0 THEN 'READY'
                           WHEN stats.applied_count > 0
                            AND stats.applied_count + stats.failed_count + stats.cancelled_count = stats.total_count
                           THEN 'PARTIAL'

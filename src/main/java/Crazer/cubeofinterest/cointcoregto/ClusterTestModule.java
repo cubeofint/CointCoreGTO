@@ -135,6 +135,7 @@ public final class ClusterTestModule {
     private volatile boolean heartbeatFailureLogged;
     private volatile long nextAutomaticSnapshotAtMillis;
     private volatile String lastAutomaticSnapshotSummary;
+    private volatile String lastAutomaticOperationRecoverySummary;
     private int heartbeatTickCounter;
 
     private ClusterTestModule() {
@@ -515,10 +516,12 @@ public final class ClusterTestModule {
 
         nextAutomaticSnapshotAtMillis = System.currentTimeMillis()
                 + config.dimensionSnapshotIntervalMinutes() * 60_000L;
+        lastAutomaticOperationRecoverySummary = null;
 
-        DATABASE_EXECUTOR.execute(
-                () -> runTest(server, false)
-        );
+        DATABASE_EXECUTOR.execute(() -> {
+            runTest(server, false);
+            checkAutomaticNodeOperationRecoveryAtStartup(server);
+        });
     }
 
     @SubscribeEvent
@@ -649,6 +652,7 @@ public final class ClusterTestModule {
         DRAIN_OPERATION_IN_FLIGHT.set(false);
         nextAutomaticSnapshotAtMillis = 0L;
         lastAutomaticSnapshotSummary = null;
+        lastAutomaticOperationRecoverySummary = null;
         ClusterTransferGuard.clearAll();
     }
 
@@ -6355,7 +6359,8 @@ public final class ClusterTestModule {
                 preparation.skipped(),
                 false,
                 0,
-                null
+                null,
+                false
         );
     }
 
@@ -6364,7 +6369,8 @@ public final class ClusterTestModule {
             MinecraftServer server,
             ClusterConfig currentConfig,
             ClusterDatabase.NodeOperationRecoveryResult recovery,
-            String leaseName
+            String leaseName,
+            boolean automatic
     ) {
         startNodeDrainBatch(
                 source,
@@ -6375,7 +6381,8 @@ public final class ClusterTestModule {
                 recovery.skipped(),
                 true,
                 recovery.alreadyReady(),
-                leaseName
+                leaseName,
+                automatic
         );
     }
 
@@ -6388,7 +6395,8 @@ public final class ClusterTestModule {
             int skipped,
             boolean recovery,
             int alreadyReady,
-            String leaseName
+            String leaseName,
+            boolean automatic
     ) {
         List<ClusterDatabase.DimensionDrainItem> available = new ArrayList<>();
         Map<ClusterDatabase.DimensionDrainItem, String> rejected = new LinkedHashMap<>();
@@ -6426,6 +6434,7 @@ public final class ClusterTestModule {
                     recovery,
                     alreadyReady,
                     leaseName,
+                    automatic,
                     0
             );
             return;
@@ -6464,6 +6473,7 @@ public final class ClusterTestModule {
                     recovery,
                     alreadyReady,
                     leaseName,
+                    automatic,
                     recovery ? rejected.size() : 0
             ));
         });
@@ -6479,6 +6489,7 @@ public final class ClusterTestModule {
             boolean recovery,
             int alreadyReady,
             String leaseName,
+            boolean automatic,
             int initialFailed
     ) {
         NodeDrainBatchState state = new NodeDrainBatchState(
@@ -6487,7 +6498,8 @@ public final class ClusterTestModule {
                 skipped,
                 recovery,
                 alreadyReady,
-                leaseName
+                leaseName,
+                automatic
         );
         state.failed = initialFailed;
         if (available.isEmpty()) {
@@ -6608,6 +6620,34 @@ public final class ClusterTestModule {
         SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
         boolean rebalance = "REBALANCE".equals(state.drain.operationType());
         String operationName = rebalance ? "Безопасная балансировка" : "Drain";
+        if (state.automatic) {
+            lastAutomaticOperationRecoverySummary =
+                    state.drain.operationType() + " " + state.drain.drainId()
+                            + ": new READY=" + state.ready
+                            + ", already READY=" + state.alreadyReady
+                            + ", failed=" + state.failed
+                            + ", skipped=" + state.skipped;
+            if (state.failed == 0) {
+                LOGGER.info(
+                        "Automatic recovery completed for {} operation {}: newReady={}, alreadyReady={}, skipped={}",
+                        state.drain.operationType(),
+                        state.drain.drainId(),
+                        state.ready,
+                        state.alreadyReady,
+                        state.skipped
+                );
+            } else {
+                LOGGER.error(
+                        "Automatic recovery completed with errors for {} operation {}: newReady={}, alreadyReady={}, failed={}, skipped={}",
+                        state.drain.operationType(),
+                        state.drain.drainId(),
+                        state.ready,
+                        state.alreadyReady,
+                        state.failed,
+                        state.skipped
+                );
+            }
+        }
         if (state.recovery) {
             int totalReady = state.alreadyReady + state.ready;
             source.sendSuccess(() -> Component.literal(
@@ -6828,47 +6868,201 @@ public final class ClusterTestModule {
         return retryNodeOperation(source, operationId, "REBALANCE");
     }
 
+    private void checkAutomaticNodeOperationRecoveryAtStartup(
+            MinecraftServer server
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null
+                || !currentConfig.enabled()
+                || !currentConfig.automaticOperationRecovery()) {
+            if (currentConfig != null && currentConfig.enabled()) {
+                lastAutomaticOperationRecoverySummary = "отключено в конфиге";
+            }
+            return;
+        }
+        if (currentConfig.dimensionMigrationStagingPath() == null) {
+            lastAutomaticOperationRecoverySummary =
+                    "пропущено: dimension_migration_staging_path не настроен";
+            LOGGER.warn(
+                    "Automatic node operation recovery skipped on {}: staging path is not configured",
+                    currentConfig.nodeId()
+            );
+            return;
+        }
+
+        try {
+            List<ClusterDatabase.NodeDrain> candidates =
+                    ClusterDatabase.listStartupNodeOperationRecoveryCandidates(
+                            currentConfig,
+                            3
+                    );
+            if (candidates.isEmpty()) {
+                lastAutomaticOperationRecoverySummary =
+                        "незавершённых PREPARING-операций не найдено";
+                LOGGER.info(
+                        "No interrupted drain/rebalance operation requires startup recovery on node {}",
+                        currentConfig.nodeId()
+                );
+                return;
+            }
+            if (candidates.size() != 1) {
+                lastAutomaticOperationRecoverySummary =
+                        "заблокировано: найдено несколько PREPARING-операций ("
+                                + candidates.size() + ")";
+                LOGGER.error(
+                        "Automatic node operation recovery refused on {}: {} PREPARING operations found",
+                        currentConfig.nodeId(),
+                        candidates.size()
+                );
+                server.execute(() -> broadcastToOperators(
+                        server,
+                        "§cAutomatic operation recovery остановлен: найдено несколько PREPARING-операций. "
+                                + "Проверь drain/rebalance status и выполни ручной retry или cancel."
+                ));
+                return;
+            }
+
+            ClusterDatabase.NodeDrain candidate = candidates.get(0);
+            lastAutomaticOperationRecoverySummary =
+                    "найдена " + candidate.operationType() + " " + candidate.drainId();
+            LOGGER.warn(
+                    "Interrupted {} operation {} detected on source node {}; scheduling automatic recovery",
+                    candidate.operationType(),
+                    candidate.drainId(),
+                    currentConfig.nodeId()
+            );
+            server.execute(() -> beginNodeOperationRecovery(
+                    server.createCommandSourceStack(),
+                    server,
+                    candidate.drainId(),
+                    candidate.operationType(),
+                    true
+            ));
+        } catch (Exception exception) {
+            lastAutomaticOperationRecoverySummary =
+                    "ошибка проверки: "
+                            + exception.getClass().getSimpleName()
+                            + ": "
+                            + exception.getMessage();
+            LOGGER.error(
+                    "Unable to inspect interrupted node operations at startup on {}",
+                    currentConfig.nodeId(),
+                    exception
+            );
+        }
+    }
+
     private int retryNodeOperation(
             CommandSourceStack source,
             String operationId,
             String expectedOperationType
     ) {
+        return beginNodeOperationRecovery(
+                source,
+                source.getServer(),
+                operationId,
+                expectedOperationType,
+                false
+        );
+    }
+
+    private int beginNodeOperationRecovery(
+            CommandSourceStack source,
+            MinecraftServer server,
+            String operationId,
+            String expectedOperationType,
+            boolean automatic
+    ) {
         ClusterConfig currentConfig = config;
+        String normalizedType = expectedOperationType == null
+                ? ""
+                : expectedOperationType.trim().toUpperCase(java.util.Locale.ROOT);
+        boolean drain = "DRAIN".equals(normalizedType);
+        String displayName = drain ? "drain" : "безопасной балансировки";
+
         if (currentConfig == null || !currentConfig.enabled()) {
-            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            String message = "Кластер выключен или конфиг ещё не загружен.";
+            if (automatic) {
+                lastAutomaticOperationRecoverySummary = "пропущено: " + message;
+                LOGGER.warn("Automatic operation recovery skipped: {}", message);
+            }
+            source.sendFailure(Component.literal("§c" + message));
             return 0;
         }
         if (currentConfig.dimensionMigrationStagingPath() == null) {
-            source.sendFailure(Component.literal("§cВ конфиге не указан dimension_migration_staging_path."));
+            String message = "В конфиге не указан dimension_migration_staging_path.";
+            if (automatic) {
+                lastAutomaticOperationRecoverySummary = "пропущено: " + message;
+                LOGGER.warn("Automatic operation recovery skipped: {}", message);
+            }
+            source.sendFailure(Component.literal("§c" + message));
             return 0;
         }
-        MinecraftServer server = source.getServer();
-        boolean drain = "DRAIN".equals(expectedOperationType);
+        if (!drain && !"REBALANCE".equals(normalizedType)) {
+            String message = "Неизвестный тип operation: " + expectedOperationType;
+            if (automatic) {
+                lastAutomaticOperationRecoverySummary = "пропущено: " + message;
+                LOGGER.error("Automatic operation recovery skipped: {}", message);
+            }
+            source.sendFailure(Component.literal("§c" + message));
+            return 0;
+        }
         if (drain && !server.getPlayerList().getPlayers().isEmpty()) {
-            source.sendFailure(Component.literal(
-                    "§cDrain retry запрещён: на текущем узле ещё находятся игроки."
-            ));
+            String message = "Drain retry запрещён: на текущем узле ещё находятся игроки.";
+            if (automatic) {
+                lastAutomaticOperationRecoverySummary = "пропущено: на source node находятся игроки";
+                LOGGER.warn(
+                        "Automatic drain recovery {} skipped on {} because players are online",
+                        operationId,
+                        currentConfig.nodeId()
+                );
+            }
+            source.sendFailure(Component.literal("§c" + message));
             return 0;
         }
         if (!DRAIN_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
-            source.sendFailure(Component.literal(
-                    "§cУже выполняется drain, rebalance или recovery."
-            ));
+            String message = "Уже выполняется drain, rebalance или recovery.";
+            if (automatic) {
+                lastAutomaticOperationRecoverySummary = "пропущено: другая node operation уже выполняется";
+                LOGGER.warn("Automatic operation recovery {} skipped: {}", operationId, message);
+            }
+            source.sendFailure(Component.literal("§c" + message));
             return 0;
         }
         if (!SNAPSHOT_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
             DRAIN_OPERATION_IN_FLIGHT.set(false);
-            source.sendFailure(Component.literal("§cСначала дождись завершения snapshot-операции."));
+            String message = "Сначала дождись завершения snapshot-операции.";
+            if (automatic) {
+                lastAutomaticOperationRecoverySummary = "пропущено: snapshot-операция уже выполняется";
+                LOGGER.warn("Automatic operation recovery {} skipped: {}", operationId, message);
+            }
+            source.sendFailure(Component.literal("§c" + message));
             return 0;
         }
 
         Map<String, Integer> localActivity = captureDimensionPlayerCounts(server);
         Set<String> locallyAvailableDimensions = collectNodeDrainLocalCandidates(server);
         String leaseName = "operation-retry:" + operationId;
-        String displayName = drain ? "drain" : "безопасной балансировки";
-        source.sendSuccess(() -> Component.literal(
-                "§eЗапускаю recovery " + displayName + ": §f" + operationId
-        ), false);
+        if (automatic) {
+            lastAutomaticOperationRecoverySummary =
+                    "запущено: " + normalizedType + " " + operationId;
+            LOGGER.info(
+                    "Starting automatic recovery for {} operation {} on node {}",
+                    normalizedType,
+                    operationId,
+                    currentConfig.nodeId()
+            );
+            broadcastToOperators(
+                    server,
+                    "§eНайдена прерванная " + normalizedType
+                            + " operation §f" + operationId
+                            + "§e. Запускаю автоматический recovery."
+            );
+        } else {
+            source.sendSuccess(() -> Component.literal(
+                    "§eЗапускаю recovery " + displayName + ": §f" + operationId
+            ), false);
+        }
 
         DATABASE_EXECUTOR.execute(() -> {
             ClusterConfig latestConfig = currentConfig;
@@ -6876,6 +7070,11 @@ public final class ClusterTestModule {
             try {
                 latestConfig = ClusterConfig.load();
                 config = latestConfig;
+                if (automatic && !latestConfig.automaticOperationRecovery()) {
+                    throw new IllegalStateException(
+                            "automatic_operation_recovery был выключен до запуска recovery"
+                    );
+                }
                 ClusterDatabase.heartbeat(latestConfig, server, localActivity);
                 leaseAcquired = ClusterDatabase.tryAcquireOperationLease(
                         latestConfig,
@@ -6891,7 +7090,7 @@ public final class ClusterTestModule {
                         ClusterDatabase.prepareNodeOperationRecovery(
                                 latestConfig,
                                 operationId,
-                                expectedOperationType,
+                                normalizedType,
                                 locallyAvailableDimensions
                         );
                 if (result.items().isEmpty()) {
@@ -6900,6 +7099,19 @@ public final class ClusterTestModule {
                     SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
                     int alreadyReady = result.alreadyReady();
                     int skipped = result.skipped();
+                    if (automatic) {
+                        lastAutomaticOperationRecoverySummary =
+                                normalizedType + " " + operationId
+                                        + ": архивы не требуются, already READY="
+                                        + alreadyReady + ", skipped=" + skipped;
+                        LOGGER.info(
+                                "Automatic recovery {} {} required no new archives: alreadyReady={}, skipped={}",
+                                normalizedType,
+                                operationId,
+                                alreadyReady,
+                                skipped
+                        );
+                    }
                     server.execute(() -> source.sendSuccess(() -> Component.literal(
                             "§aRecovery не требует создания архивов: §f"
                                     + alreadyReady + "§a элементов уже READY, §f"
@@ -6913,7 +7125,8 @@ public final class ClusterTestModule {
                         server,
                         recoveryConfig,
                         result,
-                        leaseName
+                        leaseName,
+                        automatic
                 ));
             } catch (Exception exception) {
                 if (leaseAcquired) {
@@ -6921,6 +7134,17 @@ public final class ClusterTestModule {
                 }
                 DRAIN_OPERATION_IN_FLIGHT.set(false);
                 SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                if (automatic) {
+                    lastAutomaticOperationRecoverySummary =
+                            "ошибка " + normalizedType + " " + operationId
+                                    + ": " + exception.getMessage();
+                    LOGGER.error(
+                            "Automatic recovery failed for {} operation {}",
+                            normalizedType,
+                            operationId,
+                            exception
+                    );
+                }
                 server.execute(() -> source.sendFailure(Component.literal(
                         "§cНе удалось выполнить recovery " + displayName + ": "
                                 + exception.getMessage()
@@ -8607,6 +8831,13 @@ public final class ClusterTestModule {
                     addHealthMessage(messages, HealthSeverity.WARNING,
                             "Автоматический failover выключен");
                 }
+                if (latestConfig.automaticOperationRecovery()) {
+                    addHealthMessage(messages, HealthSeverity.OK,
+                            "Автоматическое восстановление drain/rebalance включено");
+                } else {
+                    addHealthMessage(messages, HealthSeverity.INFO,
+                            "Автоматическое восстановление drain/rebalance выключено; доступен ручной retry");
+                }
 
                 checkHealthStagingPath(messages, latestConfig.dimensionMigrationStagingPath());
 
@@ -9178,6 +9409,8 @@ public final class ClusterTestModule {
                                 + currentConfig.automaticFailoverLeaseSeconds()
                                 + "s§7, failover clean stops: §f"
                                 + currentConfig.automaticFailoverIncludeCleanStops()
+                                + "§7, automatic operation recovery: §f"
+                                + currentConfig.automaticOperationRecovery()
                                 + "§7, fail-closed routing: §f"
                                 + currentConfig.failClosedRouting()
                                 + "§7, player-data sync: §f"
@@ -9239,6 +9472,16 @@ public final class ClusterTestModule {
             source.sendSuccess(
                     () -> Component.literal(
                             "§eПроверка ещё не выполнялась."
+                    ),
+                    false
+            );
+        }
+
+        if (lastAutomaticOperationRecoverySummary != null) {
+            source.sendSuccess(
+                    () -> Component.literal(
+                            "§7Automatic operation recovery: §f"
+                                    + lastAutomaticOperationRecoverySummary
                     ),
                     false
             );
@@ -9307,6 +9550,7 @@ public final class ClusterTestModule {
         private final boolean recovery;
         private final int alreadyReady;
         private final String leaseName;
+        private final boolean automatic;
         private int index;
         private int ready;
         private int failed;
@@ -9317,7 +9561,8 @@ public final class ClusterTestModule {
                 int skipped,
                 boolean recovery,
                 int alreadyReady,
-                String leaseName
+                String leaseName,
+                boolean automatic
         ) {
             this.drain = drain;
             this.items = items;
@@ -9325,6 +9570,7 @@ public final class ClusterTestModule {
             this.recovery = recovery;
             this.alreadyReady = alreadyReady;
             this.leaseName = leaseName;
+            this.automatic = automatic;
         }
     }
 
