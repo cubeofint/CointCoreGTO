@@ -854,6 +854,24 @@ public final class ClusterTestModule {
                                                         )
                                         )
                                         .then(
+                                                Commands.literal("retry")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "drainId",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                retryNodeDrain(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "drainId"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
                                                 Commands.literal("resume")
                                                         .then(
                                                                 Commands.argument(
@@ -928,6 +946,24 @@ public final class ClusterTestModule {
                                                                         )
                                                                         .executes(context ->
                                                                                 cancelSafeRebalance(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "operationId"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("retry")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "operationId",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                retrySafeRebalance(
                                                                                         context.getSource(),
                                                                                         StringArgumentType.getString(
                                                                                                 context,
@@ -6310,9 +6346,53 @@ public final class ClusterTestModule {
             ClusterConfig currentConfig,
             ClusterDatabase.NodeDrainPreparationResult preparation
     ) {
+        startNodeDrainBatch(
+                source,
+                server,
+                currentConfig,
+                preparation.drain(),
+                preparation.items(),
+                preparation.skipped(),
+                false,
+                0,
+                null
+        );
+    }
+
+    private void startNodeOperationRecoveryBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ClusterDatabase.NodeOperationRecoveryResult recovery,
+            String leaseName
+    ) {
+        startNodeDrainBatch(
+                source,
+                server,
+                currentConfig,
+                recovery.operation(),
+                recovery.items(),
+                recovery.skipped(),
+                true,
+                recovery.alreadyReady(),
+                leaseName
+        );
+    }
+
+    private void startNodeDrainBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ClusterDatabase.NodeDrain drain,
+            List<ClusterDatabase.DimensionDrainItem> candidateItems,
+            int skipped,
+            boolean recovery,
+            int alreadyReady,
+            String leaseName
+    ) {
         List<ClusterDatabase.DimensionDrainItem> available = new ArrayList<>();
         Map<ClusterDatabase.DimensionDrainItem, String> rejected = new LinkedHashMap<>();
-        for (ClusterDatabase.DimensionDrainItem item : preparation.items()) {
+        for (ClusterDatabase.DimensionDrainItem item : candidateItems) {
             ResourceLocation parsed = ResourceLocation.tryParse(item.dimensionId());
             ServerLevel level = parsed == null
                     ? null
@@ -6340,31 +6420,51 @@ public final class ClusterTestModule {
                     source,
                     server,
                     currentConfig,
-                    preparation.drain(),
+                    drain,
                     available,
-                    preparation.skipped()
+                    skipped,
+                    recovery,
+                    alreadyReady,
+                    leaseName,
+                    0
             );
             return;
         }
         MIGRATION_EXECUTOR.execute(() -> {
             for (Map.Entry<ClusterDatabase.DimensionDrainItem, String> entry : rejected.entrySet()) {
                 try {
-                    ClusterDatabase.skipNodeDrainItem(
-                            currentConfig,
-                            entry.getKey().drainItemId(),
-                            "Пропущено: " + entry.getValue()
-                    );
+                    if (recovery) {
+                        ClusterDatabase.failNodeDrainItem(
+                                currentConfig,
+                                entry.getKey().drainItemId(),
+                                "Recovery заблокирован: " + entry.getValue()
+                        );
+                    } else {
+                        ClusterDatabase.skipNodeDrainItem(
+                                currentConfig,
+                                entry.getKey().drainItemId(),
+                                "Пропущено: " + entry.getValue()
+                        );
+                    }
                 } catch (Exception exception) {
-                    LOGGER.error("Unable to skip node drain item {}", entry.getKey().drainItemId(), exception);
+                    LOGGER.error(
+                            "Unable to reject node operation item {}",
+                            entry.getKey().drainItemId(),
+                            exception
+                    );
                 }
             }
             server.execute(() -> continueStartNodeDrainBatch(
                     source,
                     server,
                     currentConfig,
-                    preparation.drain(),
+                    drain,
                     available,
-                    preparation.skipped() + rejected.size()
+                    skipped + (recovery ? 0 : rejected.size()),
+                    recovery,
+                    alreadyReady,
+                    leaseName,
+                    recovery ? rejected.size() : 0
             ));
         });
     }
@@ -6375,13 +6475,21 @@ public final class ClusterTestModule {
             ClusterConfig currentConfig,
             ClusterDatabase.NodeDrain drain,
             List<ClusterDatabase.DimensionDrainItem> available,
-            int skipped
+            int skipped,
+            boolean recovery,
+            int alreadyReady,
+            String leaseName,
+            int initialFailed
     ) {
         NodeDrainBatchState state = new NodeDrainBatchState(
                 drain,
                 available,
-                skipped
+                skipped,
+                recovery,
+                alreadyReady,
+                leaseName
         );
+        state.failed = initialFailed;
         if (available.isEmpty()) {
             finishNodeDrainBatch(source, currentConfig, state);
             return;
@@ -6493,28 +6601,49 @@ public final class ClusterTestModule {
         } catch (Exception exception) {
             LOGGER.error("Unable to refresh dimension migration freeze after batch operation", exception);
         }
+        if (state.leaseName != null) {
+            releaseOperationLeaseQuietly(currentConfig, state.leaseName);
+        }
         DRAIN_OPERATION_IN_FLIGHT.set(false);
         SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
         boolean rebalance = "REBALANCE".equals(state.drain.operationType());
         String operationName = rebalance ? "Безопасная балансировка" : "Drain";
-        source.sendSuccess(() -> Component.literal(
-                "§a" + operationName + " подготовлен: §f" + state.ready
-                        + "§a READY, §f" + state.failed
-                        + "§a ошибок, §f" + state.skipped
-                        + "§a пропущено. Перезапусти target node §f"
-                        + state.drain.targetNode()
-                        + "§a."
-        ), false);
+        if (state.recovery) {
+            int totalReady = state.alreadyReady + state.ready;
+            source.sendSuccess(() -> Component.literal(
+                    "§aRecovery " + operationName + " завершён: §f" + state.ready
+                            + "§a новых READY, §f" + state.alreadyReady
+                            + "§a уже были READY, §f" + state.failed
+                            + "§a ошибок, §f" + state.skipped
+                            + "§a пропущено."
+            ), false);
+            if (totalReady > 0) {
+                source.sendSuccess(() -> Component.literal(
+                        "§eПосле проверки status полностью перезапусти target node §f"
+                                + state.drain.targetNode()
+                                + "§e."
+                ), false);
+            }
+        } else {
+            source.sendSuccess(() -> Component.literal(
+                    "§a" + operationName + " подготовлен: §f" + state.ready
+                            + "§a READY, §f" + state.failed
+                            + "§a ошибок, §f" + state.skipped
+                            + "§a пропущено. Перезапусти target node §f"
+                            + state.drain.targetNode()
+                            + "§a."
+            ), false);
+        }
         String idLabel = rebalance ? "Rebalance ID" : "Drain ID";
         source.sendSuccess(() -> Component.literal(
                 "§7" + idLabel + ": §f" + state.drain.drainId()
         ), false);
-        if (state.ready == 0) {
+        if (state.ready == 0 && state.alreadyReady == 0) {
             String action = rebalance
-                    ? "Проверь rebalance status или выполни rebalance cancel."
-                    : "Проверь drain status и выполни resume или cancel.";
+                    ? "Проверь rebalance status, затем выполни rebalance retry или cancel."
+                    : "Проверь drain status, затем выполни drain retry, resume или cancel.";
             source.sendSuccess(() -> Component.literal(
-                    "§eНи одного архива READY не создано. " + action
+                    "§eНи одного архива READY нет. " + action
             ), false);
         }
     }
@@ -6683,6 +6812,133 @@ public final class ClusterTestModule {
             }
         });
         return 1;
+    }
+
+    private int retryNodeDrain(
+            CommandSourceStack source,
+            String drainId
+    ) {
+        return retryNodeOperation(source, drainId, "DRAIN");
+    }
+
+    private int retrySafeRebalance(
+            CommandSourceStack source,
+            String operationId
+    ) {
+        return retryNodeOperation(source, operationId, "REBALANCE");
+    }
+
+    private int retryNodeOperation(
+            CommandSourceStack source,
+            String operationId,
+            String expectedOperationType
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        if (currentConfig.dimensionMigrationStagingPath() == null) {
+            source.sendFailure(Component.literal("§cВ конфиге не указан dimension_migration_staging_path."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        boolean drain = "DRAIN".equals(expectedOperationType);
+        if (drain && !server.getPlayerList().getPlayers().isEmpty()) {
+            source.sendFailure(Component.literal(
+                    "§cDrain retry запрещён: на текущем узле ещё находятся игроки."
+            ));
+            return 0;
+        }
+        if (!DRAIN_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            source.sendFailure(Component.literal(
+                    "§cУже выполняется drain, rebalance или recovery."
+            ));
+            return 0;
+        }
+        if (!SNAPSHOT_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            DRAIN_OPERATION_IN_FLIGHT.set(false);
+            source.sendFailure(Component.literal("§cСначала дождись завершения snapshot-операции."));
+            return 0;
+        }
+
+        Map<String, Integer> localActivity = captureDimensionPlayerCounts(server);
+        Set<String> locallyAvailableDimensions = collectNodeDrainLocalCandidates(server);
+        String leaseName = "operation-retry:" + operationId;
+        String displayName = drain ? "drain" : "безопасной балансировки";
+        source.sendSuccess(() -> Component.literal(
+                "§eЗапускаю recovery " + displayName + ": §f" + operationId
+        ), false);
+
+        DATABASE_EXECUTOR.execute(() -> {
+            ClusterConfig latestConfig = currentConfig;
+            boolean leaseAcquired = false;
+            try {
+                latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                ClusterDatabase.heartbeat(latestConfig, server, localActivity);
+                leaseAcquired = ClusterDatabase.tryAcquireOperationLease(
+                        latestConfig,
+                        leaseName,
+                        Math.max(300, latestConfig.automaticFailoverLeaseSeconds())
+                );
+                if (!leaseAcquired) {
+                    throw new IllegalStateException(
+                            "Recovery уже выполняется другим координатором"
+                    );
+                }
+                ClusterDatabase.NodeOperationRecoveryResult result =
+                        ClusterDatabase.prepareNodeOperationRecovery(
+                                latestConfig,
+                                operationId,
+                                expectedOperationType,
+                                locallyAvailableDimensions
+                        );
+                if (result.items().isEmpty()) {
+                    releaseOperationLeaseQuietly(latestConfig, leaseName);
+                    DRAIN_OPERATION_IN_FLIGHT.set(false);
+                    SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                    int alreadyReady = result.alreadyReady();
+                    int skipped = result.skipped();
+                    server.execute(() -> source.sendSuccess(() -> Component.literal(
+                            "§aRecovery не требует создания архивов: §f"
+                                    + alreadyReady + "§a элементов уже READY, §f"
+                                    + skipped + "§a пропущено. Проверь status перед рестартом target node."
+                    ), false));
+                    return;
+                }
+                ClusterConfig recoveryConfig = latestConfig;
+                server.execute(() -> startNodeOperationRecoveryBatch(
+                        source,
+                        server,
+                        recoveryConfig,
+                        result,
+                        leaseName
+                ));
+            } catch (Exception exception) {
+                if (leaseAcquired) {
+                    releaseOperationLeaseQuietly(latestConfig, leaseName);
+                }
+                DRAIN_OPERATION_IN_FLIGHT.set(false);
+                SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось выполнить recovery " + displayName + ": "
+                                + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private static void releaseOperationLeaseQuietly(
+            ClusterConfig currentConfig,
+            String leaseName
+    ) {
+        try {
+            ClusterDatabase.releaseOperationLease(currentConfig, leaseName);
+        } catch (Exception exception) {
+            LOGGER.warn("Unable to release operation lease {}", leaseName, exception);
+        }
     }
 
     private int previewSafeRebalance(
@@ -9048,6 +9304,9 @@ public final class ClusterTestModule {
         private final ClusterDatabase.NodeDrain drain;
         private final List<ClusterDatabase.DimensionDrainItem> items;
         private final int skipped;
+        private final boolean recovery;
+        private final int alreadyReady;
+        private final String leaseName;
         private int index;
         private int ready;
         private int failed;
@@ -9055,11 +9314,17 @@ public final class ClusterTestModule {
         private NodeDrainBatchState(
                 ClusterDatabase.NodeDrain drain,
                 List<ClusterDatabase.DimensionDrainItem> items,
-                int skipped
+                int skipped,
+                boolean recovery,
+                int alreadyReady,
+                String leaseName
         ) {
             this.drain = drain;
             this.items = items;
             this.skipped = skipped;
+            this.recovery = recovery;
+            this.alreadyReady = alreadyReady;
+            this.leaseName = leaseName;
         }
     }
 
