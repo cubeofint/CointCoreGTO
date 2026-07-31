@@ -27,6 +27,9 @@ public final class ClusterConfig {
     private final int transferLockTimeoutSeconds;
     private final int playerBackupRetentionDays;
     private final boolean automaticFailover;
+    private final int automaticFailoverConfirmationSeconds;
+    private final int automaticFailoverLeaseSeconds;
+    private final boolean automaticFailoverIncludeCleanStops;
     private final boolean failClosedRouting;
     private final boolean syncPlayerData;
     private final int maxPlayerDataBytes;
@@ -55,6 +58,9 @@ public final class ClusterConfig {
             int transferLockTimeoutSeconds,
             int playerBackupRetentionDays,
             boolean automaticFailover,
+            int automaticFailoverConfirmationSeconds,
+            int automaticFailoverLeaseSeconds,
+            boolean automaticFailoverIncludeCleanStops,
             boolean failClosedRouting,
             boolean syncPlayerData,
             int maxPlayerDataBytes,
@@ -82,6 +88,9 @@ public final class ClusterConfig {
         this.transferLockTimeoutSeconds = transferLockTimeoutSeconds;
         this.playerBackupRetentionDays = playerBackupRetentionDays;
         this.automaticFailover = automaticFailover;
+        this.automaticFailoverConfirmationSeconds = automaticFailoverConfirmationSeconds;
+        this.automaticFailoverLeaseSeconds = automaticFailoverLeaseSeconds;
+        this.automaticFailoverIncludeCleanStops = automaticFailoverIncludeCleanStops;
         this.failClosedRouting = failClosedRouting;
         this.syncPlayerData = syncPlayerData;
         this.maxPlayerDataBytes = maxPlayerDataBytes;
@@ -122,6 +131,14 @@ public final class ClusterConfig {
                         properties.getProperty(
                                 "automatic_failover",
                                 "true"
+                        ).trim()
+                ),
+                positiveInt(properties, "automatic_failover_confirmation_seconds", 60),
+                positiveInt(properties, "automatic_failover_lease_seconds", 30),
+                Boolean.parseBoolean(
+                        properties.getProperty(
+                                "automatic_failover_include_clean_stops",
+                                "false"
                         ).trim()
                 ),
                 Boolean.parseBoolean(
@@ -281,6 +298,9 @@ public final class ClusterConfig {
         defaults.setProperty("transfer_lock_timeout_seconds", "90");
         defaults.setProperty("player_backup_retention_days", "7");
         defaults.setProperty("automatic_failover", "true");
+        defaults.setProperty("automatic_failover_confirmation_seconds", "60");
+        defaults.setProperty("automatic_failover_lease_seconds", "30");
+        defaults.setProperty("automatic_failover_include_clean_stops", "false");
         defaults.setProperty("fail_closed_routing", "true");
         defaults.setProperty("sync_player_data", "true");
         defaults.setProperty(
@@ -372,6 +392,18 @@ public final class ClusterConfig {
 
     public boolean automaticFailover() {
         return automaticFailover;
+    }
+
+    public int automaticFailoverConfirmationSeconds() {
+        return automaticFailoverConfirmationSeconds;
+    }
+
+    public int automaticFailoverLeaseSeconds() {
+        return automaticFailoverLeaseSeconds;
+    }
+
+    public boolean automaticFailoverIncludeCleanStops() {
+        return automaticFailoverIncludeCleanStops;
     }
 
     public boolean failClosedRouting() {

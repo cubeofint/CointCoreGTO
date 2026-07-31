@@ -73,6 +73,10 @@ public final class ClusterDatabase {
                 recoverStaleClaims(connection, config);
                 cleanupExpiredBackups(connection, config);
                 upsertNode(connection, config, server);
+                abortReadyDimensionFailoversForReturnedSource(
+                        connection,
+                        config.nodeId()
+                );
                 refreshPlayerSessionLeases(connection, config, server);
                 refreshDimensionActivity(
                         connection,
@@ -114,6 +118,10 @@ public final class ClusterDatabase {
                 recoverStaleClaims(connection, config);
                 cleanupExpiredBackups(connection, config);
                 upsertNode(connection, config, server);
+                abortReadyDimensionFailoversForReturnedSource(
+                        connection,
+                        config.nodeId()
+                );
                 refreshPlayerSessionLeases(connection, config, server);
                 refreshDimensionActivity(
                         connection,
@@ -127,6 +135,22 @@ public final class ClusterDatabase {
             } finally {
                 restoreAutoCommit(connection);
             }
+        }
+    }
+
+    private static void abortReadyDimensionFailoversForReturnedSource(
+            Connection connection,
+            String sourceNode
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE cluster_dimension_failovers
+                SET status = 'ABORTED',
+                    error_text = 'source node returned online',
+                    updated_at = CURRENT_TIMESTAMP(3)
+                WHERE source_node = ? AND status = 'READY'
+                """)) {
+            statement.setString(1, sourceNode);
+            statement.executeUpdate();
         }
     }
 
@@ -2202,6 +2226,151 @@ public final class ClusterDatabase {
                 }
             }
             return List.copyOf(nodes);
+        }
+    }
+
+    public static List<AutomaticFailoverCandidate> listAutomaticFailoverCandidates(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT assignments.node_id, nodes.last_seen, nodes.stopped_at,
+                            COUNT(assignments.dimension_id) AS dimension_count,
+                            CASE
+                                WHEN nodes.last_seen IS NULL THEN -1
+                                ELSE GREATEST(0, TIMESTAMPDIFF(SECOND, nodes.last_seen, CURRENT_TIMESTAMP(3)))
+                            END AS heartbeat_age_seconds
+                     FROM dimension_assignments AS assignments
+                     LEFT JOIN cluster_nodes AS nodes ON nodes.node_id = assignments.node_id
+                     WHERE assignments.node_id <> ?
+                     GROUP BY assignments.node_id, nodes.last_seen, nodes.stopped_at
+                     ORDER BY assignments.node_id
+                     """)) {
+            statement.setString(1, config.nodeId());
+            int confirmationSeconds = Math.max(
+                    config.nodeTimeoutSeconds(),
+                    config.automaticFailoverConfirmationSeconds()
+            );
+            List<AutomaticFailoverCandidate> candidates = new ArrayList<>();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    String nodeId = resultSet.getString("node_id");
+                    long heartbeatAgeSeconds = resultSet.getLong("heartbeat_age_seconds");
+                    boolean registered = resultSet.getTimestamp("last_seen") != null;
+                    boolean cleanStop = resultSet.getTimestamp("stopped_at") != null;
+                    int dimensionCount = resultSet.getInt("dimension_count");
+                    boolean eligible = false;
+                    long secondsRemaining = 0L;
+                    String reason;
+                    if (!registered) {
+                        reason = "узел не зарегистрирован; требуется ручной failover";
+                    } else if (cleanStop && !config.automaticFailoverIncludeCleanStops()) {
+                        reason = "чистая остановка; automatic failover запрещён";
+                    } else if (heartbeatAgeSeconds < config.nodeTimeoutSeconds()) {
+                        reason = "узел ONLINE";
+                    } else if (heartbeatAgeSeconds < confirmationSeconds) {
+                        secondsRemaining = confirmationSeconds - heartbeatAgeSeconds;
+                        reason = "ожидание подтверждения сбоя";
+                    } else {
+                        eligible = true;
+                        reason = "готов к automatic failover";
+                    }
+                    candidates.add(new AutomaticFailoverCandidate(
+                            nodeId,
+                            heartbeatAgeSeconds,
+                            cleanStop,
+                            dimensionCount,
+                            eligible,
+                            secondsRemaining,
+                            reason
+                    ));
+                }
+            }
+            return List.copyOf(candidates);
+        }
+    }
+
+    public static boolean tryAcquireOperationLease(
+            ClusterConfig config,
+            String leaseName,
+            int leaseSeconds
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        INSERT IGNORE INTO cluster_operation_leases (
+                            lease_name, owner_node, lease_until, updated_at
+                        ) VALUES (?, '', TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(3)), CURRENT_TIMESTAMP(3))
+                        """)) {
+                    statement.setString(1, leaseName);
+                    statement.executeUpdate();
+                }
+                String ownerNode = null;
+                Instant leaseUntil = null;
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        SELECT owner_node, lease_until
+                        FROM cluster_operation_leases
+                        WHERE lease_name = ?
+                        FOR UPDATE
+                        """)) {
+                    statement.setString(1, leaseName);
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        if (resultSet.next()) {
+                            ownerNode = resultSet.getString("owner_node");
+                            leaseUntil = resultSet.getTimestamp("lease_until").toInstant();
+                        }
+                    }
+                }
+                Instant now = Instant.now();
+                boolean acquired = ownerNode == null
+                        || ownerNode.isBlank()
+                        || ownerNode.equalsIgnoreCase(config.nodeId())
+                        || leaseUntil == null
+                        || !leaseUntil.isAfter(now);
+                if (!acquired) {
+                    connection.commit();
+                    return false;
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_operation_leases
+                        SET owner_node = ?,
+                            lease_until = TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP(3)),
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE lease_name = ?
+                        """)) {
+                    int safeLeaseSeconds = Math.max(1, leaseSeconds);
+                    statement.setString(1, config.nodeId());
+                    statement.setInt(2, safeLeaseSeconds);
+                    statement.setString(3, leaseName);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                return true;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static void releaseOperationLease(
+            ClusterConfig config,
+            String leaseName
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     DELETE FROM cluster_operation_leases
+                     WHERE lease_name = ? AND owner_node = ?
+                     """)) {
+            statement.setString(1, leaseName);
+            statement.setString(2, config.nodeId());
+            statement.executeUpdate();
         }
     }
 
@@ -4783,6 +4952,19 @@ public final class ClusterDatabase {
                 """);
 
             statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_operation_leases (
+                    lease_name VARCHAR(64) NOT NULL PRIMARY KEY,
+                    owner_node VARCHAR(64) NOT NULL,
+                    lease_until TIMESTAMP(3) NOT NULL,
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+                    INDEX idx_cluster_operation_lease_until (lease_until)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
                 CREATE TABLE IF NOT EXISTS pending_transfers (
                     transfer_id CHAR(36) NOT NULL PRIMARY KEY,
                     player_uuid CHAR(36) NOT NULL,
@@ -6047,6 +6229,17 @@ public final class ClusterDatabase {
             Instant createdAt,
             Instant updatedAt,
             Instant readyAt
+    ) {
+    }
+
+    public record AutomaticFailoverCandidate(
+            String nodeId,
+            long heartbeatAgeSeconds,
+            boolean cleanStop,
+            int dimensionCount,
+            boolean eligible,
+            long secondsRemaining,
+            String reason
     ) {
     }
 

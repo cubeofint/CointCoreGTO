@@ -765,6 +765,14 @@ public final class ClusterTestModule {
                                                                 )
                                                         )
                                         )
+                                        .then(
+                                                Commands.literal("watch")
+                                                        .executes(context ->
+                                                                showAutomaticFailoverWatch(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
                         )
 
                         .then(
@@ -5807,6 +5815,70 @@ public final class ClusterTestModule {
         return 1;
     }
 
+    private int showAutomaticFailoverWatch(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.AutomaticFailoverCandidate> candidates =
+                        ClusterDatabase.listAutomaticFailoverCandidates(currentConfig);
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Automatic failover: §f"
+                                    + currentConfig.automaticFailover()
+                                    + "§7 | confirmation: §f"
+                                    + Math.max(
+                                            currentConfig.nodeTimeoutSeconds(),
+                                            currentConfig.automaticFailoverConfirmationSeconds()
+                                    )
+                                    + "s§7 | lease: §f"
+                                    + currentConfig.automaticFailoverLeaseSeconds()
+                                    + "s§7 | clean stops: §f"
+                                    + currentConfig.automaticFailoverIncludeCleanStops()
+                    ), false);
+                    if (candidates.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal("§7Нет других узлов-владельцев измерений."), false);
+                        return;
+                    }
+                    for (ClusterDatabase.AutomaticFailoverCandidate candidate : candidates) {
+                        String state;
+                        if (candidate.eligible()) {
+                            state = "§cREADY";
+                        } else if (candidate.secondsRemaining() > 0L) {
+                            state = "§eWAIT " + candidate.secondsRemaining() + "s";
+                        } else {
+                            state = "§7SKIP";
+                        }
+                        source.sendSuccess(() -> Component.literal(
+                                state
+                                        + " §f"
+                                        + candidate.nodeId()
+                                        + "§7 | heartbeat: §f"
+                                        + candidate.heartbeatAgeSeconds()
+                                        + "s§7 | dimensions: §f"
+                                        + candidate.dimensionCount()
+                                        + "§7 | clean stop: §f"
+                                        + candidate.cleanStop()
+                                        + "§7 | "
+                                        + candidate.reason()
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось получить automatic failover watch: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
     private int previewDimensionFailover(
             CommandSourceStack source,
             String sourceNode
@@ -5926,6 +5998,17 @@ public final class ClusterTestModule {
                         return;
                     }
                     for (ClusterDatabase.DimensionFailover failover : failovers) {
+                        String statusColor = switch (failover.status()) {
+                            case "APPLIED" -> "§a";
+                            case "FAILED" -> "§c";
+                            case "ABORTED" -> "§6";
+                            case "APPLYING" -> "§b";
+                            default -> "§e";
+                        };
+                        String reason = failover.errorText() == null
+                                || failover.errorText().isBlank()
+                                ? ""
+                                : " §7| §f" + failover.errorText();
                         source.sendSuccess(() -> Component.literal(
                                 "§f"
                                         + failover.failoverId()
@@ -5935,8 +6018,10 @@ public final class ClusterTestModule {
                                         + failover.sourceNode()
                                         + " -> "
                                         + failover.targetNode()
-                                        + " §7| §e"
+                                        + " §7| "
+                                        + statusColor
                                         + failover.status()
+                                        + reason
                         ), false);
                     }
                 });
@@ -6036,7 +6121,7 @@ public final class ClusterTestModule {
         }
     }
 
-    private List<ClusterDatabase.DimensionReassignment>
+    private List<ClusterDatabase.DimensionFailover>
     performFailover(
             ClusterConfig currentConfig,
             boolean force
@@ -6044,23 +6129,56 @@ public final class ClusterTestModule {
         if (!force && !currentConfig.automaticFailover()) {
             return List.of();
         }
-
-        for (String offlineNode : ClusterDatabase.listOfflineDimensionOwnerNodes(currentConfig)) {
-            List<ClusterDatabase.DimensionFailover> failovers =
-                    ClusterDatabase.prepareDimensionFailover(
-                            currentConfig,
+        if (currentConfig.dimensionMigrationStagingPath() == null) {
+            return List.of();
+        }
+        boolean leaseAcquired = force || ClusterDatabase.tryAcquireOperationLease(
+                currentConfig,
+                "automatic_dimension_failover",
+                currentConfig.automaticFailoverLeaseSeconds()
+        );
+        if (!leaseAcquired) {
+            return List.of();
+        }
+        try {
+            List<String> sourceNodes = new ArrayList<>();
+            if (force) {
+                sourceNodes.addAll(
+                        ClusterDatabase.listOfflineDimensionOwnerNodes(currentConfig)
+                );
+            } else {
+                for (ClusterDatabase.AutomaticFailoverCandidate candidate
+                        : ClusterDatabase.listAutomaticFailoverCandidates(currentConfig)) {
+                    if (candidate.eligible()) {
+                        sourceNodes.add(candidate.nodeId());
+                    }
+                }
+            }
+            List<ClusterDatabase.DimensionFailover> prepared = new ArrayList<>();
+            for (String offlineNode : sourceNodes) {
+                List<ClusterDatabase.DimensionFailover> failovers =
+                        ClusterDatabase.prepareDimensionFailover(
+                                currentConfig,
+                                offlineNode
+                        );
+                prepared.addAll(failovers);
+                if (!failovers.isEmpty()) {
+                    LOGGER.warn(
+                            "Prepared {} snapshot failovers for offline node {}. Restart target nodes to apply them.",
+                            failovers.size(),
                             offlineNode
                     );
-            if (!failovers.isEmpty()) {
-                LOGGER.warn(
-                        "Prepared {} snapshot failovers for offline node {}. Restart target nodes to apply them.",
-                        failovers.size(),
-                        offlineNode
+                }
+            }
+            return List.copyOf(prepared);
+        } finally {
+            if (!force) {
+                ClusterDatabase.releaseOperationLease(
+                        currentConfig,
+                        "automatic_dimension_failover"
                 );
             }
         }
-
-        return List.of();
     }
 
     private int runFailoverCommand(
@@ -6095,7 +6213,7 @@ public final class ClusterTestModule {
 
                 config = latestConfig;
 
-                List<ClusterDatabase.DimensionReassignment> reassignments =
+                List<ClusterDatabase.DimensionFailover> failovers =
                         performFailover(
                                 latestConfig,
                                 true
@@ -6106,35 +6224,34 @@ public final class ClusterTestModule {
                 );
 
                 server.execute(() -> {
-                    if (reassignments.isEmpty()) {
+                    if (failovers.isEmpty()) {
                         source.sendSuccess(
                                 () -> Component.literal(
-                                        "§aFailover не требуется: все владельцы измерений ONLINE."
+                                        "§aFailover не подготовлен: нет подходящих OFFLINE-владельцев или свежих snapshots."
                                 ),
                                 false
                         );
-
                         return;
                     }
-
                     source.sendSuccess(
                             () -> Component.literal(
-                                    "§aПереназначено измерений: §f"
-                                            + reassignments.size()
+                                    "§aПодготовлено безопасных failover: §f"
+                                            + failovers.size()
+                                            + "§a. Перезапусти target node."
                             ),
                             false
                     );
-
-                    for (ClusterDatabase.DimensionReassignment reassignment
-                            : reassignments) {
+                    for (ClusterDatabase.DimensionFailover failover : failovers) {
                         source.sendSuccess(
                                 () -> Component.literal(
                                         "§f"
-                                                + reassignment.dimensionId()
+                                                + failover.dimensionId()
                                                 + " §7| §c"
-                                                + reassignment.previousNodeId()
+                                                + failover.sourceNode()
                                                 + " §7-> §a"
-                                                + reassignment.newNodeId()
+                                                + failover.targetNode()
+                                                + " §7| §f"
+                                                + failover.failoverId()
                                 ),
                                 false
                         );
@@ -6755,6 +6872,12 @@ public final class ClusterTestModule {
                                 + currentConfig.nodeTimeoutSeconds()
                                 + "s§7, auto failover: §f"
                                 + currentConfig.automaticFailover()
+                                + "§7, failover confirmation: §f"
+                                + currentConfig.automaticFailoverConfirmationSeconds()
+                                + "s§7, failover lease: §f"
+                                + currentConfig.automaticFailoverLeaseSeconds()
+                                + "s§7, failover clean stops: §f"
+                                + currentConfig.automaticFailoverIncludeCleanStops()
                                 + "§7, fail-closed routing: §f"
                                 + currentConfig.failClosedRouting()
                                 + "§7, player-data sync: §f"
