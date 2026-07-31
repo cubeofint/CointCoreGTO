@@ -77,6 +77,7 @@ public final class ClusterDatabase {
                         connection,
                         config.nodeId()
                 );
+                refreshNodeDrainStates(connection);
                 refreshPlayerSessionLeases(connection, config, server);
                 refreshDimensionActivity(
                         connection,
@@ -122,6 +123,7 @@ public final class ClusterDatabase {
                         connection,
                         config.nodeId()
                 );
+                refreshNodeDrainStates(connection);
                 refreshPlayerSessionLeases(connection, config, server);
                 refreshDimensionActivity(
                         connection,
@@ -362,6 +364,9 @@ public final class ClusterDatabase {
                        FROM cluster_dimension_failbacks
                       WHERE status IN ('PREPARING', 'READY', 'APPLYING')) AS active_failbacks,
                     (SELECT COUNT(*)
+                       FROM cluster_node_drains
+                      WHERE status IN ('PREPARING', 'READY', 'APPLYING', 'DRAINED', 'PARTIAL', 'FAILED')) AS active_drains,
+                    (SELECT COUNT(*)
                        FROM cluster_dimension_migrations
                       WHERE status = 'FAILED'
                         AND updated_at >= TIMESTAMPADD(DAY, -1, CURRENT_TIMESTAMP(3)))
@@ -378,6 +383,11 @@ public final class ClusterDatabase {
                     +
                     (SELECT COUNT(*)
                        FROM cluster_dimension_failbacks
+                      WHERE status = 'FAILED'
+                        AND updated_at >= TIMESTAMPADD(DAY, -1, CURRENT_TIMESTAMP(3)))
+                    +
+                    (SELECT COUNT(*)
+                       FROM cluster_node_drains
                       WHERE status = 'FAILED'
                         AND updated_at >= TIMESTAMPADD(DAY, -1, CURRENT_TIMESTAMP(3)))
                     AS recent_failed_operations,
@@ -405,6 +415,11 @@ public final class ClusterDatabase {
                        FROM cluster_dimension_failbacks
                       WHERE status IN ('PREPARING', 'APPLYING')
                         AND updated_at < TIMESTAMPADD(MINUTE, -10, CURRENT_TIMESTAMP(3)))
+                    +
+                    (SELECT COUNT(*)
+                       FROM cluster_node_drains
+                      WHERE status IN ('PREPARING', 'APPLYING')
+                        AND updated_at < TIMESTAMPADD(MINUTE, -10, CURRENT_TIMESTAMP(3)))
                     AS stuck_operations,
                     (SELECT COUNT(*)
                        FROM cluster_dimension_failovers AS failovers
@@ -422,13 +437,14 @@ public final class ClusterDatabase {
                       WHERE lease_until >= CURRENT_TIMESTAMP(3)) AS active_operation_leases
                 """;
 
-        try (Connection connection = open(config);
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setInt(1, config.staleClaimSeconds());
-            statement.setInt(2, config.nodeTimeoutSeconds());
-            try (ResultSet resultSet = statement.executeQuery()) {
-                resultSet.next();
-                return new OperationalHealth(
+        try (Connection connection = open(config)) {
+            refreshNodeDrainStates(connection);
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setInt(1, config.staleClaimSeconds());
+                statement.setInt(2, config.nodeTimeoutSeconds());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    resultSet.next();
+                    return new OperationalHealth(
                         resultSet.getInt("active_transfers"),
                         resultSet.getInt("stale_claimed_transfers"),
                         resultSet.getInt("expired_player_sessions"),
@@ -436,12 +452,14 @@ public final class ClusterDatabase {
                         resultSet.getInt("active_snapshots"),
                         resultSet.getInt("active_failovers"),
                         resultSet.getInt("active_failbacks"),
+                        resultSet.getInt("active_drains"),
                         resultSet.getInt("recent_failed_operations"),
                         resultSet.getInt("stuck_operations"),
                         resultSet.getInt("ready_failovers_with_online_source"),
                         resultSet.getInt("active_operation_leases"),
                         Instant.now()
-                );
+                    );
+                }
             }
         }
     }
@@ -646,6 +664,12 @@ public final class ClusterDatabase {
                     throw new SQLException(
                             "Узел " + nodeId
                                     + " не найден в cluster_nodes"
+                    );
+                }
+
+                if (hasActiveNodeDrain(connection, nodeId)) {
+                    throw new SQLException(
+                            "Узел " + nodeId + " находится в drain-режиме"
                     );
                 }
 
@@ -915,6 +939,12 @@ public final class ClusterDatabase {
                     throw new SQLException(
                             "Узел " + nodeId
                                     + " не найден в cluster_nodes"
+                    );
+                }
+
+                if (hasActiveNodeDrain(connection, nodeId)) {
+                    throw new SQLException(
+                            "Узел " + nodeId + " находится в drain-режиме"
                     );
                 }
 
@@ -1606,6 +1636,12 @@ public final class ClusterDatabase {
                 )) {
                     throw new SQLException(
                             "Целевой узел " + targetNode + " не находится ONLINE"
+                    );
+                }
+
+                if (hasActiveNodeDrain(connection, targetNode)) {
+                    throw new SQLException(
+                            "Целевой узел " + targetNode + " находится в drain-режиме"
                     );
                 }
 
@@ -2927,6 +2963,642 @@ public final class ClusterDatabase {
                 throw exception;
             } finally {
                 restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static NodeDrainPreview previewNodeDrain(
+            ClusterConfig config,
+            String targetNode
+    ) throws SQLException {
+        if (targetNode == null || targetNode.isBlank()) {
+            throw new SQLException("Target node is empty");
+        }
+        if (targetNode.equalsIgnoreCase(config.nodeId())) {
+            throw new SQLException("Нельзя выполнить drain на текущий узел");
+        }
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            refreshNodeDrainStates(connection);
+            if (hasActiveNodeDrain(connection, config.nodeId())) {
+                throw new SQLException("Для source node уже существует активный drain");
+            }
+            boolean targetReady = isNodeOnline(
+                    connection,
+                    targetNode,
+                    config.nodeTimeoutSeconds()
+            ) && !hasActiveNodeDrain(connection, targetNode);
+            int sourcePlayers = readNodePlayerCount(connection, config.nodeId());
+            Map<String, DimensionActivity> activity = loadDimensionActivity(
+                    connection,
+                    config.nodeTimeoutSeconds()
+            );
+            List<NodeDrainPreviewEntry> entries = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT dimension_id, node_id, pinned
+                    FROM dimension_assignments
+                    WHERE node_id = ?
+                    ORDER BY dimension_id
+                    """)) {
+                statement.setString(1, config.nodeId());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        String dimensionId = resultSet.getString("dimension_id");
+                        DimensionAssignmentRow assignment = new DimensionAssignmentRow(
+                                resultSet.getString("node_id"),
+                                resultSet.getBoolean("pinned")
+                        );
+                        String reason = validateNodeDrainCandidate(
+                                connection,
+                                dimensionId,
+                                assignment,
+                                targetReady,
+                                activity
+                        );
+                        entries.add(new NodeDrainPreviewEntry(
+                                dimensionId,
+                                config.nodeId(),
+                                targetNode,
+                                assignment.pinned(),
+                                activity.containsKey(dimensionId)
+                                        ? activity.get(dimensionId).playerCount()
+                                        : 0,
+                                activity.containsKey(dimensionId)
+                                        ? activity.get(dimensionId).nodeIds()
+                                        : List.of(),
+                                reason == null,
+                                reason
+                        ));
+                    }
+                }
+            }
+            return new NodeDrainPreview(
+                    config.nodeId(),
+                    targetNode,
+                    sourcePlayers,
+                    targetReady,
+                    List.copyOf(entries),
+                    Instant.now()
+            );
+        }
+    }
+
+    public static NodeDrainPreparationResult prepareNodeDrain(
+            ClusterConfig config,
+            String targetNode,
+            Set<String> locallyAvailableDimensions
+    ) throws SQLException {
+        if (targetNode == null || targetNode.isBlank()) {
+            throw new SQLException("Target node is empty");
+        }
+        if (targetNode.equalsIgnoreCase(config.nodeId())) {
+            throw new SQLException("Нельзя выполнить drain на текущий узел");
+        }
+        Set<String> availableDimensions = locallyAvailableDimensions == null
+                ? Set.of()
+                : Set.copyOf(locallyAvailableDimensions);
+        if (availableDimensions.isEmpty()) {
+            throw new SQLException("Нет локально загруженных измерений для drain");
+        }
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                refreshNodeDrainStates(connection);
+                lockClusterNodes(connection);
+                lockDimensionAssignments(connection);
+                lockDimensionActivity(connection);
+                if (readNodePlayerCount(connection, config.nodeId()) > 0) {
+                    throw new SQLException("На source node ещё находятся игроки");
+                }
+                if (hasActiveNodeDrain(connection, config.nodeId())) {
+                    throw new SQLException("Для source node уже существует активный drain");
+                }
+                boolean targetReady = isNodeOnline(
+                        connection,
+                        targetNode,
+                        config.nodeTimeoutSeconds()
+                ) && !hasActiveNodeDrain(connection, targetNode);
+                if (!targetReady) {
+                    throw new SQLException("Target node OFFLINE или находится в drain-режиме: " + targetNode);
+                }
+                Map<String, DimensionActivity> activity = loadDimensionActivity(
+                        connection,
+                        config.nodeTimeoutSeconds()
+                );
+                List<String> candidates = new ArrayList<>();
+                int skipped = 0;
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        SELECT dimension_id, node_id, pinned
+                        FROM dimension_assignments
+                        WHERE node_id = ?
+                        ORDER BY dimension_id
+                        FOR UPDATE
+                        """)) {
+                    statement.setString(1, config.nodeId());
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        while (resultSet.next()) {
+                            String dimensionId = resultSet.getString("dimension_id");
+                            if (!availableDimensions.contains(dimensionId)) {
+                                skipped++;
+                                continue;
+                            }
+                            DimensionAssignmentRow assignment = new DimensionAssignmentRow(
+                                    resultSet.getString("node_id"),
+                                    resultSet.getBoolean("pinned")
+                            );
+                            String reason = validateNodeDrainCandidate(
+                                    connection,
+                                    dimensionId,
+                                    assignment,
+                                    true,
+                                    activity
+                            );
+                            if (reason == null) {
+                                candidates.add(dimensionId);
+                            } else {
+                                skipped++;
+                            }
+                        }
+                    }
+                }
+                if (candidates.isEmpty()) {
+                    throw new SQLException("Нет доступных измерений для drain");
+                }
+                String drainId = UUID.randomUUID().toString();
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        INSERT INTO cluster_node_drains (
+                            drain_id, source_node, target_node, status,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, 'PREPARING', CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
+                        """)) {
+                    statement.setString(1, drainId);
+                    statement.setString(2, config.nodeId());
+                    statement.setString(3, targetNode);
+                    statement.executeUpdate();
+                }
+                List<DimensionDrainItem> items = new ArrayList<>();
+                for (String dimensionId : candidates) {
+                    String migrationId = UUID.randomUUID().toString();
+                    String itemId = UUID.randomUUID().toString();
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            INSERT INTO cluster_dimension_migrations (
+                                migration_id, dimension_id, source_node, target_node,
+                                status, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, 'PREPARING', CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
+                            """)) {
+                        statement.setString(1, migrationId);
+                        statement.setString(2, dimensionId);
+                        statement.setString(3, config.nodeId());
+                        statement.setString(4, targetNode);
+                        statement.executeUpdate();
+                    }
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            INSERT INTO cluster_node_drain_items (
+                                drain_item_id, drain_id, migration_id, dimension_id,
+                                source_node, target_node, status,
+                                created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, 'PREPARING', CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
+                            """)) {
+                        statement.setString(1, itemId);
+                        statement.setString(2, drainId);
+                        statement.setString(3, migrationId);
+                        statement.setString(4, dimensionId);
+                        statement.setString(5, config.nodeId());
+                        statement.setString(6, targetNode);
+                        statement.executeUpdate();
+                    }
+                    Instant now = Instant.now();
+                    items.add(new DimensionDrainItem(
+                            itemId,
+                            drainId,
+                            migrationId,
+                            dimensionId,
+                            config.nodeId(),
+                            targetNode,
+                            "PREPARING",
+                            null,
+                            now,
+                            now,
+                            null
+                    ));
+                }
+                connection.commit();
+                Instant now = Instant.now();
+                NodeDrain drain = new NodeDrain(
+                        drainId,
+                        config.nodeId(),
+                        targetNode,
+                        "PREPARING",
+                        null,
+                        items.size(),
+                        items.size(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        now,
+                        now,
+                        null
+                );
+                return new NodeDrainPreparationResult(
+                        drain,
+                        List.copyOf(items),
+                        skipped
+                );
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionDrainItem markNodeDrainItemReady(
+            ClusterConfig config,
+            String drainItemId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_node_drain_items
+                     SET status = 'READY', error_text = NULL,
+                         updated_at = CURRENT_TIMESTAMP(3)
+                     WHERE drain_item_id = ?
+                       AND source_node = ?
+                       AND status = 'PREPARING'
+                     """)) {
+            statement.setString(1, drainItemId);
+            statement.setString(2, config.nodeId());
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("Drain item уже не PREPARING: " + drainItemId);
+            }
+        }
+        return findDimensionDrainItem(config, drainItemId);
+    }
+
+    public static void skipNodeDrainItem(
+            ClusterConfig config,
+            String drainItemId,
+            String reason
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                DimensionDrainItem item = findDimensionDrainItem(
+                        connection,
+                        drainItemId,
+                        true
+                );
+                if (item == null) {
+                    throw new SQLException("Drain item не найден: " + drainItemId);
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_node_drain_items
+                        SET status = 'CANCELLED', error_text = ?,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE drain_item_id = ?
+                          AND status IN ('PREPARING', 'READY')
+                        """)) {
+                    statement.setString(1, truncate(reason, 8000));
+                    statement.setString(2, drainItemId);
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations
+                        SET status = 'CANCELLED', error_text = ?,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ?
+                          AND status IN ('PREPARING', 'READY')
+                        """)) {
+                    statement.setString(1, truncate(reason, 8000));
+                    statement.setString(2, item.migrationId());
+                    statement.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static void failNodeDrainItem(
+            ClusterConfig config,
+            String drainItemId,
+            String errorText
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                DimensionDrainItem item = findDimensionDrainItem(
+                        connection,
+                        drainItemId,
+                        true
+                );
+                if (item == null) {
+                    throw new SQLException("Drain item не найден: " + drainItemId);
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_node_drain_items
+                        SET status = 'FAILED', error_text = ?,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE drain_item_id = ?
+                          AND status IN ('PREPARING', 'READY', 'APPLYING')
+                        """)) {
+                    statement.setString(1, truncate(errorText, 8000));
+                    statement.setString(2, drainItemId);
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations
+                        SET status = 'FAILED', error_text = ?,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ?
+                          AND status IN ('PREPARING', 'READY', 'APPLYING')
+                        """)) {
+                    statement.setString(1, truncate(errorText, 8000));
+                    statement.setString(2, item.migrationId());
+                    statement.executeUpdate();
+                }
+                refreshNodeDrainStates(connection);
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static NodeDrain findNodeDrain(
+            ClusterConfig config,
+            String drainId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            refreshNodeDrainStates(connection);
+            return findNodeDrain(connection, drainId);
+        }
+    }
+
+    public static DimensionDrainItem findDimensionDrainItem(
+            ClusterConfig config,
+            String drainItemId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            refreshNodeDrainStates(connection);
+            return findDimensionDrainItem(connection, drainItemId, false);
+        }
+    }
+
+    public static List<NodeDrain> listNodeDrains(
+            ClusterConfig config,
+            int limit
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeLimit = Math.max(1, Math.min(limit, 100));
+        try (Connection connection = open(config)) {
+            refreshNodeDrainStates(connection);
+            try (PreparedStatement statement = connection.prepareStatement(nodeDrainSelectSql() + """
+                    ORDER BY drains.created_at DESC
+                    LIMIT ?
+                    """)) {
+                statement.setInt(1, safeLimit);
+                List<NodeDrain> drains = new ArrayList<>();
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        drains.add(readNodeDrain(resultSet));
+                    }
+                }
+                return List.copyOf(drains);
+            }
+        }
+    }
+
+    public static List<DimensionDrainItem> listNodeDrainItems(
+            ClusterConfig config,
+            String drainId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            refreshNodeDrainStates(connection);
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT drain_item_id, drain_id, migration_id, dimension_id,
+                           source_node, target_node, status, error_text,
+                           created_at, updated_at, applied_at
+                    FROM cluster_node_drain_items
+                    WHERE drain_id = ?
+                    ORDER BY dimension_id
+                    """)) {
+                statement.setString(1, drainId);
+                List<DimensionDrainItem> items = new ArrayList<>();
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        items.add(readDimensionDrainItem(resultSet));
+                    }
+                }
+                return List.copyOf(items);
+            }
+        }
+    }
+
+    public static NodeDrainCancellationResult cancelNodeDrain(
+            ClusterConfig config,
+            String drainId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                refreshNodeDrainStates(connection);
+                NodeDrain drain = findNodeDrain(connection, drainId);
+                if (drain == null) {
+                    throw new SQLException("Drain не найден: " + drainId);
+                }
+                if (!drain.sourceNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException("Drain можно отменить только на source node " + drain.sourceNode());
+                }
+                if (!drain.status().equals("PREPARING")
+                        && !drain.status().equals("READY")
+                        && !drain.status().equals("FAILED")) {
+                    throw new SQLException("Drain со status=" + drain.status() + " нельзя отменить");
+                }
+                List<DimensionMigration> migrations = new ArrayList<>();
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        SELECT migration_id
+                        FROM cluster_node_drain_items
+                        WHERE drain_id = ?
+                        ORDER BY dimension_id
+                        FOR UPDATE
+                        """)) {
+                    statement.setString(1, drainId);
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        while (resultSet.next()) {
+                            DimensionMigration migration = findDimensionMigration(
+                                    connection,
+                                    resultSet.getString("migration_id"),
+                                    true
+                            );
+                            if (migration != null) {
+                                if (!migration.status().equals("PREPARING")
+                                        && !migration.status().equals("READY")
+                                        && !migration.status().equals("FAILED")
+                                        && !migration.status().equals("CANCELLED")) {
+                                    throw new SQLException(
+                                            "Target уже начал или завершил применение migration "
+                                                    + migration.migrationId()
+                                    );
+                                }
+                                migrations.add(migration);
+                            }
+                        }
+                    }
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations AS migrations
+                        JOIN cluster_node_drain_items AS items
+                          ON items.migration_id = migrations.migration_id
+                        SET migrations.status = 'CANCELLED',
+                            migrations.updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE items.drain_id = ?
+                          AND migrations.status IN ('PREPARING', 'READY', 'FAILED')
+                        """)) {
+                    statement.setString(1, drainId);
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_node_drain_items
+                        SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE drain_id = ?
+                          AND status IN ('PREPARING', 'READY', 'FAILED')
+                        """)) {
+                    statement.setString(1, drainId);
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_node_drains
+                        SET status = 'CANCELLED', error_text = NULL,
+                            updated_at = CURRENT_TIMESTAMP(3),
+                            completed_at = CURRENT_TIMESTAMP(3)
+                        WHERE drain_id = ?
+                        """)) {
+                    statement.setString(1, drainId);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                return new NodeDrainCancellationResult(
+                        findNodeDrain(config, drainId),
+                        List.copyOf(migrations)
+                );
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static NodeDrain resumeNodeDrain(
+            ClusterConfig config,
+            String drainId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                refreshNodeDrainStates(connection);
+                NodeDrain drain = findNodeDrain(connection, drainId);
+                if (drain == null) {
+                    throw new SQLException("Drain не найден: " + drainId);
+                }
+                if (!drain.sourceNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException("Drain можно завершить только на source node " + drain.sourceNode());
+                }
+                if (!drain.status().equals("DRAINED")
+                        && !drain.status().equals("PARTIAL")
+                        && !drain.status().equals("FAILED")) {
+                    throw new SQLException("Drain со status=" + drain.status() + " нельзя перевести в RESUMED");
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_node_drains
+                        SET status = 'RESUMED', error_text = NULL,
+                            updated_at = CURRENT_TIMESTAMP(3),
+                            completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP(3))
+                        WHERE drain_id = ?
+                        """)) {
+                    statement.setString(1, drainId);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                return findNodeDrain(config, drainId);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static NodeDrainReadiness readNodeDrainReadiness(
+            ClusterConfig config,
+            String nodeId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            refreshNodeDrainStates(connection);
+            int playerCount = readNodePlayerCount(connection, nodeId);
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT
+                        COUNT(*) AS assignment_count,
+                        SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END) AS pinned_count,
+                        SUM(CASE WHEN dimension_id = 'minecraft:overworld' THEN 1 ELSE 0 END) AS unsupported_count,
+                        SUM(CASE WHEN pinned = 0 AND dimension_id <> 'minecraft:overworld' THEN 1 ELSE 0 END) AS migratable_count
+                    FROM dimension_assignments
+                    WHERE node_id = ?
+                    """)) {
+                statement.setString(1, nodeId);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    resultSet.next();
+                    int assignments = resultSet.getInt("assignment_count");
+                    int pinned = resultSet.getInt("pinned_count");
+                    int unsupported = resultSet.getInt("unsupported_count");
+                    int migratable = resultSet.getInt("migratable_count");
+                    int activeDrains;
+                    try (PreparedStatement drainStatement = connection.prepareStatement("""
+                            SELECT COUNT(*)
+                            FROM cluster_node_drains
+                            WHERE source_node = ?
+                              AND status IN ('PREPARING', 'READY', 'APPLYING', 'DRAINED', 'PARTIAL', 'FAILED')
+                            """)) {
+                        drainStatement.setString(1, nodeId);
+                        try (ResultSet drainResult = drainStatement.executeQuery()) {
+                            drainResult.next();
+                            activeDrains = drainResult.getInt(1);
+                        }
+                    }
+                    return new NodeDrainReadiness(
+                            nodeId,
+                            playerCount,
+                            assignments,
+                            pinned,
+                            unsupported,
+                            migratable,
+                            activeDrains,
+                            playerCount == 0 && assignments == 0,
+                            Instant.now()
+                    );
+                }
             }
         }
     }
@@ -5143,6 +5815,324 @@ public final class ClusterDatabase {
         return null;
     }
 
+    private static String validateNodeDrainCandidate(
+            Connection connection,
+            String dimensionId,
+            DimensionAssignmentRow assignment,
+            boolean targetReady,
+            Map<String, DimensionActivity> activity
+    ) throws SQLException {
+        if (!targetReady) {
+            return "target node OFFLINE или находится в drain-режиме";
+        }
+        if ("minecraft:overworld".equals(dimensionId)) {
+            return "minecraft:overworld не поддерживается файловой migration";
+        }
+        if (assignment.pinned()) {
+            return "измерение PINNED";
+        }
+        DimensionActivity currentActivity = activity.get(dimensionId);
+        if (currentActivity != null && currentActivity.playerCount() > 0) {
+            return "в dimension находятся игроки на узлах " + currentActivity.nodeIds();
+        }
+        if (hasActiveDimensionMigration(connection, dimensionId)) {
+            return "активна migration";
+        }
+        if (hasActiveDimensionFailover(connection, dimensionId)) {
+            return "активен failover";
+        }
+        if (hasPreparingDimensionSnapshot(connection, dimensionId)) {
+            return "создаётся snapshot";
+        }
+        return null;
+    }
+
+    private static boolean hasPreparingDimensionSnapshot(
+            Connection connection,
+            String dimensionId
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT 1
+                FROM cluster_dimension_snapshots
+                WHERE dimension_id = ?
+                  AND status = 'PREPARING'
+                LIMIT 1
+                """)) {
+            statement.setString(1, dimensionId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+        }
+    }
+
+    private static int readNodePlayerCount(
+            Connection connection,
+            String nodeId
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT player_count
+                FROM cluster_nodes
+                WHERE node_id = ?
+                """)) {
+            statement.setString(1, nodeId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? resultSet.getInt("player_count") : 0;
+            }
+        }
+    }
+
+    private static boolean hasActiveNodeDrain(
+            Connection connection,
+            String nodeId
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT 1
+                FROM cluster_node_drains
+                WHERE source_node = ?
+                  AND status IN ('PREPARING', 'READY', 'APPLYING', 'DRAINED', 'PARTIAL', 'FAILED')
+                LIMIT 1
+                """)) {
+            statement.setString(1, nodeId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+        }
+    }
+
+    private static void refreshNodeDrainStates(
+            Connection connection
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE cluster_dimension_migrations AS migrations
+                JOIN cluster_node_drain_items AS items
+                  ON items.migration_id = migrations.migration_id
+                SET migrations.status = 'CANCELLED',
+                    migrations.error_text = 'Пропущено: измерение не загружено',
+                    migrations.updated_at = CURRENT_TIMESTAMP(3),
+                    items.status = 'CANCELLED',
+                    items.error_text = 'Пропущено: измерение не загружено',
+                    items.updated_at = CURRENT_TIMESTAMP(3)
+                WHERE migrations.status = 'FAILED'
+                  AND items.status = 'FAILED'
+                  AND migrations.archive_name IS NULL
+                  AND migrations.archive_size = 0
+                  AND TRIM(COALESCE(migrations.error_text, '')) = 'Измерение не загружено'
+                  AND TRIM(COALESCE(items.error_text, '')) = 'Измерение не загружено'
+                """)) {
+            statement.executeUpdate();
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE cluster_dimension_migrations AS migrations
+                JOIN cluster_node_drain_items AS items
+                  ON items.migration_id = migrations.migration_id
+                JOIN dimension_assignments AS assignments
+                  ON assignments.dimension_id = migrations.dimension_id
+                 AND assignments.node_id = migrations.target_node
+                SET migrations.status = 'COMPLETED',
+                    migrations.error_text = NULL,
+                    migrations.updated_at = CURRENT_TIMESTAMP(3)
+                WHERE migrations.status = 'APPLIED'
+                """)) {
+            statement.executeUpdate();
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE cluster_node_drain_items AS items
+                JOIN cluster_dimension_migrations AS migrations
+                  ON migrations.migration_id = items.migration_id
+                SET items.status = CASE
+                        WHEN migrations.status IN ('APPLIED', 'COMPLETED', 'VERIFIED', 'FINALIZE_READY', 'FINALIZED') THEN 'APPLIED'
+                        WHEN migrations.status = 'CANCELLED' THEN 'CANCELLED'
+                        WHEN migrations.status = 'FAILED' THEN 'FAILED'
+                        ELSE migrations.status
+                    END,
+                    items.error_text = migrations.error_text,
+                    items.applied_at = CASE
+                        WHEN migrations.status IN ('APPLIED', 'COMPLETED', 'VERIFIED', 'FINALIZE_READY', 'FINALIZED')
+                        THEN COALESCE(items.applied_at, migrations.applied_at, CURRENT_TIMESTAMP(3))
+                        ELSE items.applied_at
+                    END,
+                    items.updated_at = CURRENT_TIMESTAMP(3)
+                WHERE items.status <> CASE
+                        WHEN migrations.status IN ('APPLIED', 'COMPLETED', 'VERIFIED', 'FINALIZE_READY', 'FINALIZED') THEN 'APPLIED'
+                        WHEN migrations.status = 'CANCELLED' THEN 'CANCELLED'
+                        WHEN migrations.status = 'FAILED' THEN 'FAILED'
+                        ELSE migrations.status
+                    END
+                   OR NOT (items.error_text <=> migrations.error_text)
+                """)) {
+            statement.executeUpdate();
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                UPDATE cluster_node_drains AS drains
+                JOIN (
+                    SELECT
+                        drain_id,
+                        COUNT(*) AS total_count,
+                        SUM(CASE WHEN status = 'PREPARING' THEN 1 ELSE 0 END) AS preparing_count,
+                        SUM(CASE WHEN status = 'READY' THEN 1 ELSE 0 END) AS ready_count,
+                        SUM(CASE WHEN status = 'APPLYING' THEN 1 ELSE 0 END) AS applying_count,
+                        SUM(CASE WHEN status = 'APPLIED' THEN 1 ELSE 0 END) AS applied_count,
+                        SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed_count,
+                        SUM(CASE WHEN status = 'CANCELLED' THEN 1 ELSE 0 END) AS cancelled_count
+                    FROM cluster_node_drain_items
+                    GROUP BY drain_id
+                ) AS stats ON stats.drain_id = drains.drain_id
+                SET drains.status = CASE
+                        WHEN drains.status IN ('CANCELLED', 'RESUMED') THEN drains.status
+                        WHEN stats.applied_count = stats.total_count THEN 'DRAINED'
+                        WHEN stats.applying_count > 0 THEN 'APPLYING'
+                        WHEN stats.ready_count > 0 THEN 'READY'
+                        WHEN stats.preparing_count > 0 THEN 'PREPARING'
+                        WHEN stats.applied_count > 0
+                         AND stats.applied_count + stats.failed_count + stats.cancelled_count = stats.total_count
+                        THEN 'PARTIAL'
+                        WHEN stats.failed_count > 0
+                         AND stats.failed_count + stats.cancelled_count = stats.total_count
+                        THEN 'FAILED'
+                        ELSE drains.status
+                    END,
+                    drains.completed_at = CASE
+                        WHEN stats.applied_count = stats.total_count
+                          OR stats.applied_count + stats.failed_count + stats.cancelled_count = stats.total_count
+                        THEN COALESCE(drains.completed_at, CURRENT_TIMESTAMP(3))
+                        ELSE drains.completed_at
+                    END,
+                    drains.updated_at = CURRENT_TIMESTAMP(3)
+                WHERE drains.status NOT IN ('CANCELLED', 'RESUMED')
+                  AND (
+                      drains.status <> CASE
+                          WHEN stats.applied_count = stats.total_count THEN 'DRAINED'
+                          WHEN stats.applying_count > 0 THEN 'APPLYING'
+                          WHEN stats.ready_count > 0 THEN 'READY'
+                          WHEN stats.preparing_count > 0 THEN 'PREPARING'
+                          WHEN stats.applied_count > 0
+                           AND stats.applied_count + stats.failed_count + stats.cancelled_count = stats.total_count
+                          THEN 'PARTIAL'
+                          WHEN stats.failed_count > 0
+                           AND stats.failed_count + stats.cancelled_count = stats.total_count
+                          THEN 'FAILED'
+                          ELSE drains.status
+                      END
+                      OR (
+                          drains.completed_at IS NULL
+                          AND (
+                              stats.applied_count = stats.total_count
+                              OR stats.applied_count + stats.failed_count + stats.cancelled_count = stats.total_count
+                          )
+                      )
+                  )
+                """)) {
+            statement.executeUpdate();
+        }
+    }
+
+    private static String nodeDrainSelectSql() {
+        return """
+                SELECT
+                    drains.drain_id,
+                    drains.source_node,
+                    drains.target_node,
+                    drains.status,
+                    drains.error_text,
+                    drains.created_at,
+                    drains.updated_at,
+                    drains.completed_at,
+                    COUNT(items.drain_item_id) AS total_items,
+                    SUM(CASE WHEN items.status = 'PREPARING' THEN 1 ELSE 0 END) AS preparing_items,
+                    SUM(CASE WHEN items.status = 'READY' THEN 1 ELSE 0 END) AS ready_items,
+                    SUM(CASE WHEN items.status = 'APPLYING' THEN 1 ELSE 0 END) AS applying_items,
+                    SUM(CASE WHEN items.status = 'APPLIED' THEN 1 ELSE 0 END) AS applied_items,
+                    SUM(CASE WHEN items.status = 'FAILED' THEN 1 ELSE 0 END) AS failed_items,
+                    SUM(CASE WHEN items.status = 'CANCELLED' THEN 1 ELSE 0 END) AS cancelled_items
+                FROM cluster_node_drains AS drains
+                LEFT JOIN cluster_node_drain_items AS items
+                  ON items.drain_id = drains.drain_id
+                GROUP BY
+                    drains.drain_id,
+                    drains.source_node,
+                    drains.target_node,
+                    drains.status,
+                    drains.error_text,
+                    drains.created_at,
+                    drains.updated_at,
+                    drains.completed_at
+                """;
+    }
+
+    private static NodeDrain findNodeDrain(
+            Connection connection,
+            String drainId
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                nodeDrainSelectSql() + " HAVING drains.drain_id = ?"
+        )) {
+            statement.setString(1, drainId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readNodeDrain(resultSet) : null;
+            }
+        }
+    }
+
+    private static NodeDrain readNodeDrain(
+            ResultSet resultSet
+    ) throws SQLException {
+        return new NodeDrain(
+                resultSet.getString("drain_id"),
+                resultSet.getString("source_node"),
+                resultSet.getString("target_node"),
+                resultSet.getString("status"),
+                resultSet.getString("error_text"),
+                resultSet.getInt("total_items"),
+                resultSet.getInt("preparing_items"),
+                resultSet.getInt("ready_items"),
+                resultSet.getInt("applying_items"),
+                resultSet.getInt("applied_items"),
+                resultSet.getInt("failed_items"),
+                resultSet.getInt("cancelled_items"),
+                instantOrNull(resultSet, "created_at"),
+                instantOrNull(resultSet, "updated_at"),
+                instantOrNull(resultSet, "completed_at")
+        );
+    }
+
+    private static DimensionDrainItem findDimensionDrainItem(
+            Connection connection,
+            String drainItemId,
+            boolean forUpdate
+    ) throws SQLException {
+        String sql = """
+                SELECT drain_item_id, drain_id, migration_id, dimension_id,
+                       source_node, target_node, status, error_text,
+                       created_at, updated_at, applied_at
+                FROM cluster_node_drain_items
+                WHERE drain_item_id = ?
+                """ + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, drainItemId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readDimensionDrainItem(resultSet) : null;
+            }
+        }
+    }
+
+    private static DimensionDrainItem readDimensionDrainItem(
+            ResultSet resultSet
+    ) throws SQLException {
+        return new DimensionDrainItem(
+                resultSet.getString("drain_item_id"),
+                resultSet.getString("drain_id"),
+                resultSet.getString("migration_id"),
+                resultSet.getString("dimension_id"),
+                resultSet.getString("source_node"),
+                resultSet.getString("target_node"),
+                resultSet.getString("status"),
+                resultSet.getString("error_text"),
+                instantOrNull(resultSet, "created_at"),
+                instantOrNull(resultSet, "updated_at"),
+                instantOrNull(resultSet, "applied_at")
+        );
+    }
+
     private static void refreshDimensionFailbackStates(
             Connection connection
     ) throws SQLException {
@@ -5574,6 +6564,47 @@ public final class ClusterDatabase {
                     INDEX idx_dimension_failback_source (source_node, status),
                     INDEX idx_dimension_failback_target (target_node, status),
                     INDEX idx_dimension_failback_dimension (dimension_id, status)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_node_drains (
+                    drain_id CHAR(36) NOT NULL PRIMARY KEY,
+                    source_node VARCHAR(64) NOT NULL,
+                    target_node VARCHAR(64) NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    error_text TEXT NULL,
+                    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    completed_at TIMESTAMP(3) NULL,
+
+                    INDEX idx_node_drain_source (source_node, status),
+                    INDEX idx_node_drain_target (target_node, status)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_node_drain_items (
+                    drain_item_id CHAR(36) NOT NULL PRIMARY KEY,
+                    drain_id CHAR(36) NOT NULL,
+                    migration_id CHAR(36) NOT NULL UNIQUE,
+                    dimension_id VARCHAR(255) NOT NULL,
+                    source_node VARCHAR(64) NOT NULL,
+                    target_node VARCHAR(64) NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    error_text TEXT NULL,
+                    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    applied_at TIMESTAMP(3) NULL,
+
+                    INDEX idx_node_drain_item_drain (drain_id, status),
+                    INDEX idx_node_drain_item_dimension (dimension_id, status),
+                    INDEX idx_node_drain_item_source (source_node, status),
+                    INDEX idx_node_drain_item_target (target_node, status)
                 )
                 ENGINE=InnoDB
                 DEFAULT CHARSET=utf8mb4
@@ -6126,6 +7157,12 @@ public final class ClusterDatabase {
                 -?,
                 CURRENT_TIMESTAMP(3)
             )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM cluster_node_drains AS drains
+                  WHERE drains.source_node = nodes.node_id
+                    AND drains.status IN ('PREPARING', 'READY', 'APPLYING', 'DRAINED', 'PARTIAL', 'FAILED')
+              )
             GROUP BY
                 nodes.node_id,
                 nodes.player_count
@@ -6277,6 +7314,12 @@ public final class ClusterDatabase {
                         SECOND,
                         -?,
                         CURRENT_TIMESTAMP(3)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM cluster_node_drains AS drains
+                      WHERE drains.source_node = cluster_nodes.node_id
+                        AND drains.status IN ('PREPARING', 'READY', 'APPLYING', 'DRAINED', 'PARTIAL', 'FAILED')
                   )
                 ORDER BY node_id
                 """;
@@ -6844,6 +7887,88 @@ public final class ClusterDatabase {
     ) {
     }
 
+    public record NodeDrainPreviewEntry(
+            String dimensionId,
+            String sourceNode,
+            String targetNode,
+            boolean pinned,
+            int activePlayers,
+            List<String> activeNodes,
+            boolean executable,
+            String reason
+    ) {
+    }
+
+    public record NodeDrainPreview(
+            String sourceNode,
+            String targetNode,
+            int sourcePlayers,
+            boolean targetReady,
+            List<NodeDrainPreviewEntry> entries,
+            Instant createdAt
+    ) {
+    }
+
+    public record DimensionDrainItem(
+            String drainItemId,
+            String drainId,
+            String migrationId,
+            String dimensionId,
+            String sourceNode,
+            String targetNode,
+            String status,
+            String errorText,
+            Instant createdAt,
+            Instant updatedAt,
+            Instant appliedAt
+    ) {
+    }
+
+    public record NodeDrain(
+            String drainId,
+            String sourceNode,
+            String targetNode,
+            String status,
+            String errorText,
+            int totalItems,
+            int preparingItems,
+            int readyItems,
+            int applyingItems,
+            int appliedItems,
+            int failedItems,
+            int cancelledItems,
+            Instant createdAt,
+            Instant updatedAt,
+            Instant completedAt
+    ) {
+    }
+
+    public record NodeDrainPreparationResult(
+            NodeDrain drain,
+            List<DimensionDrainItem> items,
+            int skipped
+    ) {
+    }
+
+    public record NodeDrainCancellationResult(
+            NodeDrain drain,
+            List<DimensionMigration> migrations
+    ) {
+    }
+
+    public record NodeDrainReadiness(
+            String nodeId,
+            int playerCount,
+            int assignmentCount,
+            int pinnedCount,
+            int unsupportedCount,
+            int migratableCount,
+            int activeDrainCount,
+            boolean safeToStop,
+            Instant checkedAt
+    ) {
+    }
+
     public record DimensionSnapshotCoverage(
             String dimensionId,
             String ownerNode,
@@ -6859,6 +7984,7 @@ public final class ClusterDatabase {
             int activeSnapshots,
             int activeFailovers,
             int activeFailbacks,
+            int activeDrains,
             int recentFailedOperations,
             int stuckOperations,
             int readyFailoversWithOnlineSource,

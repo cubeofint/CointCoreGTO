@@ -2062,7 +2062,7 @@ public class CointCoreGTO {
     }
 
     private static boolean blockCapsMessage(ServerPlayer player, String message) {
-        if (!shouldBlockCaps(message)) {
+        if (!shouldBlockCaps(player, message)) {
             return false;
         }
 
@@ -2073,7 +2073,7 @@ public class CointCoreGTO {
         return true;
     }
 
-    private static boolean shouldBlockCaps(String message) {
+    private static boolean shouldBlockCaps(ServerPlayer player, String message) {
         if (!CAPS_FILTER_ENABLED.get() || message == null || message.isBlank()) {
             return false;
         }
@@ -2083,8 +2083,39 @@ public class CointCoreGTO {
 
         for (int offset = 0; offset < message.length(); ) {
             int codePoint = message.codePointAt(offset);
-            offset += Character.charCount(codePoint);
 
+            if (isMinecraftPlayerNameCharacter(codePoint)) {
+                int tokenEnd = offset + Character.charCount(codePoint);
+                while (tokenEnd < message.length()) {
+                    int tokenCodePoint = message.codePointAt(tokenEnd);
+                    if (!isMinecraftPlayerNameCharacter(tokenCodePoint)) {
+                        break;
+                    }
+                    tokenEnd += Character.charCount(tokenCodePoint);
+                }
+
+                String token = message.substring(offset, tokenEnd);
+                if (!isOnlinePlayerName(player, token)) {
+                    for (int tokenOffset = 0; tokenOffset < token.length(); ) {
+                        int tokenCodePoint = token.codePointAt(tokenOffset);
+                        tokenOffset += Character.charCount(tokenCodePoint);
+
+                        if (!Character.isLetter(tokenCodePoint)) {
+                            continue;
+                        }
+
+                        letters++;
+                        if (Character.isUpperCase(tokenCodePoint)) {
+                            uppercase++;
+                        }
+                    }
+                }
+
+                offset = tokenEnd;
+                continue;
+            }
+
+            offset += Character.charCount(codePoint);
             if (!Character.isLetter(codePoint)) {
                 continue;
             }
@@ -2101,6 +2132,33 @@ public class CointCoreGTO {
 
         double uppercasePercent = uppercase * 100.0D / letters;
         return uppercasePercent >= CAPS_FILTER_PERCENT.get();
+    }
+
+    private static boolean isMinecraftPlayerNameCharacter(int codePoint) {
+        return codePoint == '_'
+                || codePoint >= '0' && codePoint <= '9'
+                || codePoint >= 'A' && codePoint <= 'Z'
+                || codePoint >= 'a' && codePoint <= 'z';
+    }
+
+    private static boolean isOnlinePlayerName(ServerPlayer player, String token) {
+        if (player == null || token == null || token.length() < 3 || token.length() > 16) {
+            return false;
+        }
+
+        String senderName = player.getGameProfile().getName();
+        if (senderName != null && senderName.equalsIgnoreCase(token)) {
+            return true;
+        }
+
+        for (ServerPlayer onlinePlayer : player.server.getPlayerList().getPlayers()) {
+            String onlineName = onlinePlayer.getGameProfile().getName();
+            if (onlineName != null && onlineName.equalsIgnoreCase(token)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void setChatView(ServerPlayer player, ChatView view) {

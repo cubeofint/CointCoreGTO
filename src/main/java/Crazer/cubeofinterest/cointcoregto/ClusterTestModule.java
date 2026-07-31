@@ -64,6 +64,8 @@ public final class ClusterTestModule {
             new AtomicBoolean();
     private static final AtomicBoolean FAILBACK_OPERATION_IN_FLIGHT =
             new AtomicBoolean();
+    private static final AtomicBoolean DRAIN_OPERATION_IN_FLIGHT =
+            new AtomicBoolean();
 
     private static volatile Map<String, String>
             DIMENSION_OWNER_CACHE = Map.of();
@@ -643,6 +645,8 @@ public final class ClusterTestModule {
         DIMENSION_TICK_SUPPRESSION_LOGGED.clear();
         DIMENSION_TICK_GUARD_ACTIVE.set(false);
         SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+        FAILBACK_OPERATION_IN_FLIGHT.set(false);
+        DRAIN_OPERATION_IN_FLIGHT.set(false);
         nextAutomaticSnapshotAtMillis = 0L;
         lastAutomaticSnapshotSummary = null;
         ClusterTransferGuard.clearAll();
@@ -724,6 +728,148 @@ public final class ClusterTestModule {
                                                 showNodes(
                                                         context.getSource()
                                                 )
+                                        )
+                        )
+
+                        .then(
+                                Commands.literal("drain")
+                                        .then(
+                                                Commands.literal("preview")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "targetNode",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                previewNodeDrain(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "targetNode"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("evacuate")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "targetNode",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .then(
+                                                                                Commands.argument(
+                                                                                                "dimension",
+                                                                                                ResourceLocationArgument.id()
+                                                                                        )
+                                                                                        .then(
+                                                                                                Commands.argument(
+                                                                                                                "x",
+                                                                                                                DoubleArgumentType.doubleArg()
+                                                                                                        )
+                                                                                                        .then(
+                                                                                                                Commands.argument(
+                                                                                                                                "y",
+                                                                                                                                DoubleArgumentType.doubleArg()
+                                                                                                                        )
+                                                                                                                        .then(
+                                                                                                                                Commands.argument(
+                                                                                                                                                "z",
+                                                                                                                                                DoubleArgumentType.doubleArg()
+                                                                                                                                        )
+                                                                                                                                        .executes(context ->
+                                                                                                                                                evacuateNodeDrainPlayers(
+                                                                                                                                                        context.getSource(),
+                                                                                                                                                        StringArgumentType.getString(
+                                                                                                                                                                context,
+                                                                                                                                                                "targetNode"
+                                                                                                                                                        ),
+                                                                                                                                                        ResourceLocationArgument.getId(
+                                                                                                                                                                context,
+                                                                                                                                                                "dimension"
+                                                                                                                                                        ).toString(),
+                                                                                                                                                        DoubleArgumentType.getDouble(
+                                                                                                                                                                context,
+                                                                                                                                                                "x"
+                                                                                                                                                        ),
+                                                                                                                                                        DoubleArgumentType.getDouble(
+                                                                                                                                                                context,
+                                                                                                                                                                "y"
+                                                                                                                                                        ),
+                                                                                                                                                        DoubleArgumentType.getDouble(
+                                                                                                                                                                context,
+                                                                                                                                                                "z"
+                                                                                                                                                        )
+                                                                                                                                                )
+                                                                                                                                        )
+                                                                                                                        )
+                                                                                                        )
+                                                                                        )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("start")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "targetNode",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                prepareNodeDrain(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "targetNode"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(context ->
+                                                                showNodeDrains(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("cancel")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "drainId",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                cancelNodeDrain(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "drainId"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("resume")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "drainId",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                resumeNodeDrain(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "drainId"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
                                         )
                         )
 
@@ -5823,6 +5969,650 @@ public final class ClusterTestModule {
         });
     }
 
+    private int previewNodeDrain(
+            CommandSourceStack source,
+            String targetNode
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        Map<String, Integer> localActivity = captureDimensionPlayerCounts(server);
+        source.sendSuccess(() -> Component.literal(
+                "§eСтрою план drain: §f" + currentConfig.nodeId() + " §7-> §f" + targetNode
+        ), false);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                ClusterDatabase.heartbeat(
+                        latestConfig,
+                        server,
+                        localActivity
+                );
+                ClusterDatabase.NodeDrainPreview preview =
+                        ClusterDatabase.previewNodeDrain(latestConfig, targetNode);
+                server.execute(() -> {
+                    int ready = 0;
+                    int blocked = 0;
+                    for (ClusterDatabase.NodeDrainPreviewEntry entry : preview.entries()) {
+                        String localReason = nodeDrainLocalReason(server, entry);
+                        if (entry.executable() && localReason == null) {
+                            ready++;
+                        } else {
+                            blocked++;
+                        }
+                    }
+                    int finalReady = ready;
+                    int finalBlocked = blocked;
+                    int localPlayers = server.getPlayerList().getPlayerCount();
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Drain preview: §aready=" + finalReady
+                                    + "§7, blocked=" + finalBlocked
+                                    + "§7, players=" + localPlayers
+                                    + "§7, target="
+                                    + (preview.targetReady() ? "§aONLINE" : "§cBLOCKED")
+                    ), false);
+                    if (localPlayers > 0) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§eПеред start эвакуируй игроков командой drain evacuate или вручную."
+                        ), false);
+                    }
+                    for (ClusterDatabase.NodeDrainPreviewEntry entry : preview.entries()) {
+                        String localReason = nodeDrainLocalReason(server, entry);
+                        boolean executable = entry.executable() && localReason == null;
+                        String reason = localReason != null ? localReason : entry.reason();
+                        String state = executable ? "§aREADY" : "§cBLOCKED";
+                        String suffix = reason == null ? "" : " §7| §f" + reason;
+                        source.sendSuccess(() -> Component.literal(
+                                state
+                                        + " §f" + entry.dimensionId()
+                                        + " §7| §f" + entry.sourceNode()
+                                        + " §7-> §f" + entry.targetNode()
+                                        + suffix
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось построить drain preview: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private static String nodeDrainLocalReason(
+            MinecraftServer server,
+            ClusterDatabase.NodeDrainPreviewEntry entry
+    ) {
+        if (!entry.executable()) {
+            return null;
+        }
+        ResourceLocation parsed = ResourceLocation.tryParse(entry.dimensionId());
+        ServerLevel level = parsed == null
+                ? null
+                : server.getLevel(ResourceKey.create(Registries.DIMENSION, parsed));
+        if (level == null) {
+            return "измерение не загружено";
+        }
+        if (!level.players().isEmpty()) {
+            return "в измерении находятся игроки";
+        }
+        try {
+            ClusterDimensionMigration.resolveDimensionPath(server, entry.dimensionId());
+        } catch (Exception exception) {
+            return exception.getMessage();
+        }
+        return null;
+    }
+
+    private int evacuateNodeDrainPlayers(
+            CommandSourceStack source,
+            String targetNode,
+            String dimensionId,
+            double x,
+            double y,
+            double z
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                ClusterDatabase.NodeDrainPreview preview =
+                        ClusterDatabase.previewNodeDrain(latestConfig, targetNode);
+                if (!preview.targetReady()) {
+                    throw new IllegalStateException(
+                            "Target node OFFLINE или находится в drain-режиме: " + targetNode
+                    );
+                }
+                String owner = ClusterDatabase.findDimensionOwner(
+                        latestConfig,
+                        dimensionId
+                );
+                if (owner == null || !owner.equalsIgnoreCase(targetNode)) {
+                    throw new IllegalStateException(
+                            "Dimension " + dimensionId + " не принадлежит target node " + targetNode
+                    );
+                }
+                server.execute(() -> {
+                    List<ServerPlayer> players = new ArrayList<>(
+                            server.getPlayerList().getPlayers()
+                    );
+                    if (players.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§aНа текущем узле нет игроков для эвакуации."
+                        ), false);
+                        return;
+                    }
+                    int queued = 0;
+                    for (ServerPlayer player : players) {
+                        int result = queueTransferInternal(
+                                source,
+                                player,
+                                targetNode,
+                                dimensionId,
+                                x,
+                                y,
+                                z,
+                                player.getYRot(),
+                                player.getXRot()
+                        );
+                        if (result > 0) {
+                            queued++;
+                        }
+                    }
+                    int finalQueued = queued;
+                    source.sendSuccess(() -> Component.literal(
+                            "§aЭвакуация поставлена в очередь: §f" + finalQueued
+                                    + "§a из §f" + players.size()
+                                    + "§a игроков."
+                    ), false);
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось начать эвакуацию: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int prepareNodeDrain(
+            CommandSourceStack source,
+            String targetNode
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        if (currentConfig.dimensionMigrationStagingPath() == null) {
+            source.sendFailure(Component.literal("§cВ конфиге не указан dimension_migration_staging_path."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        if (!server.getPlayerList().getPlayers().isEmpty()) {
+            source.sendFailure(Component.literal(
+                    "§cDrain start запрещён: на текущем узле ещё находятся игроки."
+            ));
+            return 0;
+        }
+        if (!DRAIN_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            source.sendFailure(Component.literal("§cУже выполняется drain."));
+            return 0;
+        }
+        if (!SNAPSHOT_OPERATION_IN_FLIGHT.compareAndSet(false, true)) {
+            DRAIN_OPERATION_IN_FLIGHT.set(false);
+            source.sendFailure(Component.literal("§cСначала дождись завершения snapshot-операции."));
+            return 0;
+        }
+        Map<String, Integer> localActivity = captureDimensionPlayerCounts(server);
+        Set<String> locallyAvailableDimensions = collectNodeDrainLocalCandidates(server);
+        if (locallyAvailableDimensions.isEmpty()) {
+            DRAIN_OPERATION_IN_FLIGHT.set(false);
+            SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+            source.sendFailure(Component.literal(
+                    "§cНет локально загруженных измерений, доступных для drain."
+            ));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal(
+                "§eПодготавливаю drain: §f" + currentConfig.nodeId() + " §7-> §f" + targetNode
+        ), false);
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                ClusterDatabase.heartbeat(
+                        latestConfig,
+                        server,
+                        localActivity
+                );
+                ClusterDatabase.NodeDrainPreparationResult result =
+                        ClusterDatabase.prepareNodeDrain(
+                                latestConfig,
+                                targetNode,
+                                locallyAvailableDimensions
+                        );
+                server.execute(() -> startNodeDrainBatch(
+                        source,
+                        server,
+                        latestConfig,
+                        result
+                ));
+            } catch (Exception exception) {
+                DRAIN_OPERATION_IN_FLIGHT.set(false);
+                SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось подготовить drain: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private static Set<String> collectNodeDrainLocalCandidates(
+            MinecraftServer server
+    ) {
+        Set<String> result = new TreeSet<>();
+        for (ServerLevel level : server.getAllLevels()) {
+            if (!level.players().isEmpty()) {
+                continue;
+            }
+            String dimensionId = level.dimension().location().toString();
+            try {
+                ClusterDimensionMigration.resolveDimensionPath(server, dimensionId);
+                result.add(dimensionId);
+            } catch (Exception ignored) {
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    private void startNodeDrainBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ClusterDatabase.NodeDrainPreparationResult preparation
+    ) {
+        List<ClusterDatabase.DimensionDrainItem> available = new ArrayList<>();
+        Map<ClusterDatabase.DimensionDrainItem, String> rejected = new LinkedHashMap<>();
+        for (ClusterDatabase.DimensionDrainItem item : preparation.items()) {
+            ResourceLocation parsed = ResourceLocation.tryParse(item.dimensionId());
+            ServerLevel level = parsed == null
+                    ? null
+                    : server.getLevel(ResourceKey.create(Registries.DIMENSION, parsed));
+            String reason = null;
+            if (level == null) {
+                reason = "Измерение не загружено";
+            } else if (!level.players().isEmpty()) {
+                reason = "В измерении находятся игроки";
+            } else {
+                try {
+                    ClusterDimensionMigration.resolveDimensionPath(server, item.dimensionId());
+                } catch (Exception exception) {
+                    reason = exception.getMessage();
+                }
+            }
+            if (reason == null) {
+                available.add(item);
+            } else {
+                rejected.put(item, reason);
+            }
+        }
+        if (rejected.isEmpty()) {
+            continueStartNodeDrainBatch(
+                    source,
+                    server,
+                    currentConfig,
+                    preparation.drain(),
+                    available,
+                    preparation.skipped()
+            );
+            return;
+        }
+        MIGRATION_EXECUTOR.execute(() -> {
+            for (Map.Entry<ClusterDatabase.DimensionDrainItem, String> entry : rejected.entrySet()) {
+                try {
+                    ClusterDatabase.skipNodeDrainItem(
+                            currentConfig,
+                            entry.getKey().drainItemId(),
+                            "Пропущено: " + entry.getValue()
+                    );
+                } catch (Exception exception) {
+                    LOGGER.error("Unable to skip node drain item {}", entry.getKey().drainItemId(), exception);
+                }
+            }
+            server.execute(() -> continueStartNodeDrainBatch(
+                    source,
+                    server,
+                    currentConfig,
+                    preparation.drain(),
+                    available,
+                    preparation.skipped() + rejected.size()
+            ));
+        });
+    }
+
+    private void continueStartNodeDrainBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ClusterDatabase.NodeDrain drain,
+            List<ClusterDatabase.DimensionDrainItem> available,
+            int skipped
+    ) {
+        NodeDrainBatchState state = new NodeDrainBatchState(
+                drain,
+                available,
+                skipped
+        );
+        if (available.isEmpty()) {
+            finishNodeDrainBatch(source, currentConfig, state);
+            return;
+        }
+        for (ClusterDatabase.DimensionDrainItem item : available) {
+            addMigrationFreeze(item.dimensionId());
+        }
+        try {
+            if (!server.saveEverything(true, true, true)) {
+                throw new IllegalStateException("MinecraftServer не подтвердил сохранение мира");
+            }
+        } catch (Exception exception) {
+            MIGRATION_EXECUTOR.execute(() -> {
+                for (ClusterDatabase.DimensionDrainItem item : available) {
+                    try {
+                        ClusterDatabase.failNodeDrainItem(
+                                currentConfig,
+                                item.drainItemId(),
+                                exception.getMessage()
+                        );
+                    } catch (Exception databaseException) {
+                        LOGGER.error("Unable to fail node drain item {}", item.drainItemId(), databaseException);
+                    }
+                }
+                server.execute(() -> {
+                    for (ClusterDatabase.DimensionDrainItem item : available) {
+                        removeMigrationFreeze(item.dimensionId());
+                    }
+                    state.failed += available.size();
+                    finishNodeDrainBatch(source, currentConfig, state);
+                });
+            });
+            return;
+        }
+        continueNodeDrainBatch(source, server, currentConfig, state);
+    }
+
+    private void continueNodeDrainBatch(
+            CommandSourceStack source,
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            NodeDrainBatchState state
+    ) {
+        if (state.index >= state.items.size()) {
+            finishNodeDrainBatch(source, currentConfig, state);
+            return;
+        }
+        ClusterDatabase.DimensionDrainItem item = state.items.get(state.index++);
+        MIGRATION_EXECUTOR.execute(() -> {
+            ClusterDimensionMigration.PreparedArchive archive = null;
+            try {
+                archive = ClusterDimensionMigration.createArchive(
+                        server,
+                        item.dimensionId(),
+                        currentConfig.dimensionMigrationStagingPath(),
+                        item.migrationId()
+                );
+                ClusterDatabase.markDimensionMigrationReady(
+                        currentConfig,
+                        item.migrationId(),
+                        archive.archiveName(),
+                        archive.archiveSha256(),
+                        archive.contentSha256(),
+                        archive.archiveSize()
+                );
+                ClusterDatabase.markNodeDrainItemReady(
+                        currentConfig,
+                        item.drainItemId()
+                );
+                state.ready++;
+            } catch (Exception exception) {
+                state.failed++;
+                if (archive != null) {
+                    try {
+                        ClusterDimensionMigration.deleteArchive(
+                                currentConfig.dimensionMigrationStagingPath(),
+                                archive.archiveName()
+                        );
+                    } catch (Exception ignored) {
+                    }
+                }
+                try {
+                    ClusterDatabase.failNodeDrainItem(
+                            currentConfig,
+                            item.drainItemId(),
+                            exception.getClass().getSimpleName() + ": " + exception.getMessage()
+                    );
+                } catch (Exception databaseException) {
+                    LOGGER.error("Unable to fail node drain item {}", item.drainItemId(), databaseException);
+                }
+                removeMigrationFreeze(item.dimensionId());
+            }
+            server.execute(() -> continueNodeDrainBatch(
+                    source,
+                    server,
+                    currentConfig,
+                    state
+            ));
+        });
+    }
+
+    private void finishNodeDrainBatch(
+            CommandSourceStack source,
+            ClusterConfig currentConfig,
+            NodeDrainBatchState state
+    ) {
+        try {
+            refreshDimensionMigrationFreeze(currentConfig);
+        } catch (Exception exception) {
+            LOGGER.error("Unable to refresh dimension migration freeze after drain", exception);
+        }
+        DRAIN_OPERATION_IN_FLIGHT.set(false);
+        SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
+        source.sendSuccess(() -> Component.literal(
+                "§aDrain подготовлен: §f" + state.ready
+                        + "§a READY, §f" + state.failed
+                        + "§a ошибок, §f" + state.skipped
+                        + "§a пропущено. Перезапусти target node §f"
+                        + state.drain.targetNode()
+                        + "§a."
+        ), false);
+        source.sendSuccess(() -> Component.literal(
+                "§7Drain ID: §f" + state.drain.drainId()
+        ), false);
+        if (state.ready == 0) {
+            source.sendSuccess(() -> Component.literal(
+                    "§eНи одного архива READY не создано. Проверь drain status и выполни resume или cancel."
+            ), false);
+        }
+    }
+
+    private int showNodeDrains(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.NodeDrain> drains =
+                        ClusterDatabase.listNodeDrains(currentConfig, 10);
+                ClusterDatabase.NodeDrainReadiness readiness =
+                        ClusterDatabase.readNodeDrainReadiness(
+                                currentConfig,
+                                currentConfig.nodeId()
+                        );
+                List<ClusterDatabase.DimensionDrainItem> latestItems = drains.isEmpty()
+                        ? List.of()
+                        : ClusterDatabase.listNodeDrainItems(
+                                currentConfig,
+                                drains.get(0).drainId()
+                        );
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal("§6Последние node drains:"), false);
+                    if (drains.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal("§7Записей нет."), false);
+                    }
+                    for (ClusterDatabase.NodeDrain drain : drains) {
+                        String color = switch (drain.status()) {
+                            case "DRAINED" -> "§a";
+                            case "READY" -> "§e";
+                            case "APPLYING", "PREPARING" -> "§b";
+                            case "PARTIAL", "FAILED" -> "§c";
+                            case "CANCELLED", "RESUMED" -> "§7";
+                            default -> "§6";
+                        };
+                        source.sendSuccess(() -> Component.literal(
+                                color + drain.status()
+                                        + " §f" + drain.drainId()
+                                        + " §7| §f" + drain.sourceNode()
+                                        + " §7-> §f" + drain.targetNode()
+                                        + " §7| total=" + drain.totalItems()
+                                        + ", ready=" + drain.readyItems()
+                                        + ", applying=" + drain.applyingItems()
+                                        + ", applied=" + drain.appliedItems()
+                                        + ", skipped=" + drain.cancelledItems()
+                                        + ", failed=" + drain.failedItems()
+                        ), false);
+                    }
+                    if (!latestItems.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§6Элементы последнего drain:"
+                        ), false);
+                        for (ClusterDatabase.DimensionDrainItem item : latestItems) {
+                            String reason = item.errorText() == null || item.errorText().isBlank()
+                                    ? ""
+                                    : " §7| §f" + item.errorText();
+                            source.sendSuccess(() -> Component.literal(
+                                    "§f" + item.dimensionId()
+                                            + " §7| §e" + item.status()
+                                            + " §7| migration: §f" + item.migrationId()
+                                            + reason
+                            ), false);
+                        }
+                    }
+                    boolean localPlayersEmpty = server.getPlayerList().getPlayers().isEmpty();
+                    boolean safe = localPlayersEmpty && readiness.safeToStop();
+                    String state = safe ? "§aSAFE TO STOP" : "§eNOT FULLY DRAINED";
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Готовность узла: " + state
+                                    + "§7 | players=" + server.getPlayerList().getPlayerCount()
+                                    + ", assignments=" + readiness.assignmentCount()
+                                    + ", pinned=" + readiness.pinnedCount()
+                                    + ", unsupported=" + readiness.unsupportedCount()
+                                    + ", migratable=" + readiness.migratableCount()
+                    ), false);
+                    if (readiness.assignmentCount() > 0) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§eОстановка узла сделает оставшиеся назначенные измерения недоступными."
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось получить drain status: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int cancelNodeDrain(
+            CommandSourceStack source,
+            String drainId
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.NodeDrainCancellationResult result =
+                        ClusterDatabase.cancelNodeDrain(currentConfig, drainId);
+                for (ClusterDatabase.DimensionMigration migration : result.migrations()) {
+                    try {
+                        ClusterDimensionMigration.deleteArchive(
+                                currentConfig.dimensionMigrationStagingPath(),
+                                migration.archiveName()
+                        );
+                    } catch (Exception exception) {
+                        LOGGER.warn(
+                                "Unable to delete cancelled drain archive {}",
+                                migration.archiveName(),
+                                exception
+                        );
+                    }
+                    removeMigrationFreeze(migration.dimensionId());
+                }
+                try {
+                    refreshDimensionMigrationFreeze(currentConfig);
+                } catch (Exception exception) {
+                    LOGGER.warn("Unable to refresh migration freeze after drain cancel", exception);
+                }
+                server.execute(() -> source.sendSuccess(() -> Component.literal(
+                        "§aDrain отменён: §f" + result.drain().drainId()
+                ), false));
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось отменить drain: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int resumeNodeDrain(
+            CommandSourceStack source,
+            String drainId
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.NodeDrain drain =
+                        ClusterDatabase.resumeNodeDrain(currentConfig, drainId);
+                server.execute(() -> source.sendSuccess(() -> Component.literal(
+                        "§aDrain переведён в RESUMED. Узел снова участвует в autoassign/rebalance: §f"
+                                + drain.drainId()
+                ), false));
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось выполнить drain resume: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
     private int previewDimensionFailback(
             CommandSourceStack source,
             String recoveredNode
@@ -7347,7 +8137,8 @@ public final class ClusterTestModule {
                     int activeOperations = operations.activeMigrations()
                             + operations.activeSnapshots()
                             + operations.activeFailovers()
-                            + operations.activeFailbacks();
+                            + operations.activeFailbacks()
+                            + operations.activeDrains();
                     addHealthMessage(messages,
                             activeOperations == 0
                                     ? HealthSeverity.OK
@@ -7356,6 +8147,7 @@ public final class ClusterTestModule {
                                     + ", snapshots=" + operations.activeSnapshots()
                                     + ", failovers=" + operations.activeFailovers()
                                     + ", failbacks=" + operations.activeFailbacks()
+                                    + ", drains=" + operations.activeDrains()
                                     + ", leases=" + operations.activeOperationLeases());
 
                     if (operations.recentFailedOperations() > 0) {
@@ -7855,6 +8647,25 @@ public final class ClusterTestModule {
             HealthSeverity severity,
             String text
     ) {
+    }
+
+    private static final class NodeDrainBatchState {
+        private final ClusterDatabase.NodeDrain drain;
+        private final List<ClusterDatabase.DimensionDrainItem> items;
+        private final int skipped;
+        private int index;
+        private int ready;
+        private int failed;
+
+        private NodeDrainBatchState(
+                ClusterDatabase.NodeDrain drain,
+                List<ClusterDatabase.DimensionDrainItem> items,
+                int skipped
+        ) {
+            this.drain = drain;
+            this.items = items;
+            this.skipped = skipped;
+        }
     }
 
     private static final class DimensionFailbackBatchState {
