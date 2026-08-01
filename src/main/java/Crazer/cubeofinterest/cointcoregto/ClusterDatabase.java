@@ -183,6 +183,294 @@ public final class ClusterDatabase {
         }
     }
 
+    public static long currentChatMessageSequence(ClusterConfig config) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("SELECT COALESCE(MAX(message_seq), 0) FROM cluster_chat_messages");
+             ResultSet resultSet = statement.executeQuery()) {
+            return resultSet.next() ? resultSet.getLong(1) : 0L;
+        }
+    }
+
+    public static long publishChatMessage(
+            ClusterConfig config,
+            NetworkChatPublish message
+    ) throws SQLException {
+        ensureSchema(config);
+        String sql = """
+                INSERT INTO cluster_chat_messages (
+                    message_id, origin_node, origin_role, origin_type, channel_name,
+                    sender_uuid, sender_name, discord_username, plain_text, component_json, discord_message,
+                    forward_to_discord, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
+                """;
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            statement.setString(1, message.messageId());
+            statement.setString(2, truncate(message.originNode(), 64));
+            statement.setString(3, truncate(message.originRole(), 64));
+            statement.setString(4, truncate(message.originType(), 16));
+            statement.setString(5, truncate(message.channelName(), 16));
+            if (message.senderUuid() == null || message.senderUuid().isBlank()) {
+                statement.setNull(6, Types.CHAR);
+            } else {
+                statement.setString(6, truncate(message.senderUuid(), 36));
+            }
+            statement.setString(7, truncate(message.senderName(), 64));
+            if (message.discordUsername() == null || message.discordUsername().isBlank()) {
+                statement.setNull(8, Types.VARCHAR);
+            } else {
+                statement.setString(8, truncate(message.discordUsername(), 80));
+            }
+            statement.setString(9, message.plainText() == null ? "" : message.plainText());
+            if (message.componentJson() == null || message.componentJson().isBlank()) {
+                statement.setNull(10, Types.LONGVARCHAR);
+            } else {
+                statement.setString(10, message.componentJson());
+            }
+            if (message.discordMessage() == null || message.discordMessage().isBlank()) {
+                statement.setNull(11, Types.LONGVARCHAR);
+            } else {
+                statement.setString(11, message.discordMessage());
+            }
+            statement.setBoolean(12, message.forwardToDiscord());
+            statement.executeUpdate();
+            try (ResultSet keys = statement.getGeneratedKeys()) {
+                if (keys.next()) {
+                    return keys.getLong(1);
+                }
+            }
+        }
+        throw new SQLException("Unable to read generated cluster chat sequence");
+    }
+
+    public static List<NetworkChatMessage> listChatMessagesAfter(
+            ClusterConfig config,
+            long sequence,
+            int limit
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeLimit = Math.max(1, Math.min(limit, 500));
+        String sql = """
+                SELECT message_seq, message_id, origin_node, origin_role, origin_type, channel_name,
+                       sender_uuid, sender_name, discord_username, plain_text, component_json, discord_message,
+                       forward_to_discord, created_at
+                FROM cluster_chat_messages
+                WHERE message_seq > ?
+                ORDER BY message_seq ASC
+                LIMIT ?
+                """;
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, Math.max(0L, sequence));
+            statement.setInt(2, safeLimit);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                List<NetworkChatMessage> messages = new ArrayList<>();
+                while (resultSet.next()) {
+                    messages.add(readNetworkChatMessage(resultSet));
+                }
+                return List.copyOf(messages);
+            }
+        }
+    }
+
+    public static List<NetworkChatMessage> listPendingDiscordChatMessages(
+            ClusterConfig config,
+            int limit
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeLimit = Math.max(1, Math.min(limit, 500));
+        String sql = """
+                SELECT message_seq, message_id, origin_node, origin_role, origin_type, channel_name,
+                       sender_uuid, sender_name, discord_username, plain_text, component_json, discord_message,
+                       forward_to_discord, created_at
+                FROM cluster_chat_messages
+                WHERE forward_to_discord = 1
+                  AND discord_forwarded_at IS NULL
+                ORDER BY message_seq ASC
+                LIMIT ?
+                """;
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, safeLimit);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                List<NetworkChatMessage> messages = new ArrayList<>();
+                while (resultSet.next()) {
+                    messages.add(readNetworkChatMessage(resultSet));
+                }
+                return List.copyOf(messages);
+            }
+        }
+    }
+
+    public static boolean markChatMessageDiscordForwarded(
+            ClusterConfig config,
+            long sequence
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_chat_messages
+                     SET discord_forwarded_at = CURRENT_TIMESTAMP(3)
+                     WHERE message_seq = ?
+                       AND discord_forwarded_at IS NULL
+                     """)) {
+            statement.setLong(1, sequence);
+            return statement.executeUpdate() > 0;
+        }
+    }
+
+    private static NetworkChatMessage readNetworkChatMessage(ResultSet resultSet) throws SQLException {
+        return new NetworkChatMessage(
+                resultSet.getLong("message_seq"),
+                resultSet.getString("message_id"),
+                resultSet.getString("origin_node"),
+                resultSet.getString("origin_role"),
+                resultSet.getString("origin_type"),
+                resultSet.getString("channel_name"),
+                resultSet.getString("sender_uuid"),
+                resultSet.getString("sender_name"),
+                resultSet.getString("discord_username"),
+                resultSet.getString("plain_text"),
+                resultSet.getString("component_json"),
+                resultSet.getString("discord_message"),
+                resultSet.getBoolean("forward_to_discord"),
+                resultSet.getTimestamp("created_at").toInstant()
+        );
+    }
+
+    public static int cleanupChatMessages(
+            ClusterConfig config,
+            int retentionMinutes
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     DELETE FROM cluster_chat_messages
+                     WHERE created_at < TIMESTAMPADD(MINUTE, -?, CURRENT_TIMESTAMP(3))
+                     """)) {
+            statement.setInt(1, Math.max(10, retentionMinutes));
+            return statement.executeUpdate();
+        }
+    }
+
+    public static void recordChatTestReceipt(
+            ClusterConfig config,
+            String testId,
+            String nodeId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     INSERT INTO cluster_chat_test_receipts (
+                         test_id, node_id, receive_count, first_received_at, last_received_at
+                     ) VALUES (?, ?, 1, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
+                     ON DUPLICATE KEY UPDATE
+                         receive_count = receive_count + 1,
+                         last_received_at = CURRENT_TIMESTAMP(3)
+                     """)) {
+            statement.setString(1, testId);
+            statement.setString(2, truncate(nodeId, 64));
+            statement.executeUpdate();
+        }
+    }
+
+    public static ChatDeliveryTest findLatestChatDeliveryTest(
+            ClusterConfig config
+    ) throws SQLException {
+        return findChatDeliveryTest(config, null);
+    }
+
+    public static ChatDeliveryTest findChatDeliveryTest(
+            ClusterConfig config,
+            String testId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            String sql = testId == null || testId.isBlank()
+                    ? """
+                      SELECT message_id, origin_node, plain_text, created_at
+                      FROM cluster_chat_messages
+                      WHERE origin_type = 'TEST'
+                        AND channel_name = 'DIAGNOSTIC'
+                      ORDER BY message_seq DESC
+                      LIMIT 1
+                      """
+                    : """
+                      SELECT message_id, origin_node, plain_text, created_at
+                      FROM cluster_chat_messages
+                      WHERE message_id = ?
+                        AND origin_type = 'TEST'
+                        AND channel_name = 'DIAGNOSTIC'
+                      LIMIT 1
+                      """;
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                if (testId != null && !testId.isBlank()) {
+                    statement.setString(1, testId);
+                }
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    if (!resultSet.next()) {
+                        return null;
+                    }
+                    String resolvedTestId = resultSet.getString("message_id");
+                    String originNode = resultSet.getString("origin_node");
+                    String expectedRaw = resultSet.getString("plain_text");
+                    Instant createdAt = resultSet.getTimestamp("created_at").toInstant();
+                    List<String> expectedNodes = new ArrayList<>();
+                    if (expectedRaw != null && !expectedRaw.isBlank()) {
+                        for (String value : expectedRaw.split(",")) {
+                            String node = value.trim();
+                            if (!node.isBlank() && !expectedNodes.contains(node)) {
+                                expectedNodes.add(node);
+                            }
+                        }
+                    }
+                    List<ChatTestReceipt> receipts = new ArrayList<>();
+                    try (PreparedStatement receiptStatement = connection.prepareStatement("""
+                            SELECT node_id, receive_count, first_received_at, last_received_at
+                            FROM cluster_chat_test_receipts
+                            WHERE test_id = ?
+                            ORDER BY node_id
+                            """)) {
+                        receiptStatement.setString(1, resolvedTestId);
+                        try (ResultSet receiptResult = receiptStatement.executeQuery()) {
+                            while (receiptResult.next()) {
+                                receipts.add(new ChatTestReceipt(
+                                        receiptResult.getString("node_id"),
+                                        receiptResult.getInt("receive_count"),
+                                        receiptResult.getTimestamp("first_received_at").toInstant(),
+                                        receiptResult.getTimestamp("last_received_at").toInstant()
+                                ));
+                            }
+                        }
+                    }
+                    return new ChatDeliveryTest(
+                            resolvedTestId,
+                            originNode,
+                            List.copyOf(expectedNodes),
+                            createdAt,
+                            List.copyOf(receipts)
+                    );
+                }
+            }
+        }
+    }
+
+    public static int cleanupChatTestReceipts(
+            ClusterConfig config,
+            int retentionMinutes
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     DELETE FROM cluster_chat_test_receipts
+                     WHERE last_received_at < TIMESTAMPADD(MINUTE, -?, CURRENT_TIMESTAMP(3))
+                     """)) {
+            statement.setInt(1, Math.max(10, retentionMinutes));
+            return statement.executeUpdate();
+        }
+    }
+
     public static String findOnlineRedirectAddress(
             ClusterConfig config,
             String nodeId
@@ -8091,6 +8379,47 @@ public final class ClusterDatabase {
                 """);
 
             statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_chat_messages (
+                    message_seq BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    message_id CHAR(36) NOT NULL,
+                    origin_node VARCHAR(64) NOT NULL,
+                    origin_role VARCHAR(64) NOT NULL,
+                    origin_type VARCHAR(16) NOT NULL,
+                    channel_name VARCHAR(16) NOT NULL,
+                    sender_uuid CHAR(36) NULL,
+                    sender_name VARCHAR(64) NOT NULL,
+                    discord_username VARCHAR(80) NULL,
+                    plain_text TEXT NOT NULL,
+                    component_json LONGTEXT NULL,
+                    discord_message TEXT NULL,
+                    forward_to_discord TINYINT(1) NOT NULL DEFAULT 0,
+                    discord_forwarded_at TIMESTAMP(3) NULL,
+                    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+                    UNIQUE INDEX uq_cluster_chat_message_id (message_id),
+                    INDEX idx_cluster_chat_created (created_at),
+                    INDEX idx_cluster_chat_origin_sequence (origin_node, message_seq)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_chat_test_receipts (
+                    test_id CHAR(36) NOT NULL,
+                    node_id VARCHAR(64) NOT NULL,
+                    receive_count INT NOT NULL DEFAULT 1,
+                    first_received_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    last_received_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+                    PRIMARY KEY (test_id, node_id),
+                    INDEX idx_cluster_chat_test_receipt_last (last_received_at)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
                 CREATE TABLE IF NOT EXISTS pending_transfers (
                     transfer_id CHAR(36) NOT NULL PRIMARY KEY,
                     player_uuid CHAR(36) NOT NULL,
@@ -8276,6 +8605,8 @@ public final class ClusterDatabase {
         ensureColumnExists(connection, "cluster_dimension_migrations", "rolled_back_at", "TIMESTAMP(3) NULL");
         ensureColumnExists(connection, "cluster_dimension_migrations", "source_backup_deleted_at", "TIMESTAMP(3) NULL");
         ensureColumnExists(connection, "cluster_node_drains", "operation_type", "VARCHAR(24) NOT NULL DEFAULT 'DRAIN'");
+        ensureColumnExists(connection, "cluster_chat_messages", "discord_message", "TEXT NULL");
+        ensureColumnExists(connection, "cluster_chat_messages", "discord_forwarded_at", "TIMESTAMP(3) NULL");
     }
 
     private static void refreshDimensionActivity(
@@ -9764,6 +10095,58 @@ public final class ClusterDatabase {
             float pitch,
             int playerDataSize,
             String playerDataSha256
+    ) {
+    }
+
+
+    public record NetworkChatPublish(
+            String messageId,
+            String originNode,
+            String originRole,
+            String originType,
+            String channelName,
+            String senderUuid,
+            String senderName,
+            String discordUsername,
+            String plainText,
+            String componentJson,
+            String discordMessage,
+            boolean forwardToDiscord
+    ) {
+    }
+
+    public record NetworkChatMessage(
+            long sequence,
+            String messageId,
+            String originNode,
+            String originRole,
+            String originType,
+            String channelName,
+            String senderUuid,
+            String senderName,
+            String discordUsername,
+            String plainText,
+            String componentJson,
+            String discordMessage,
+            boolean forwardToDiscord,
+            Instant createdAt
+    ) {
+    }
+
+    public record ChatDeliveryTest(
+            String testId,
+            String originNode,
+            List<String> expectedNodes,
+            Instant createdAt,
+            List<ChatTestReceipt> receipts
+    ) {
+    }
+
+    public record ChatTestReceipt(
+            String nodeId,
+            int receiveCount,
+            Instant firstReceivedAt,
+            Instant lastReceivedAt
     ) {
     }
 

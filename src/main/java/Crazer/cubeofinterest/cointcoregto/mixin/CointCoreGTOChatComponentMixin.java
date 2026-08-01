@@ -7,6 +7,9 @@ import net.minecraft.network.chat.MessageSignature;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.Constant;
 import org.spongepowered.asm.mixin.injection.ModifyConstant;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(ChatComponent.class)
 public abstract class CointCoreGTOChatComponentMixin {
@@ -27,5 +30,29 @@ public abstract class CointCoreGTOChatComponentMixin {
     )
     private int cointcoregto$increaseChatHistoryLimitSrg(int original) {
         return CointCoreGTOClient.getClientChatLineLimit();
+    }
+
+    @Inject(
+            method = "clearMessages(Z)V",
+            at = @At("HEAD"),
+            require = 0
+    )
+    private void cointcoregto$captureChatBeforeClear(
+            boolean clearRecentChat,
+            CallbackInfo callbackInfo
+    ) {
+        CointCoreGTOClient.beforeChatMessagesCleared((ChatComponent) (Object) this, clearRecentChat);
+    }
+
+    @Inject(
+            method = "clearMessages(Z)V",
+            at = @At("TAIL"),
+            require = 0
+    )
+    private void cointcoregto$preserveChatBetweenServers(
+            boolean clearRecentChat,
+            CallbackInfo callbackInfo
+    ) {
+        CointCoreGTOClient.onChatMessagesCleared(clearRecentChat);
     }
 }

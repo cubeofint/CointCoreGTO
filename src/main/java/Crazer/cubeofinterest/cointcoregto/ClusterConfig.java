@@ -7,6 +7,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Properties;
 
 
@@ -50,6 +52,14 @@ public final class ClusterConfig {
     private final int dimensionSnapshotRetentionDays;
     private final int dimensionSnapshotMaxPerDimension;
     private final int dimensionSnapshotMaxAgeMinutes;
+    private final boolean networkChatEnabled;
+    private final String networkRole;
+    private final String networkChatPrefix;
+    private final Map<String, NetworkChatDimensionOverride> networkChatDimensionOverrides;
+    private final int networkChatPollIntervalTicks;
+    private final int networkChatRetentionMinutes;
+    private final boolean discordClusterLeaderElection;
+    private final int discordClusterLeaseSeconds;
 
     private ClusterConfig(
             boolean enabled,
@@ -88,7 +98,15 @@ public final class ClusterConfig {
             int dimensionSnapshotIntervalMinutes,
             int dimensionSnapshotRetentionDays,
             int dimensionSnapshotMaxPerDimension,
-            int dimensionSnapshotMaxAgeMinutes
+            int dimensionSnapshotMaxAgeMinutes,
+            boolean networkChatEnabled,
+            String networkRole,
+            String networkChatPrefix,
+            Map<String, NetworkChatDimensionOverride> networkChatDimensionOverrides,
+            int networkChatPollIntervalTicks,
+            int networkChatRetentionMinutes,
+            boolean discordClusterLeaderElection,
+            int discordClusterLeaseSeconds
     ) {
         this.enabled = enabled;
         this.nodeId = nodeId;
@@ -127,6 +145,14 @@ public final class ClusterConfig {
         this.dimensionSnapshotRetentionDays = dimensionSnapshotRetentionDays;
         this.dimensionSnapshotMaxPerDimension = dimensionSnapshotMaxPerDimension;
         this.dimensionSnapshotMaxAgeMinutes = dimensionSnapshotMaxAgeMinutes;
+        this.networkChatEnabled = networkChatEnabled;
+        this.networkRole = networkRole;
+        this.networkChatPrefix = networkChatPrefix;
+        this.networkChatDimensionOverrides = Map.copyOf(networkChatDimensionOverrides);
+        this.networkChatPollIntervalTicks = networkChatPollIntervalTicks;
+        this.networkChatRetentionMinutes = networkChatRetentionMinutes;
+        this.discordClusterLeaderElection = discordClusterLeaderElection;
+        this.discordClusterLeaseSeconds = discordClusterLeaseSeconds;
     }
 
     public static ClusterConfig load() throws IOException {
@@ -254,7 +280,15 @@ public final class ClusterConfig {
                 positiveInt(properties, "dimension_snapshot_interval_minutes", 30),
                 positiveInt(properties, "dimension_snapshot_retention_days", 7),
                 positiveInt(properties, "dimension_snapshot_max_per_dimension", 8),
-                positiveInt(properties, "dimension_snapshot_max_age_minutes", 60)
+                positiveInt(properties, "dimension_snapshot_max_age_minutes", 60),
+                Boolean.parseBoolean(properties.getProperty("network_chat_enabled", "false").trim()),
+                networkRole(properties),
+                networkChatPrefix(properties.getProperty("network_chat_prefix", "&8[#1] ")),
+                networkChatDimensionOverrides(properties),
+                rangedInt(properties, "network_chat_poll_interval_ticks", 10, 1, 200),
+                rangedInt(properties, "network_chat_retention_minutes", 10, 10, 10080),
+                Boolean.parseBoolean(properties.getProperty("discord_cluster_leader_election", properties.getProperty("discord_cluster_leader", "true")).trim()),
+                rangedInt(properties, "discord_cluster_lease_seconds", 30, 10, 300)
         );
     }
 
@@ -368,6 +402,62 @@ public final class ClusterConfig {
         return value;
     }
 
+
+    private static String networkRole(Properties properties) throws IOException {
+        String value = properties.getProperty("network_role", properties.getProperty("node_id", "gto1")).trim();
+        if (!value.matches("[A-Za-z0-9._-]{1,64}")) {
+            throw new IOException("Cluster network_role may contain only A-Z, a-z, 0-9, '.', '_' and '-': " + value);
+        }
+        return value;
+    }
+
+    private static String networkChatPrefix(String value) {
+        String prefix = value == null ? "" : value.trim();
+        if (prefix.isEmpty()) {
+            return "";
+        }
+        return prefix + " ";
+    }
+
+    private static Map<String, NetworkChatDimensionOverride> networkChatDimensionOverrides(Properties properties) throws IOException {
+        String raw = properties.getProperty(
+                "network_chat_dimension_overrides",
+                properties.getProperty("network_chat_dimension_prefixes", "")
+        ).trim();
+        if (raw.isEmpty()) {
+            return Map.of();
+        }
+        LinkedHashMap<String, NetworkChatDimensionOverride> overrides = new LinkedHashMap<>();
+        for (String entry : raw.split(";")) {
+            String value = entry.trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+            String[] parts = value.split("\\|", 3);
+            if (parts.length < 2) {
+                throw new IOException("Invalid network_chat_dimension_overrides entry: " + value);
+            }
+            String dimension = parts[0].trim();
+            if (!dimension.matches("[a-z0-9_.-]+:[a-z0-9_./-]+")) {
+                throw new IOException("Invalid dimension id in network_chat_dimension_overrides: " + dimension);
+            }
+            String role;
+            String prefix;
+            if (parts.length == 2) {
+                role = networkRole(properties);
+                prefix = parts[1];
+            } else {
+                role = parts[1].trim();
+                prefix = parts[2];
+            }
+            if (!role.matches("[A-Za-z0-9._-]{1,64}")) {
+                throw new IOException("Invalid role in network_chat_dimension_overrides: " + role);
+            }
+            overrides.put(dimension, new NetworkChatDimensionOverride(role, networkChatPrefix(prefix)));
+        }
+        return overrides;
+    }
+
     private static String redirectAddress(
             Properties properties
     ) throws IOException {
@@ -454,6 +544,14 @@ public final class ClusterConfig {
         defaults.setProperty("dimension_snapshot_retention_days", "7");
         defaults.setProperty("dimension_snapshot_max_per_dimension", "8");
         defaults.setProperty("dimension_snapshot_max_age_minutes", "60");
+        defaults.setProperty("network_chat_enabled", "false");
+        defaults.setProperty("network_role", "gto1");
+        defaults.setProperty("network_chat_prefix", "&8[#1]");
+        defaults.setProperty("network_chat_dimension_overrides", "minecraft:overworld|hub|&a[H]");
+        defaults.setProperty("network_chat_poll_interval_ticks", "10");
+        defaults.setProperty("network_chat_retention_minutes", "10");
+        defaults.setProperty("discord_cluster_leader_election", "true");
+        defaults.setProperty("discord_cluster_lease_seconds", "30");
 
         try (OutputStream output = Files.newOutputStream(CONFIG_PATH)) {
             defaults.store(output, "CointCoreGTO local cluster test configuration");
@@ -610,5 +708,40 @@ public final class ClusterConfig {
 
     public int dimensionSnapshotMaxAgeMinutes() {
         return dimensionSnapshotMaxAgeMinutes;
+    }
+
+    public boolean networkChatEnabled() {
+        return networkChatEnabled;
+    }
+
+    public String networkRole() {
+        return networkRole;
+    }
+
+    public String networkChatPrefix() {
+        return networkChatPrefix;
+    }
+
+    public Map<String, NetworkChatDimensionOverride> networkChatDimensionOverrides() {
+        return networkChatDimensionOverrides;
+    }
+
+    public int networkChatPollIntervalTicks() {
+        return networkChatPollIntervalTicks;
+    }
+
+    public int networkChatRetentionMinutes() {
+        return networkChatRetentionMinutes;
+    }
+
+    public boolean discordClusterLeaderElection() {
+        return discordClusterLeaderElection;
+    }
+
+    public int discordClusterLeaseSeconds() {
+        return discordClusterLeaseSeconds;
+    }
+
+    public record NetworkChatDimensionOverride(String role, String prefix) {
     }
 }

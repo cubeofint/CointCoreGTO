@@ -100,6 +100,20 @@ public final class CointCoreGTODiscordProxy {
         invokeServerOnly("stop", new Class<?>[]{});
     }
 
+    public static boolean isReady() {
+        if (FMLEnvironment.dist != Dist.DEDICATED_SERVER) {
+            return false;
+        }
+        try {
+            Class<?> bridgeClass = Class.forName(BRIDGE_CLASS_NAME);
+            Method method = bridgeClass.getMethod("isReady");
+            Object result = method.invoke(null);
+            return result instanceof Boolean value && value;
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+
     public static void sendToDiscord(String message) {
         invokeServerOnly("sendToDiscord", new Class<?>[]{String.class}, message);
     }

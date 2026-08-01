@@ -52,6 +52,17 @@ public final class CointCoreGTOItemIconOverlay {
         clearAllIconCache();
     }
 
+    public static void rememberRestoredMessage(Component message) {
+        if (message == null) {
+            return;
+        }
+        String fullMessageText = normalize(message.getString());
+        if (fullMessageText.isBlank()) {
+            return;
+        }
+        cacheItemsFromComponent(message, fullMessageText);
+    }
+
     public static void clearAllIconCache() {
         synchronized (CACHED_LINES) {
             CACHED_LINES.clear();

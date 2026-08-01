@@ -536,9 +536,31 @@ public class CointCoreGTO {
         if (CURRENT_SERVER == null) {
             return;
         }
+        try {
+            ClusterNetworkChat.reload(CURRENT_SERVER, ClusterConfig.load(), discordSettings());
+        } catch (Exception exception) {
+            if (ClusterNetworkChat.isActive()) {
+                System.err.println("[CointCoreGTO] Failed to reload network chat and Discord: " + exception.getMessage());
+                return;
+            }
+            CointCoreGTODiscordProxy.reload(
+                    CURRENT_SERVER,
+                    DISCORD_ENABLED.get(),
+                    DISCORD_BOT_TOKEN.get(),
+                    DISCORD_WEBHOOK_URL.get(),
+                    DISCORD_AVATAR_URL_TEMPLATE.get(),
+                    DISCORD_CHANNEL_ID.get(),
+                    DISCORD_LOG_CHANNEL_ID.get(),
+                    DISCORD_SEND_SERVER_STATUS.get(),
+                    DISCORD_ONLINE_STATUS_ENABLED.get(),
+                    DISCORD_ONLINE_STATUS_CHANNEL_ID.get(),
+                    DISCORD_ONLINE_STATUS_UPDATE_SECONDS.get()
+            );
+        }
+    }
 
-        CointCoreGTODiscordProxy.reload(
-                CURRENT_SERVER,
+    private static ClusterNetworkChat.DiscordSettings discordSettings() {
+        return new ClusterNetworkChat.DiscordSettings(
                 DISCORD_ENABLED.get(),
                 DISCORD_BOT_TOKEN.get(),
                 DISCORD_WEBHOOK_URL.get(),
@@ -550,6 +572,26 @@ public class CointCoreGTO {
                 DISCORD_ONLINE_STATUS_CHANNEL_ID.get(),
                 DISCORD_ONLINE_STATUS_UPDATE_SECONDS.get()
         );
+    }
+
+    private static void startNetworkChatAndDiscord(MinecraftServer server) {
+        try {
+            ClusterNetworkChat.start(server, ClusterConfig.load(), discordSettings());
+        } catch (Exception exception) {
+            CointCoreGTODiscordProxy.start(
+                    server,
+                    DISCORD_ENABLED.get(),
+                    DISCORD_BOT_TOKEN.get(),
+                    DISCORD_WEBHOOK_URL.get(),
+                    DISCORD_AVATAR_URL_TEMPLATE.get(),
+                    DISCORD_CHANNEL_ID.get(),
+                    DISCORD_LOG_CHANNEL_ID.get(),
+                    DISCORD_SEND_SERVER_STATUS.get(),
+                    DISCORD_ONLINE_STATUS_ENABLED.get(),
+                    DISCORD_ONLINE_STATUS_CHANNEL_ID.get(),
+                    DISCORD_ONLINE_STATUS_UPDATE_SECONDS.get()
+            );
+        }
     }
 
     private enum PunishmentAnnounceType {
@@ -602,19 +644,7 @@ public class CointCoreGTO {
         loadLastLocations();
         loadWarns();
         loadPunishmentHistory();
-        CointCoreGTODiscordProxy.start(
-                CURRENT_SERVER,
-                DISCORD_ENABLED.get(),
-                DISCORD_BOT_TOKEN.get(),
-                DISCORD_WEBHOOK_URL.get(),
-                DISCORD_AVATAR_URL_TEMPLATE.get(),
-                DISCORD_CHANNEL_ID.get(),
-                DISCORD_LOG_CHANNEL_ID.get(),
-                DISCORD_SEND_SERVER_STATUS.get(),
-                DISCORD_ONLINE_STATUS_ENABLED.get(),
-                DISCORD_ONLINE_STATUS_CHANNEL_ID.get(),
-                DISCORD_ONLINE_STATUS_UPDATE_SECONDS.get()
-        );
+        startNetworkChatAndDiscord(CURRENT_SERVER);
 
         resetRestartSchedule();
     }
@@ -625,7 +655,7 @@ public class CointCoreGTO {
         saveLastLocations();
         saveWarns();
         savePunishmentHistory();
-        CointCoreGTODiscordProxy.stop();
+        ClusterNetworkChat.stop();
         NEXT_RESTART_MILLIS = -1L;
         LAST_RESTART_CHECK_SECOND = -1L;
         RESTARTING_NOW = false;
@@ -1732,6 +1762,8 @@ public class CointCoreGTO {
             return;
         }
 
+        ClusterNetworkChat.tick();
+
         long currentSecond = System.currentTimeMillis() / 1000L;
         if (currentSecond == LAST_RESTART_CHECK_SECOND) {
             return;
@@ -2410,6 +2442,54 @@ public class CointCoreGTO {
         return view == messageType;
     }
 
+    private static String networkSourcePrefix(ServerPlayer player) {
+        if (player == null) {
+            return "";
+        }
+        return color(ClusterNetworkChat.sourcePrefix(player.level().dimension().location().toString()));
+    }
+
+    private static String networkSourceRole(ServerPlayer player) {
+        if (player == null) {
+            return "";
+        }
+        return ClusterNetworkChat.sourceRole(player.level().dimension().location().toString());
+    }
+
+    private static String serializeChatComponent(Component component) {
+        if (component == null) {
+            return null;
+        }
+        try {
+            return Component.Serializer.toJson(component);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void publishNetworkChat(
+            ServerPlayer player,
+            ChatView view,
+            String plainText,
+            Component component,
+            String discordMessage,
+            boolean forwardToDiscord
+    ) {
+        String channelName = view == ChatView.TRADE ? "TRADE" : "GLOBAL";
+        ClusterNetworkChat.publish(
+                "MINECRAFT",
+                networkSourceRole(player),
+                channelName,
+                player.getUUID().toString(),
+                player.getGameProfile().getName(),
+                getDiscordDisplayName(player, view == ChatView.TRADE ? TRADE_PREFIX.get() : GLOBAL_PREFIX.get()),
+                plainText,
+                serializeChatComponent(component),
+                discordMessage,
+                forwardToDiscord
+        );
+    }
+
     private static void sendLocalChat(ServerPlayer player, String message) {
         if (blockCapsMessage(player, message)) {
             return;
@@ -2462,30 +2542,30 @@ public class CointCoreGTO {
         }
 
         String plainMessage = CointCoreGTOItemPreview.toPlainMessage(player, message);
-        String withoutTimePrefix = color(GLOBAL_PREFIX.get())
+        String withoutTimePrefix = networkSourcePrefix(player)
+                + color(GLOBAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
                 + "§f" + player.getGameProfile().getName()
                 + "§7: §f";
         String withoutTime = withoutTimePrefix + plainMessage;
-
-        String discordFormatted = stripColor(withoutTime);
+        Component bodyMessage = CointCoreGTOItemPreview.buildMessage(player, withoutTimePrefix, message);
 
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
-            String fullPrefix = timePrefix(target) + withoutTimePrefix;
-            String fullPlain = fullPrefix + plainMessage;
-            Component liveMessage = CointCoreGTOItemPreview.buildMessage(player, fullPrefix, message);
+            String targetTime = timePrefix(target);
+            String fullPlain = targetTime + withoutTime;
+            Component liveMessage = Component.literal(targetTime).append(bodyMessage.copy());
             sendFilteredChatMessage(target, ChatView.GLOBAL, fullPlain, liveMessage);
         }
 
-        if (DISCORD_SEND_GLOBAL_CHAT.get()) {
-            CointCoreGTODiscordProxy.sendPlayerMessageToDiscord(
-                    getDiscordDisplayName(player, GLOBAL_PREFIX.get()),
-                    plainMessage,
-                    player.getUUID().toString(),
-                    player.getGameProfile().getName()
-            );
-        }
+        publishNetworkChat(
+                player,
+                ChatView.GLOBAL,
+                withoutTime,
+                bodyMessage,
+                plainMessage,
+                DISCORD_SEND_GLOBAL_CHAT.get()
+        );
 
         GLOBAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
     }
@@ -2520,20 +2600,23 @@ public class CointCoreGTO {
         }
 
         String plainMessage = CointCoreGTOItemPreview.toPlainMessage(player, message);
-        String withoutTimePrefix = color(TRADE_PREFIX.get())
+        String withoutTimePrefix = networkSourcePrefix(player)
+                + color(TRADE_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
                 + "§f" + player.getGameProfile().getName()
                 + "§7: §f";
         String withoutTime = withoutTimePrefix + plainMessage;
+        Component bodyMessage = CointCoreGTOItemPreview.buildMessage(player, withoutTimePrefix, message);
 
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
-            String fullPrefix = timePrefix(target) + withoutTimePrefix;
-            String fullPlain = fullPrefix + plainMessage;
-            Component liveMessage = CointCoreGTOItemPreview.buildMessage(player, fullPrefix, message);
+            String targetTime = timePrefix(target);
+            String fullPlain = targetTime + withoutTime;
+            Component liveMessage = Component.literal(targetTime).append(bodyMessage.copy());
             sendFilteredChatMessage(target, ChatView.TRADE, fullPlain, liveMessage);
         }
 
+        publishNetworkChat(player, ChatView.TRADE, withoutTime, bodyMessage, plainMessage, false);
         TRADE_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
     }
 
@@ -2724,33 +2807,32 @@ public class CointCoreGTO {
         String plainItemText = "    " + cleanItemText;
         String iconItemText = cleanItemText;
 
-        String withoutTimePrefix = color(GLOBAL_PREFIX.get())
+        String withoutTimePrefix = networkSourcePrefix(player)
+                + color(GLOBAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
                 + "§f" + player.getGameProfile().getName()
                 + "§7: §f";
         String withoutTime = withoutTimePrefix + plainItemText;
-        String discordFormatted = stripColor(withoutTime);
+        Component bodyMessage = Component.literal(withoutTimePrefix + "    ")
+                .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText));
 
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
-            String fullPrefix = timePrefix(target) + withoutTimePrefix;
-            String fullPlain = fullPrefix + plainItemText;
-            Component liveMessage = Component.literal(fullPrefix + "    ")
-                    .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText));
-
-            CointCoreGTOItemShare.sendIconHintToPlayer(target, stack, fullPrefix, iconItemText);
+            String targetTime = timePrefix(target);
+            String fullPlain = targetTime + withoutTime;
+            Component liveMessage = Component.literal(targetTime).append(bodyMessage.copy());
+            CointCoreGTOItemShare.sendIconHintToPlayer(target, stack, targetTime + withoutTimePrefix, iconItemText);
             sendFilteredChatMessage(target, ChatView.GLOBAL, fullPlain, liveMessage);
         }
 
-        if (DISCORD_SEND_GLOBAL_CHAT.get()) {
-            CointCoreGTODiscordProxy.sendPlayerMessageToDiscord(
-                    getDiscordDisplayName(player, GLOBAL_PREFIX.get()),
-                    plainItemText,
-                    player.getUUID().toString(),
-                    player.getGameProfile().getName()
-            );
-        }
-
+        publishNetworkChat(
+                player,
+                ChatView.GLOBAL,
+                withoutTime,
+                bodyMessage,
+                plainItemText,
+                DISCORD_SEND_GLOBAL_CHAT.get()
+        );
         GLOBAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
     }
 
@@ -2761,21 +2843,24 @@ public class CointCoreGTO {
 
         String cleanItemText = normalizeSharedItemName(itemText, stack);
         String plainItemText = "    " + cleanItemText;
-        String withoutTimePrefix = color(TRADE_PREFIX.get())
+        String withoutTimePrefix = networkSourcePrefix(player)
+                + color(TRADE_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
                 + "§f" + player.getGameProfile().getName()
                 + "§7: §f";
         String withoutTime = withoutTimePrefix + plainItemText;
+        Component bodyMessage = Component.literal(withoutTimePrefix + "    ")
+                .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText));
 
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
-            String fullPrefix = timePrefix(target) + withoutTimePrefix;
-            String fullPlain = fullPrefix + plainItemText;
-            Component liveMessage = Component.literal(fullPrefix + "    ")
-                    .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText));
+            String targetTime = timePrefix(target);
+            String fullPlain = targetTime + withoutTime;
+            Component liveMessage = Component.literal(targetTime).append(bodyMessage.copy());
             sendFilteredChatMessage(target, ChatView.TRADE, fullPlain, liveMessage);
         }
 
+        publishNetworkChat(player, ChatView.TRADE, withoutTime, bodyMessage, plainItemText, false);
         TRADE_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
     }
 
@@ -2939,31 +3024,31 @@ public class CointCoreGTO {
 
     private static void sendGlobalQuestShare(ServerPlayer player, String questCode, String questTitle) {
         String questText = getQuestPlainText(questTitle);
-        String withoutTimePrefix = color(GLOBAL_PREFIX.get())
+        String withoutTimePrefix = networkSourcePrefix(player)
+                + color(GLOBAL_PREFIX.get())
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
                 + "§f" + player.getGameProfile().getName()
                 + "§7: §f";
         String withoutTime = withoutTimePrefix + "    " + questText;
+        Component bodyMessage = Component.literal(withoutTimePrefix + "    ")
+                .append(buildQuestComponent(questCode, questTitle));
 
         for (ServerPlayer target : player.server.getPlayerList().getPlayers()) {
-            String fullPrefix = timePrefix(target) + withoutTimePrefix;
-            String fullPlain = fullPrefix + "    " + questText;
-            Component liveMessage = Component.literal(fullPrefix + "    ")
-                    .append(buildQuestComponent(questCode, questTitle));
-
+            String targetTime = timePrefix(target);
+            String fullPlain = targetTime + withoutTime;
+            Component liveMessage = Component.literal(targetTime).append(bodyMessage.copy());
             sendFilteredChatMessage(target, ChatView.GLOBAL, fullPlain, liveMessage);
         }
 
-        if (DISCORD_SEND_GLOBAL_CHAT.get()) {
-            CointCoreGTODiscordProxy.sendPlayerMessageToDiscord(
-                    getDiscordDisplayName(player, GLOBAL_PREFIX.get()),
-                    questText,
-                    player.getUUID().toString(),
-                    player.getGameProfile().getName()
-            );
-        }
-
+        publishNetworkChat(
+                player,
+                ChatView.GLOBAL,
+                withoutTime,
+                bodyMessage,
+                questText,
+                DISCORD_SEND_GLOBAL_CHAT.get()
+        );
         GLOBAL_CHAT_LOGGER.info(stripColor(timePrefix(player) + withoutTime));
     }
 
@@ -3009,12 +3094,10 @@ public class CointCoreGTO {
 
         String safeAuthor = sanitizeDiscord(author);
         String safeMessage = sanitizeDiscord(message);
-
-        String formatted;
+        String withoutTime;
 
         if (replyToMinecraftPlayer != null && !replyToMinecraftPlayer.isBlank()) {
-            formatted = timePrefix()
-                    + color(DISCORD_PREFIX.get())
+            withoutTime = color(DISCORD_PREFIX.get())
                     + "§f"
                     + safeAuthor
                     + " §7-> §e"
@@ -3022,19 +3105,72 @@ public class CointCoreGTO {
                     + "§7: §f"
                     + safeMessage;
         } else {
-            formatted = timePrefix()
-                    + color(DISCORD_PREFIX.get())
+            withoutTime = color(DISCORD_PREFIX.get())
                     + "§f"
                     + safeAuthor
                     + "§7: §f"
                     + safeMessage;
         }
 
+        Component bodyMessage = Component.literal(withoutTime);
         for (ServerPlayer target : CURRENT_SERVER.getPlayerList().getPlayers()) {
-            sendFilteredChatMessage(target, ChatView.GLOBAL, formatted);
+            String targetTime = timePrefix(target);
+            sendFilteredChatMessage(
+                    target,
+                    ChatView.GLOBAL,
+                    targetTime + withoutTime,
+                    Component.literal(targetTime).append(bodyMessage.copy())
+            );
         }
 
+        ClusterNetworkChat.publish(
+                "DISCORD",
+                "discord",
+                "GLOBAL",
+                "",
+                safeAuthor,
+                "",
+                withoutTime,
+                serializeChatComponent(bodyMessage),
+                null,
+                false
+        );
         DISCORD_CHAT_LOGGER.info(safeAuthor + ": " + safeMessage);
+    }
+
+    public static void receiveNetworkChatMessage(ClusterDatabase.NetworkChatMessage message) {
+        MinecraftServer currentServer = CURRENT_SERVER;
+        if (currentServer == null || message == null) {
+            return;
+        }
+        ChatView view = "TRADE".equalsIgnoreCase(message.channelName()) ? ChatView.TRADE : ChatView.GLOBAL;
+        Component bodyMessage = null;
+        if (message.componentJson() != null && !message.componentJson().isBlank()) {
+            try {
+                bodyMessage = Component.Serializer.fromJson(message.componentJson());
+            } catch (Throwable ignored) {
+            }
+        }
+        if (bodyMessage == null) {
+            bodyMessage = Component.literal(message.plainText() == null ? "" : message.plainText());
+        }
+        String plainText = message.plainText() == null ? "" : message.plainText();
+        for (ServerPlayer target : currentServer.getPlayerList().getPlayers()) {
+            String targetTime = timePrefix(target);
+            sendFilteredChatMessage(
+                    target,
+                    view,
+                    targetTime + plainText,
+                    Component.literal(targetTime).append(bodyMessage.copy())
+            );
+        }
+        if (view == ChatView.TRADE) {
+            TRADE_CHAT_LOGGER.info(stripColor(timePrefix() + plainText));
+        } else if ("DISCORD".equalsIgnoreCase(message.originType())) {
+            DISCORD_CHAT_LOGGER.info(stripColor(plainText));
+        } else {
+            GLOBAL_CHAT_LOGGER.info(stripColor(timePrefix() + plainText));
+        }
     }
 
     private static void mutePlayer(ServerPlayer player, long durationMillis, String reason) {
@@ -4134,7 +4270,8 @@ public class CointCoreGTO {
     }
 
     public static String getDiscordDisplayName(ServerPlayer player, String channelPrefix) {
-        String displayName = color(channelPrefix == null ? "" : channelPrefix)
+        String displayName = networkSourcePrefix(player)
+                + color(channelPrefix == null ? "" : channelPrefix)
                 + getLuckPermsPrefix(player)
                 + getStaffTag(player)
                 + player.getGameProfile().getName();

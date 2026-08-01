@@ -777,6 +777,42 @@ public final class ClusterTestModule {
                         )
 
                         .then(
+                                Commands.literal("chat")
+                                        .then(
+                                                Commands.literal("test")
+                                                        .executes(context ->
+                                                                startNetworkChatDeliveryTest(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(context ->
+                                                                showNetworkChatDeliveryTest(
+                                                                        context.getSource(),
+                                                                        null
+                                                                )
+                                                        )
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "testId",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                showNetworkChatDeliveryTest(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "testId"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                        )
+
+                        .then(
                                 Commands.literal("applyrestart")
                                         .executes(context ->
                                                 showPendingApplyRestartStatus(
@@ -9917,6 +9953,188 @@ public final class ClusterTestModule {
         }
     }
 
+    private int startNetworkChatDeliveryTest(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер не включён."));
+            return 0;
+        }
+        if (!currentConfig.networkChatEnabled()) {
+            source.sendFailure(Component.literal("§cМежсерверный чат выключен."));
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        source.sendSuccess(
+                () -> Component.literal("§eЗапускаю проверку доставки межсерверного чата..."),
+                false
+        );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                List<ClusterDatabase.ClusterNodeStatus> nodes =
+                        ClusterDatabase.listNodes(latestConfig);
+                Set<String> expectedNodes = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+                for (ClusterDatabase.ClusterNodeStatus node : nodes) {
+                    if (node.online()) {
+                        expectedNodes.add(node.nodeId());
+                    }
+                }
+                expectedNodes.add(latestConfig.nodeId());
+
+                String testId = UUID.randomUUID().toString();
+                ClusterDatabase.publishChatMessage(
+                        latestConfig,
+                        new ClusterDatabase.NetworkChatPublish(
+                                testId,
+                                latestConfig.nodeId(),
+                                latestConfig.networkRole(),
+                                "TEST",
+                                "DIAGNOSTIC",
+                                null,
+                                "gtocluster",
+                                null,
+                                String.join(",", expectedNodes),
+                                null,
+                                null,
+                                false
+                        )
+                );
+                ClusterDatabase.recordChatTestReceipt(
+                        latestConfig,
+                        testId,
+                        latestConfig.nodeId()
+                );
+
+                server.execute(() -> {
+                    source.sendSuccess(
+                            () -> Component.literal(
+                                    "§aChat test создан: §f" + testId
+                                            + " §7| ожидаются узлы: §f"
+                                            + String.join(", ", expectedNodes)
+                            ),
+                            false
+                    );
+                    source.sendSuccess(
+                            () -> Component.literal(
+                                    "§7Через 1-2 секунды: §f/gtocluster chat status " + testId
+                            ),
+                            false
+                    );
+                });
+            } catch (Exception exception) {
+                LOGGER.error("Unable to start network chat delivery test", exception);
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось запустить chat test: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int showNetworkChatDeliveryTest(
+            CommandSourceStack source,
+            String testId
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер не включён."));
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                ClusterDatabase.ChatDeliveryTest test =
+                        testId == null || testId.isBlank()
+                                ? ClusterDatabase.findLatestChatDeliveryTest(latestConfig)
+                                : ClusterDatabase.findChatDeliveryTest(latestConfig, testId);
+                if (test == null) {
+                    server.execute(() -> source.sendFailure(Component.literal(
+                            "§cChat test не найден."
+                    )));
+                    return;
+                }
+
+                Map<String, ClusterDatabase.ChatTestReceipt> receipts = new LinkedHashMap<>();
+                for (ClusterDatabase.ChatTestReceipt receipt : test.receipts()) {
+                    receipts.put(receipt.nodeId().toLowerCase(java.util.Locale.ROOT), receipt);
+                }
+
+                List<String> lines = new ArrayList<>();
+                int received = 0;
+                int duplicateNodes = 0;
+                for (String nodeId : test.expectedNodes()) {
+                    ClusterDatabase.ChatTestReceipt receipt =
+                            receipts.get(nodeId.toLowerCase(java.util.Locale.ROOT));
+                    if (receipt == null) {
+                        lines.add("§e[WAIT] §f" + nodeId + " §7не подтвердил получение");
+                        continue;
+                    }
+                    received++;
+                    long latencyMillis = Math.max(
+                            0L,
+                            receipt.firstReceivedAt().toEpochMilli() - test.createdAt().toEpochMilli()
+                    );
+                    if (receipt.receiveCount() > 1) {
+                        duplicateNodes++;
+                        lines.add(
+                                "§6[WARN] §f" + nodeId
+                                        + " §7получено, latency="
+                                        + formatChatLatency(latencyMillis)
+                                        + ", count=§e" + receipt.receiveCount()
+                        );
+                    } else {
+                        lines.add(
+                                "§a[OK] §f" + nodeId
+                                        + " §7получено, latency="
+                                        + formatChatLatency(latencyMillis)
+                                        + ", count=1"
+                        );
+                    }
+                }
+
+                long ageMillis = Math.max(0L, System.currentTimeMillis() - test.createdAt().toEpochMilli());
+                boolean success = received == test.expectedNodes().size() && duplicateNodes == 0;
+                String summary = (success ? "§aSUCCESS" : "§eWAITING")
+                        + " §7| test=" + test.testId()
+                        + " | origin=" + test.originNode()
+                        + " | received=" + received + "/" + test.expectedNodes().size()
+                        + " | duplicates=" + duplicateNodes
+                        + " | age=" + formatChatLatency(ageMillis);
+
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal(summary), false);
+                    for (String line : lines) {
+                        source.sendSuccess(() -> Component.literal(line), false);
+                    }
+                });
+            } catch (Exception exception) {
+                LOGGER.error("Unable to read network chat delivery test", exception);
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось прочитать chat test: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private static String formatChatLatency(long millis) {
+        long safeMillis = Math.max(0L, millis);
+        if (safeMillis < 1_000L) {
+            return safeMillis + "ms";
+        }
+        long seconds = safeMillis / 1_000L;
+        long remainder = safeMillis % 1_000L;
+        return seconds + "." + String.format(java.util.Locale.ROOT, "%03d", remainder) + "s";
+    }
+
     private int showClusterHealth(
             CommandSourceStack source
     ) {
@@ -9984,6 +10202,25 @@ public final class ClusterTestModule {
                     addHealthMessage(messages, HealthSeverity.WARNING,
                             "Синхронизация Forge capabilities выключена");
                 }
+                if (latestConfig.networkChatEnabled()) {
+                    addHealthMessage(messages, HealthSeverity.OK,
+                            "Межсерверный чат включён, role="
+                                    + latestConfig.networkRole()
+                                    + ", prefix="
+                                    + latestConfig.networkChatPrefix()
+                                    + ", dimension overrides="
+                                    + latestConfig.networkChatDimensionOverrides().size()
+                                    + ", transport retention="
+                                    + latestConfig.networkChatRetentionMinutes()
+                                    + "m, Discord election="
+                                    + latestConfig.discordClusterLeaderElection()
+                                    + ", leader="
+                                    + ClusterNetworkChat.isDiscordLeader());
+                } else {
+                    addHealthMessage(messages, HealthSeverity.INFO,
+                            "Межсерверный чат выключен");
+                }
+
                 if (!latestConfig.automaticDimensionSnapshots()) {
                     addHealthMessage(messages, HealthSeverity.WARNING,
                             "Автоматические snapshots выключены");

@@ -211,6 +211,10 @@ public class CointCoreGTODiscordBridge {
         CointCoreGTOEmoji.clearServerRegistry();
     }
 
+    public static boolean isReady() {
+        return enabled && jda != null && textChannel != null;
+    }
+
     public static void sendToDiscord(String message) {
         if (!enabled) {
             return;

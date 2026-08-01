@@ -10,7 +10,9 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientChatReceivedEvent;
+import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
 import net.minecraftforge.client.event.ScreenEvent;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 
@@ -29,7 +31,12 @@ import java.util.List;
 public class CointCoreGTOClient {
     public static final int CLIENT_CHAT_LINE_LIMIT = 5000;
     private static final int NON_CUBECHAT_HISTORY_LIMIT = 500;
+    private static final int PERSISTENT_CHAT_HISTORY_LIMIT = 1000;
     private static final Deque<Component> NON_CUBECHAT_HISTORY = new ArrayDeque<>();
+    private static final Deque<Component> PERSISTENT_CHAT_HISTORY = new ArrayDeque<>();
+    private static int persistentHistoryRestoreTicks = -1;
+    private static int persistentHistoryRestoreAttempts;
+    private static boolean suppressPersistentHistoryRestore;
 
     public static int getClientChatLineLimit() {
         return CLIENT_CHAT_LINE_LIMIT;
@@ -232,6 +239,93 @@ public class CointCoreGTOClient {
     }
 
     @SubscribeEvent
+    public static void onClientLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.gui == null) {
+            return;
+        }
+        capturePersistentChatHistory(minecraft.gui.getChat());
+    }
+
+    @SubscribeEvent
+    public static void onClientLoggingIn(ClientPlayerNetworkEvent.LoggingIn event) {
+        synchronized (PERSISTENT_CHAT_HISTORY) {
+            if (!PERSISTENT_CHAT_HISTORY.isEmpty()) {
+                persistentHistoryRestoreTicks = 10;
+                persistentHistoryRestoreAttempts = 0;
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public static void onClientTick(TickEvent.ClientTickEvent event) {
+        if (event.phase != TickEvent.Phase.END || persistentHistoryRestoreTicks < 0) {
+            return;
+        }
+        if (persistentHistoryRestoreTicks > 0) {
+            persistentHistoryRestoreTicks--;
+            return;
+        }
+        if (restorePersistentChatHistory()) {
+            persistentHistoryRestoreTicks = -1;
+            persistentHistoryRestoreAttempts = 0;
+            return;
+        }
+        persistentHistoryRestoreAttempts++;
+        if (persistentHistoryRestoreAttempts >= 120) {
+            persistentHistoryRestoreTicks = -1;
+            persistentHistoryRestoreAttempts = 0;
+            return;
+        }
+        persistentHistoryRestoreTicks = 5;
+    }
+
+    public static void beforeChatMessagesCleared(ChatComponent chat, boolean clearRecentChat) {
+        if (suppressPersistentHistoryRestore) {
+            return;
+        }
+        if (!clearRecentChat) {
+            clearPersistentChatHistory();
+            persistentHistoryRestoreTicks = -1;
+            persistentHistoryRestoreAttempts = 0;
+            return;
+        }
+        capturePersistentChatHistory(chat);
+    }
+
+    public static void onChatMessagesCleared(boolean clearRecentChat) {
+        if (suppressPersistentHistoryRestore || !clearRecentChat) {
+            return;
+        }
+        schedulePersistentHistoryRestore(5);
+    }
+
+    private static void capturePersistentChatHistory(ChatComponent chat) {
+        List<Component> currentMessages = snapshotChatComponents(chat);
+        if (currentMessages.isEmpty()) {
+            return;
+        }
+        synchronized (PERSISTENT_CHAT_HISTORY) {
+            PERSISTENT_CHAT_HISTORY.clear();
+            for (Component component : currentMessages) {
+                if (component != null) {
+                    PERSISTENT_CHAT_HISTORY.addLast(component.copy());
+                }
+            }
+            trimPersistentHistory();
+        }
+    }
+
+    private static void schedulePersistentHistoryRestore(int delayTicks) {
+        synchronized (PERSISTENT_CHAT_HISTORY) {
+            if (!PERSISTENT_CHAT_HISTORY.isEmpty()) {
+                persistentHistoryRestoreTicks = Math.max(0, delayTicks);
+                persistentHistoryRestoreAttempts = 0;
+            }
+        }
+    }
+
+    @SubscribeEvent
     public static void onRenderChatScreen(ScreenEvent.Render.Post event) {
         if (!(event.getScreen() instanceof ChatScreen)) {
             return;
@@ -363,8 +457,10 @@ public class CointCoreGTOClient {
             return;
         }
 
+        updatePersistentHistoryForIntentionalClear(keepSystemMessages);
+
         if (!keepSystemMessages) {
-            chat.clearMessages(false);
+            clearChatWithoutPersistentRestore(chat);
             return;
         }
 
@@ -373,12 +469,113 @@ public class CointCoreGTOClient {
         }
 
         List<Component> nonCubeMessages = snapshotNonCointCoreGTOMessages();
-        chat.clearMessages(false);
+        clearChatWithoutPersistentRestore(chat);
 
         for (Component component : nonCubeMessages) {
             if (component != null) {
                 chat.addMessage(component);
             }
+        }
+    }
+
+    private static boolean restorePersistentChatHistory() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.gui == null || minecraft.player == null) {
+            return false;
+        }
+        ChatComponent chat = minecraft.gui.getChat();
+        if (chat == null) {
+            return false;
+        }
+        List<Component> previousMessages;
+        synchronized (PERSISTENT_CHAT_HISTORY) {
+            previousMessages = new ArrayList<>(PERSISTENT_CHAT_HISTORY);
+        }
+        if (previousMessages.isEmpty()) {
+            return true;
+        }
+        List<Component> currentMessages = snapshotChatComponents(chat);
+        List<Component> combined = new ArrayList<>(previousMessages.size() + currentMessages.size());
+        combined.addAll(previousMessages);
+        combined.addAll(currentMessages);
+        if (combined.size() > PERSISTENT_CHAT_HISTORY_LIMIT) {
+            combined = new ArrayList<>(combined.subList(
+                    combined.size() - PERSISTENT_CHAT_HISTORY_LIMIT,
+                    combined.size()
+            ));
+        }
+        clearChatWithoutPersistentRestore(chat);
+        for (Component component : combined) {
+            if (component == null) {
+                continue;
+            }
+            Component copy = component.copy();
+            chat.addMessage(copy);
+            CointCoreGTOItemIconOverlay.rememberRestoredMessage(copy);
+        }
+        synchronized (PERSISTENT_CHAT_HISTORY) {
+            PERSISTENT_CHAT_HISTORY.clear();
+        }
+        return true;
+    }
+
+    private static List<Component> snapshotChatComponents(ChatComponent chat) {
+        List<Component> messages = new ArrayList<>();
+        if (chat == null) {
+            return messages;
+        }
+        try {
+            Field allMessagesField = findField(ChatComponent.class, "allMessages", "f_93760_");
+            if (allMessagesField == null) {
+                return messages;
+            }
+            allMessagesField.setAccessible(true);
+            Object value = allMessagesField.get(chat);
+            if (!(value instanceof List<?> rawList)) {
+                return messages;
+            }
+            for (int index = rawList.size() - 1; index >= 0; index--) {
+                Component component = extractGuiMessageComponent(rawList.get(index));
+                if (component != null) {
+                    messages.add(component.copy());
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return messages;
+    }
+
+    private static void trimPersistentHistory() {
+        while (PERSISTENT_CHAT_HISTORY.size() > PERSISTENT_CHAT_HISTORY_LIMIT) {
+            PERSISTENT_CHAT_HISTORY.removeFirst();
+        }
+    }
+
+    private static void clearChatWithoutPersistentRestore(ChatComponent chat) {
+        boolean previous = suppressPersistentHistoryRestore;
+        suppressPersistentHistoryRestore = true;
+        try {
+            chat.clearMessages(false);
+        } finally {
+            suppressPersistentHistoryRestore = previous;
+        }
+    }
+
+    private static void updatePersistentHistoryForIntentionalClear(boolean keepSystemMessages) {
+        synchronized (PERSISTENT_CHAT_HISTORY) {
+            if (!keepSystemMessages) {
+                PERSISTENT_CHAT_HISTORY.clear();
+                return;
+            }
+            PERSISTENT_CHAT_HISTORY.removeIf(component ->
+                    component != null && isCointCoreGTOText(component.getString())
+            );
+        }
+    }
+
+    private static void clearPersistentChatHistory() {
+        synchronized (PERSISTENT_CHAT_HISTORY) {
+            PERSISTENT_CHAT_HISTORY.clear();
         }
     }
 
@@ -404,7 +601,7 @@ public class CointCoreGTOClient {
 
     private static boolean clearOnlyCointCoreGTOMessages(ChatComponent chat) {
         try {
-            Field allMessagesField = findField(ChatComponent.class, "allMessages", "f_93761_");
+            Field allMessagesField = findField(ChatComponent.class, "allMessages", "f_93760_");
             if (allMessagesField == null) {
                 return false;
             }
@@ -419,7 +616,7 @@ public class CointCoreGTOClient {
             List<Object> allMessages = (List<Object>) rawList;
             allMessages.removeIf(CointCoreGTOClient::isCointCoreGTOGuiMessage);
 
-            Method refreshMethod = findMethod(ChatComponent.class, "refreshTrimmedMessages", "m_93796_");
+            Method refreshMethod = findMethod(ChatComponent.class, "refreshTrimmedMessage", "m_241120_");
             if (refreshMethod == null) {
                 return false;
             }
@@ -453,28 +650,26 @@ public class CointCoreGTOClient {
         return null;
     }
 
-    private static boolean isCointCoreGTOGuiMessage(Object message) {
+    private static Component extractGuiMessageComponent(Object message) {
         if (message == null) {
-            return false;
+            return null;
         }
-
         try {
-            Component component;
-
             if (message instanceof GuiMessage guiMessage) {
-                component = guiMessage.content();
-            } else {
-                Object content = message.getClass().getMethod("content").invoke(message);
-                if (!(content instanceof Component reflectedComponent)) {
-                    return false;
-                }
-                component = reflectedComponent;
+                return guiMessage.content();
             }
-
-            return isCointCoreGTOText(component.getString());
+            Object content = message.getClass().getMethod("content").invoke(message);
+            if (content instanceof Component component) {
+                return component;
+            }
         } catch (Throwable ignored) {
-            return false;
         }
+        return null;
+    }
+
+    private static boolean isCointCoreGTOGuiMessage(Object message) {
+        Component component = extractGuiMessageComponent(message);
+        return component != null && isCointCoreGTOText(component.getString());
     }
 
     private static boolean isCointCoreGTOText(String text) {
