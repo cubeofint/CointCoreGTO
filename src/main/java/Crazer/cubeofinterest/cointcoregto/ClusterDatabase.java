@@ -441,7 +441,31 @@ public final class ClusterDatabase {
                         )) AS ready_failovers_with_online_source,
                     (SELECT COUNT(*)
                        FROM cluster_operation_leases
-                      WHERE lease_until >= CURRENT_TIMESTAMP(3)) AS active_operation_leases
+                      WHERE lease_until >= CURRENT_TIMESTAMP(3)) AS active_operation_leases,
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_failovers
+                      WHERE status = 'READY') AS ready_failovers_awaiting_apply,
+                    (SELECT COUNT(*)
+                       FROM cluster_dimension_migrations
+                      WHERE status IN ('READY', 'ROLLBACK_READY')) AS ready_migrations_awaiting_apply,
+                    (SELECT GROUP_CONCAT(
+                                DISTINCT pending_apply.node_id
+                                ORDER BY pending_apply.node_id
+                                SEPARATOR ', '
+                            )
+                       FROM (
+                           SELECT target_node AS node_id
+                             FROM cluster_dimension_failovers
+                            WHERE status = 'READY'
+                           UNION
+                           SELECT target_node AS node_id
+                             FROM cluster_dimension_migrations
+                            WHERE status = 'READY'
+                           UNION
+                           SELECT source_node AS node_id
+                             FROM cluster_dimension_migrations
+                            WHERE status = 'ROLLBACK_READY'
+                       ) AS pending_apply) AS pending_apply_nodes
                 """;
 
         try (Connection connection = open(config)) {
@@ -465,6 +489,9 @@ public final class ClusterDatabase {
                         resultSet.getInt("stuck_operations"),
                         resultSet.getInt("ready_failovers_with_online_source"),
                         resultSet.getInt("active_operation_leases"),
+                        resultSet.getInt("ready_failovers_awaiting_apply"),
+                        resultSet.getInt("ready_migrations_awaiting_apply"),
+                        resultSet.getString("pending_apply_nodes"),
                         Instant.now()
                     );
                 }
@@ -1197,6 +1224,222 @@ public final class ClusterDatabase {
         }
     }
 
+    public static DimensionForgetPreview previewDimensionForget(
+            ClusterConfig config,
+            String dimensionId
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            DimensionAssignmentRow assignment =
+                    findDimensionAssignmentRow(
+                            connection,
+                            dimensionId
+                    );
+
+            if (assignment == null) {
+                return new DimensionForgetPreview(
+                        dimensionId,
+                        null,
+                        false,
+                        0,
+                        List.of(),
+                        false,
+                        false,
+                        false,
+                        false,
+                        "назначение не найдено"
+                );
+            }
+
+            DimensionActivity activity =
+                    loadDimensionActivity(
+                            connection,
+                            config.nodeTimeoutSeconds()
+                    ).get(dimensionId);
+            int activePlayers = activity == null
+                    ? 0
+                    : activity.playerCount();
+            List<String> activeNodes = activity == null
+                    ? List.of()
+                    : activity.nodeIds();
+            boolean freshActivity =
+                    hasFreshDimensionActivity(
+                            connection,
+                            dimensionId,
+                            config.nodeTimeoutSeconds()
+                    );
+            boolean activeMigration =
+                    hasActiveDimensionMigration(
+                            connection,
+                            dimensionId
+                    );
+            boolean activeFailover =
+                    hasActiveDimensionFailover(
+                            connection,
+                            dimensionId
+                    );
+            boolean activeSnapshot =
+                    hasPreparingDimensionSnapshot(
+                            connection,
+                            dimensionId
+                    );
+            String reason = null;
+
+            if (assignment.pinned()) {
+                reason = "назначение закреплено";
+            } else if (freshActivity) {
+                reason = activeNodes.isEmpty()
+                        ? "измерение недавно загружено на активном узле"
+                        : "в измерении находятся игроки на узлах "
+                        + activeNodes;
+            } else if (activeMigration) {
+                reason = "для измерения активна migration";
+            } else if (activeFailover) {
+                reason = "для измерения активен failover";
+            } else if (activeSnapshot) {
+                reason = "для измерения создаётся snapshot";
+            }
+
+            return new DimensionForgetPreview(
+                    dimensionId,
+                    assignment.nodeId(),
+                    assignment.pinned(),
+                    activePlayers,
+                    activeNodes,
+                    activeMigration,
+                    activeFailover,
+                    activeSnapshot,
+                    reason == null,
+                    reason
+            );
+        }
+    }
+
+    public static DimensionForgetResult forgetDimensionAssignment(
+            ClusterConfig config,
+            String dimensionId
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                String nodeId;
+                boolean pinned;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement("""
+                                     SELECT node_id, pinned
+                                     FROM dimension_assignments
+                                     WHERE dimension_id = ?
+                                     FOR UPDATE
+                                     """)) {
+                    statement.setString(1, dimensionId);
+
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        if (!resultSet.next()) {
+                            throw new SQLException(
+                                    "Назначение не найдено: "
+                                            + dimensionId
+                            );
+                        }
+
+                        nodeId = resultSet.getString("node_id");
+                        pinned = resultSet.getBoolean("pinned");
+                    }
+                }
+
+                lockDimensionActivity(connection);
+
+                if (pinned) {
+                    throw new SQLException(
+                            "Назначение закреплено: "
+                                    + dimensionId
+                    );
+                }
+                if (hasFreshDimensionActivity(
+                        connection,
+                        dimensionId,
+                        config.nodeTimeoutSeconds()
+                )) {
+                    throw new SQLException(
+                            "Измерение загружено на активном узле: "
+                                    + dimensionId
+                    );
+                }
+                if (hasActiveDimensionMigration(
+                        connection,
+                        dimensionId
+                )) {
+                    throw new SQLException(
+                            "Для измерения активна migration: "
+                                    + dimensionId
+                    );
+                }
+                if (hasActiveDimensionFailover(
+                        connection,
+                        dimensionId
+                )) {
+                    throw new SQLException(
+                            "Для измерения активен failover: "
+                                    + dimensionId
+                    );
+                }
+                if (hasPreparingDimensionSnapshot(
+                        connection,
+                        dimensionId
+                )) {
+                    throw new SQLException(
+                            "Для измерения создаётся snapshot: "
+                                    + dimensionId
+                    );
+                }
+
+                int deletedActivityRows;
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement("""
+                                     DELETE FROM cluster_dimension_activity
+                                     WHERE dimension_id = ?
+                                     """)) {
+                    statement.setString(1, dimensionId);
+                    deletedActivityRows = statement.executeUpdate();
+                }
+
+                try (PreparedStatement statement =
+                             connection.prepareStatement("""
+                                     DELETE FROM dimension_assignments
+                                     WHERE dimension_id = ?
+                                     """)) {
+                    statement.setString(1, dimensionId);
+
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException(
+                                "Не удалось удалить назначение: "
+                                        + dimensionId
+                        );
+                    }
+                }
+
+                connection.commit();
+
+                return new DimensionForgetResult(
+                        dimensionId,
+                        nodeId,
+                        deletedActivityRows,
+                        Instant.now()
+                );
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
     public static DimensionPlanResult planDimensionAssignments(
             ClusterConfig config,
             Collection<String> registeredDimensions,
@@ -1813,11 +2056,6 @@ public final class ClusterDatabase {
         return findDimensionMigration(config, migrationId);
     }
 
-    /**
-     * Publishes the prepared archive and its drain/rebalance item in one transaction.
-     * The target node cannot observe migration=READY while the operation item is
-     * still PREPARING.
-     */
     public static DimensionDrainItem markNodeDrainArchiveReady(
             ClusterConfig config,
             String drainItemId,
@@ -2021,11 +2259,6 @@ public final class ClusterDatabase {
         }
     }
 
-    /**
-     * Marks preparation as failed only while the archive is still unpublished.
-     * If READY/APPLYING/APPLIED became visible after an ambiguous commit, the
-     * operation item is reconciled forward instead of being downgraded to FAILED.
-     */
     public static boolean failNodeDrainPreparationIfPending(
             ClusterConfig config,
             String drainItemId,
@@ -2817,7 +3050,23 @@ public final class ClusterDatabase {
                             CASE
                                 WHEN nodes.last_seen IS NULL THEN -1
                                 ELSE GREATEST(0, TIMESTAMPDIFF(SECOND, nodes.last_seen, CURRENT_TIMESTAMP(3)))
-                            END AS heartbeat_age_seconds
+                            END AS heartbeat_age_seconds,
+                            (SELECT COUNT(*)
+                               FROM cluster_dimension_failovers AS ready_failovers
+                              WHERE ready_failovers.source_node = assignments.node_id
+                                AND ready_failovers.status = 'READY') AS ready_failover_count,
+                            (SELECT COUNT(*)
+                               FROM cluster_dimension_failovers AS applying_failovers
+                              WHERE applying_failovers.source_node = assignments.node_id
+                                AND applying_failovers.status = 'APPLYING') AS applying_failover_count,
+                            (SELECT GROUP_CONCAT(
+                                        DISTINCT pending_failovers.target_node
+                                        ORDER BY pending_failovers.target_node
+                                        SEPARATOR ', '
+                                    )
+                               FROM cluster_dimension_failovers AS pending_failovers
+                              WHERE pending_failovers.source_node = assignments.node_id
+                                AND pending_failovers.status IN ('READY', 'APPLYING')) AS pending_target_nodes
                      FROM dimension_assignments AS assignments
                      LEFT JOIN cluster_nodes AS nodes ON nodes.node_id = assignments.node_id
                      WHERE assignments.node_id <> ?
@@ -2837,10 +3086,19 @@ public final class ClusterDatabase {
                     boolean registered = resultSet.getTimestamp("last_seen") != null;
                     boolean cleanStop = resultSet.getTimestamp("stopped_at") != null;
                     int dimensionCount = resultSet.getInt("dimension_count");
+                    int readyFailoverCount = resultSet.getInt("ready_failover_count");
+                    int applyingFailoverCount = resultSet.getInt("applying_failover_count");
+                    String pendingTargetNodes = resultSet.getString("pending_target_nodes");
                     boolean eligible = false;
                     long secondsRemaining = 0L;
                     String reason;
-                    if (!registered) {
+                    if (applyingFailoverCount > 0) {
+                        reason = "failover находится в APPLYING; проверь target "
+                                + pendingTargetNodes;
+                    } else if (readyFailoverCount > 0) {
+                        reason = "failover подготовлен; перезапусти target "
+                                + pendingTargetNodes;
+                    } else if (!registered) {
                         reason = "узел не зарегистрирован; требуется ручной failover";
                     } else if (cleanStop && !config.automaticFailoverIncludeCleanStops()) {
                         reason = "чистая остановка; automatic failover запрещён";
@@ -2858,6 +3116,9 @@ public final class ClusterDatabase {
                             heartbeatAgeSeconds,
                             cleanStop,
                             dimensionCount,
+                            readyFailoverCount,
+                            applyingFailoverCount,
+                            pendingTargetNodes,
                             eligible,
                             secondsRemaining,
                             reason
@@ -6519,6 +6780,27 @@ public final class ClusterDatabase {
         }
     }
 
+    private static boolean hasFreshDimensionActivity(
+            Connection connection,
+            String dimensionId,
+            int timeoutSeconds
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT 1
+                FROM cluster_dimension_activity
+                WHERE dimension_id = ?
+                  AND last_seen >= TIMESTAMPADD(SECOND, -?, CURRENT_TIMESTAMP(3))
+                LIMIT 1
+                """)) {
+            statement.setString(1, dimensionId);
+            statement.setInt(2, Math.max(1, timeoutSeconds));
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+        }
+    }
+
     private static boolean hasActiveDimensionPlayers(
             Connection connection,
             String dimensionId,
@@ -8842,6 +9124,28 @@ public final class ClusterDatabase {
     ) {
     }
 
+    public record DimensionForgetPreview(
+            String dimensionId,
+            String nodeId,
+            boolean pinned,
+            int activePlayers,
+            List<String> activeNodes,
+            boolean activeMigration,
+            boolean activeFailover,
+            boolean activeSnapshot,
+            boolean removable,
+            String reason
+    ) {
+    }
+
+    public record DimensionForgetResult(
+            String dimensionId,
+            String previousNodeId,
+            int deletedActivityRows,
+            Instant deletedAt
+    ) {
+    }
+
     public record DimensionPinResult(
             String dimensionId,
             String nodeId,
@@ -9053,6 +9357,9 @@ public final class ClusterDatabase {
             int stuckOperations,
             int readyFailoversWithOnlineSource,
             int activeOperationLeases,
+            int readyFailoversAwaitingApply,
+            int readyMigrationsAwaitingApply,
+            String pendingApplyNodes,
             Instant checkedAt
     ) {
     }
@@ -9078,6 +9385,9 @@ public final class ClusterDatabase {
             long heartbeatAgeSeconds,
             boolean cleanStop,
             int dimensionCount,
+            int readyFailoverCount,
+            int applyingFailoverCount,
+            String pendingTargetNodes,
             boolean eligible,
             long secondsRemaining,
             String reason

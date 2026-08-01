@@ -1410,6 +1410,40 @@ public final class ClusterTestModule {
                                                         )
                                         )
                                         .then(
+                                                Commands.literal("forget")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "dimension",
+                                                                                ResourceLocationArgument.id()
+                                                                        )
+                                                                        .executes(
+                                                                                context ->
+                                                                                        forgetDimensionAssignment(
+                                                                                                context.getSource(),
+                                                                                                ResourceLocationArgument.getId(
+                                                                                                        context,
+                                                                                                        "dimension"
+                                                                                                ).toString(),
+                                                                                                false
+                                                                                        )
+                                                                        )
+                                                                        .then(
+                                                                                Commands.literal("confirm")
+                                                                                        .executes(
+                                                                                                context ->
+                                                                                                        forgetDimensionAssignment(
+                                                                                                                context.getSource(),
+                                                                                                                ResourceLocationArgument.getId(
+                                                                                                                        context,
+                                                                                                                        "dimension"
+                                                                                                                ).toString(),
+                                                                                                                true
+                                                                                                        )
+                                                                                        )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
                                                 Commands.literal("preview")
                                                         .executes(
                                                                 context ->
@@ -2832,6 +2866,147 @@ public final class ClusterTestModule {
                                 )
                         )
                 );
+            }
+        });
+
+        return 1;
+    }
+
+    private int forgetDimensionAssignment(
+            CommandSourceStack source,
+            String dimensionId,
+            boolean confirm
+    ) {
+        ClusterConfig currentConfig = config;
+
+        if (currentConfig == null
+                || !currentConfig.enabled()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКластер выключен или конфиг ещё не загружен."
+                    )
+            );
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        Set<String> registeredSet = Set.copyOf(
+                registeredDimensionIds(server)
+        );
+
+        if (registeredSet.contains(dimensionId)) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cУдаление запрещено: измерение зарегистрировано локально: §f"
+                                    + dimensionId
+                    )
+            );
+            return 0;
+        }
+
+        source.sendSuccess(
+                () -> Component.literal(
+                        confirm
+                                ? "§eУдаляю назначение измерения из кластера: §f"
+                                + dimensionId
+                                : "§eПроверяю назначение измерения: §f"
+                                + dimensionId
+                ),
+                false
+        );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+
+                if (confirm) {
+                    ClusterDatabase.DimensionForgetResult result =
+                            ClusterDatabase.forgetDimensionAssignment(
+                                    latestConfig,
+                                    dimensionId
+                            );
+                    refreshDimensionOwnerCache(latestConfig);
+
+                    server.execute(() -> source.sendSuccess(
+                            () -> Component.literal(
+                                    "§aНазначение удалено: §f"
+                                            + result.dimensionId()
+                                            + " §7| previous owner: §f"
+                                            + result.previousNodeId()
+                                            + " §7| activity rows: §f"
+                                            + result.deletedActivityRows()
+                            ),
+                            true
+                    ));
+                    return;
+                }
+
+                ClusterDatabase.DimensionForgetPreview preview =
+                        ClusterDatabase.previewDimensionForget(
+                                latestConfig,
+                                dimensionId
+                        );
+
+                server.execute(() -> {
+                    if (preview.nodeId() == null) {
+                        source.sendFailure(
+                                Component.literal(
+                                        "§cНазначение не найдено: §f"
+                                                + dimensionId
+                                )
+                        );
+                        return;
+                    }
+
+                    source.sendSuccess(
+                            () -> Component.literal(
+                                    "§6Кандидат на удаление: §f"
+                                            + preview.dimensionId()
+                                            + " §7-> §f"
+                                            + preview.nodeId()
+                                            + " §7| pinned: §f"
+                                            + preview.pinned()
+                                            + " §7| players: §f"
+                                            + preview.activePlayers()
+                                            + " §7| active nodes: §f"
+                                            + preview.activeNodes()
+                            ),
+                            false
+                    );
+
+                    if (!preview.removable()) {
+                        source.sendFailure(
+                                Component.literal(
+                                        "§cУдаление заблокировано: "
+                                                + preview.reason()
+                                )
+                        );
+                        return;
+                    }
+
+                    source.sendSuccess(
+                            () -> Component.literal(
+                                    "§eДля подтверждения: §f/gtocluster dimensions forget "
+                                            + dimensionId
+                                            + " confirm"
+                            ),
+                            false
+                    );
+                });
+            } catch (Exception exception) {
+                LOGGER.error(
+                        "Unable to forget cluster dimension assignment {}",
+                        dimensionId,
+                        exception
+                );
+
+                server.execute(() -> source.sendFailure(
+                        Component.literal(
+                                "§cНе удалось удалить назначение: "
+                                        + exceptionSummary(exception)
+                        )
+                ));
             }
         });
 
@@ -8279,23 +8454,36 @@ public final class ClusterTestModule {
                     }
                     for (ClusterDatabase.AutomaticFailoverCandidate candidate : candidates) {
                         String state;
-                        if (candidate.eligible()) {
+                        if (candidate.applyingFailoverCount() > 0) {
+                            state = "§cAPPLYING";
+                        } else if (candidate.readyFailoverCount() > 0) {
+                            state = "§6WAITING_RESTART";
+                        } else if (candidate.eligible()) {
                             state = "§cREADY";
                         } else if (candidate.secondsRemaining() > 0L) {
                             state = "§eWAIT " + candidate.secondsRemaining() + "s";
                         } else {
                             state = "§7SKIP";
                         }
+                        String pending = candidate.readyFailoverCount() > 0
+                                || candidate.applyingFailoverCount() > 0
+                                ? "§7 | pending: §f"
+                                + (candidate.readyFailoverCount()
+                                + candidate.applyingFailoverCount())
+                                + "§7 | target: §f"
+                                + candidate.pendingTargetNodes()
+                                : "";
                         source.sendSuccess(() -> Component.literal(
                                 state
                                         + " §f"
                                         + candidate.nodeId()
                                         + "§7 | heartbeat: §f"
                                         + candidate.heartbeatAgeSeconds()
-                                        + "s§7 | dimensions: §f"
+                                        + "s§7 | assignments: §f"
                                         + candidate.dimensionCount()
                                         + "§7 | clean stop: §f"
                                         + candidate.cleanStop()
+                                        + pending
                                         + "§7 | "
                                         + candidate.reason()
                         ), false);
@@ -8385,7 +8573,7 @@ public final class ClusterTestModule {
                         return;
                     }
                     source.sendSuccess(() -> Component.literal(
-                            "§aFailover READY: §f" + failovers.size() + "§a. Перезапусти target node, указанные ниже."
+                            "§aFailover READY: §f" + failovers.size() + "§a. Target-узлы ожидают перезапуска для применения."
                     ), false);
                     for (ClusterDatabase.DimensionFailover failover : failovers) {
                         source.sendSuccess(() -> Component.literal(
@@ -8594,10 +8782,17 @@ public final class ClusterTestModule {
                         );
                 prepared.addAll(failovers);
                 if (!failovers.isEmpty()) {
+                    String targetNodes = failovers.stream()
+                            .map(ClusterDatabase.DimensionFailover::targetNode)
+                            .distinct()
+                            .sorted()
+                            .reduce((left, right) -> left + ", " + right)
+                            .orElse("unknown");
                     LOGGER.warn(
-                            "Prepared {} snapshot failovers for offline node {}. Restart target nodes to apply them.",
+                            "Prepared {} snapshot failovers for offline node {}. Waiting for target restart: {}.",
                             failovers.size(),
-                            offlineNode
+                            offlineNode,
+                            targetNodes
                     );
                 }
             }
@@ -9249,6 +9444,7 @@ public final class ClusterTestModule {
                     }
 
                     List<String> unassigned = new ArrayList<>();
+                    List<String> unregisteredAssignments = new ArrayList<>();
                     List<String> orphanOwners = new ArrayList<>();
                     List<String> offlineOwners = new ArrayList<>();
                     List<String> conflicts = new ArrayList<>();
@@ -9256,6 +9452,15 @@ public final class ClusterTestModule {
                     int pinned = 0;
 
                     for (ClusterDatabase.DimensionAssignmentInfo assignment : assignments) {
+                        if (!registeredSet.contains(assignment.dimensionId())
+                                && assignment.nodeId() != null
+                                && !assignment.nodeId().isBlank()) {
+                            unregisteredAssignments.add(
+                                    assignment.dimensionId()
+                                            + "->"
+                                            + assignment.nodeId()
+                            );
+                        }
                         if (assignment.pinned()) {
                             pinned++;
                         }
@@ -9295,6 +9500,16 @@ public final class ClusterTestModule {
                         addHealthMessage(messages, HealthSeverity.CRITICAL,
                                 "Измерения без владельца: "
                                         + healthPreview(unassigned, 8));
+                    }
+                    if (!unregisteredAssignments.isEmpty()) {
+                        addHealthMessage(messages, HealthSeverity.INFO,
+                                "Назначения вне локального registry: "
+                                        + unregisteredAssignments.size()
+                                        + " (могут быть динамическими): "
+                                        + healthPreview(
+                                                unregisteredAssignments,
+                                                8
+                                        ));
                     }
                     if (!orphanOwners.isEmpty()) {
                         addHealthMessage(messages, HealthSeverity.CRITICAL,
@@ -9380,6 +9595,16 @@ public final class ClusterTestModule {
                         addHealthMessage(messages, HealthSeverity.CRITICAL,
                                 "READY failover при ONLINE source: "
                                         + operations.readyFailoversWithOnlineSource());
+                    }
+                    if (operations.readyFailoversAwaitingApply() > 0
+                            || operations.readyMigrationsAwaitingApply() > 0) {
+                        addHealthMessage(messages, HealthSeverity.WARNING,
+                                "Ожидают применения после перезапуска target-узлов: failovers="
+                                        + operations.readyFailoversAwaitingApply()
+                                        + ", migrations="
+                                        + operations.readyMigrationsAwaitingApply()
+                                        + ", targets="
+                                        + operations.pendingApplyNodes());
                     }
 
                     HealthSeverity transferSeverity =
@@ -9636,7 +9861,7 @@ public final class ClusterTestModule {
                                                 + node.nodeId()
                                                 + "§7 | players: §f"
                                                 + node.playerCount()
-                                                + "§7 | dimensions: §f"
+                                                + "§7 | assignments: §f"
                                                 + node.dimensionCount()
                                                 + "§7 | heartbeat: §f"
                                                 + node.heartbeatAgeSeconds()
