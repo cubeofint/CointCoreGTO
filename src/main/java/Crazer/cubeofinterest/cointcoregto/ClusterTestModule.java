@@ -27,6 +27,7 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -92,6 +93,9 @@ public final class ClusterTestModule {
             DIMENSION_SNAPSHOT_FROZEN = Set.of();
 
     private static final int DIMENSION_LIST_PAGE_SIZE = 12;
+    private static volatile PendingApplyConfirmation PENDING_APPLY_CONFIRMATION;
+    private static volatile String LAST_PENDING_APPLY_NOTIFICATION_FINGERPRINT;
+    private static volatile long LAST_PENDING_APPLY_NOTIFICATION_AT_MILLIS;
 
     
 
@@ -554,6 +558,7 @@ public final class ClusterTestModule {
         DATABASE_EXECUTOR.execute(() -> {
             runTest(server, false);
             checkAutomaticNodeOperationRecoveryAtStartup(server);
+            inspectPendingApplyRestart(server, config);
         });
     }
 
@@ -608,6 +613,8 @@ public final class ClusterTestModule {
                         currentConfig,
                         false
                 );
+
+                inspectPendingApplyRestart(server, currentConfig);
 
                 refreshDimensionOwnerCache(
                         currentConfig
@@ -693,6 +700,9 @@ public final class ClusterTestModule {
         lastAutomaticOperationRecoveryScanSummary = null;
         lastAutomaticOperationRecoverySummary = null;
         clearAutomaticOperationRecoveryWait();
+        PENDING_APPLY_CONFIRMATION = null;
+        LAST_PENDING_APPLY_NOTIFICATION_FINGERPRINT = null;
+        LAST_PENDING_APPLY_NOTIFICATION_AT_MILLIS = 0L;
         ClusterTransferGuard.clearAll();
     }
 
@@ -763,6 +773,49 @@ public final class ClusterTestModule {
                                                 showDimensionTickStatus(
                                                         context.getSource()
                                                 )
+                                        )
+                        )
+
+                        .then(
+                                Commands.literal("applyrestart")
+                                        .executes(context ->
+                                                showPendingApplyRestartStatus(
+                                                        context.getSource()
+                                                )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(context ->
+                                                                showPendingApplyRestartStatus(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("confirm")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "code",
+                                                                                StringArgumentType.word()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                confirmPendingApplyRestart(
+                                                                                        context.getSource(),
+                                                                                        StringArgumentType.getString(
+                                                                                                context,
+                                                                                                "code"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("cancel")
+                                                        .executes(context ->
+                                                                cancelPendingApplyRestart(
+                                                                        context.getSource()
+                                                                )
+                                                        )
                                         )
                         )
 
@@ -8432,6 +8485,365 @@ public final class ClusterTestModule {
         return 1;
     }
 
+    private void inspectPendingApplyRestart(
+            MinecraftServer server,
+            ClusterConfig currentConfig
+    ) {
+        if (currentConfig == null
+                || !currentConfig.enabled()
+                || !currentConfig.pendingApplyRestartEnabled()) {
+            LAST_PENDING_APPLY_NOTIFICATION_FINGERPRINT = null;
+            LAST_PENDING_APPLY_NOTIFICATION_AT_MILLIS = 0L;
+            clearPendingApplyConfirmation();
+            return;
+        }
+
+        try {
+            List<ClusterDatabase.PendingApplyOperation> operations =
+                    ClusterDatabase.listPendingApplyOperationsForNode(currentConfig);
+            if (operations.isEmpty()) {
+                LAST_PENDING_APPLY_NOTIFICATION_FINGERPRINT = null;
+                LAST_PENDING_APPLY_NOTIFICATION_AT_MILLIS = 0L;
+                clearPendingApplyConfirmation();
+                return;
+            }
+
+            String fingerprint = pendingApplyFingerprint(
+                    currentConfig.nodeId(),
+                    operations
+            );
+            long now = System.currentTimeMillis();
+            long intervalMillis = currentConfig
+                    .pendingApplyRestartNotificationIntervalSeconds() * 1_000L;
+            if (fingerprint.equals(LAST_PENDING_APPLY_NOTIFICATION_FINGERPRINT)
+                    && now - LAST_PENDING_APPLY_NOTIFICATION_AT_MILLIS < intervalMillis) {
+                return;
+            }
+
+            LAST_PENDING_APPLY_NOTIFICATION_FINGERPRINT = fingerprint;
+            LAST_PENDING_APPLY_NOTIFICATION_AT_MILLIS = now;
+            String summary = pendingApplySummary(operations);
+            LOGGER.warn(
+                    "Pending cluster apply detected on node {}: {}. Confirmation is required with /gtocluster applyrestart status",
+                    currentConfig.nodeId(),
+                    summary
+            );
+            server.execute(() -> broadcastToOperators(
+                    server,
+                    "§6Кластер ожидает применения на этом узле: §f"
+                            + summary
+                            + "§6. Для контроля выполни §f/gtocluster applyrestart status"
+            ));
+        } catch (Exception exception) {
+            LOGGER.warn(
+                    "Unable to inspect pending cluster apply restart on node {}: {}",
+                    currentConfig.nodeId(),
+                    exception.getMessage()
+            );
+        }
+    }
+
+    private int showPendingApplyRestartStatus(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        source.sendSuccess(() -> Component.literal(
+                "§eПроверяю pending apply для узла §f" + currentConfig.nodeId()
+        ), false);
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                List<ClusterDatabase.PendingApplyOperation> operations =
+                        ClusterDatabase.listPendingApplyOperationsForNode(latestConfig);
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Контролируемый apply restart: §f"
+                                    + latestConfig.pendingApplyRestartEnabled()
+                                    + "§7 | delay: §f"
+                                    + latestConfig.pendingApplyRestartDelaySeconds()
+                                    + "s§7 | confirmation timeout: §f"
+                                    + latestConfig.pendingApplyRestartConfirmationTimeoutSeconds()
+                                    + "s"
+                    ), false);
+                    source.sendSuccess(() -> Component.literal(
+                            "§7Текущее расписание рестарта: §f"
+                                    + CointCoreGTO.getClusterRestartControlStatus()
+                    ), false);
+
+                    if (!latestConfig.pendingApplyRestartEnabled()) {
+                        clearPendingApplyConfirmation();
+                        source.sendFailure(Component.literal(
+                                "§cКонтролируемый pending apply restart выключен в cluster config."
+                        ));
+                        return;
+                    }
+
+                    if (operations.isEmpty()) {
+                        clearPendingApplyConfirmation();
+                        source.sendSuccess(() -> Component.literal(
+                                "§aНа текущем узле нет операций, ожидающих применения при рестарте."
+                        ), false);
+                        return;
+                    }
+
+                    String fingerprint = pendingApplyFingerprint(
+                            latestConfig.nodeId(),
+                            operations
+                    );
+                    PendingApplyConfirmation confirmation = issuePendingApplyConfirmation(
+                            fingerprint,
+                            latestConfig.pendingApplyRestartConfirmationTimeoutSeconds()
+                    );
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Ожидают применения: §f" + pendingApplySummary(operations)
+                    ), false);
+                    int shown = Math.min(operations.size(), 20);
+                    for (int index = 0; index < shown; index++) {
+                        ClusterDatabase.PendingApplyOperation operation = operations.get(index);
+                        source.sendSuccess(() -> Component.literal(
+                                "§f" + operation.operationType()
+                                        + " §7| §f" + operation.dimensionId()
+                                        + " §7| §f" + operation.status()
+                                        + " §7| §f" + operation.operationId()
+                        ), false);
+                    }
+                    if (operations.size() > shown) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§7И ещё §f" + (operations.size() - shown)
+                        ), false);
+                    }
+                    long secondsLeft = Math.max(
+                            0L,
+                            (confirmation.expiresAtMillis() - System.currentTimeMillis() + 999L) / 1_000L
+                    );
+                    source.sendSuccess(() -> Component.literal(
+                            "§eДля одного немедленного безопасного рестарта: §f/gtocluster applyrestart confirm "
+                                    + confirmation.code()
+                                    + " §7(код действует " + secondsLeft + "s)"
+                    ), false);
+                    source.sendSuccess(() -> Component.literal(
+                            "§7Без подтверждения операции применятся при следующем обычном плановом рестарте. "
+                                    + "Автоматических повторных рестартов кластер не запускает."
+                    ), false);
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось проверить pending apply: " + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int confirmPendingApplyRestart(
+            CommandSourceStack source,
+            String code
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal("§cКластер выключен или конфиг ещё не загружен."));
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        source.sendSuccess(() -> Component.literal(
+                "§eПроверяю код и неизменность pending apply..."
+        ), false);
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterConfig latestConfig = ClusterConfig.load();
+                config = latestConfig;
+                if (!latestConfig.pendingApplyRestartEnabled()) {
+                    server.execute(() -> source.sendFailure(Component.literal(
+                            "§cКонтролируемый pending apply restart выключен в cluster config."
+                    )));
+                    return;
+                }
+
+                List<ClusterDatabase.PendingApplyOperation> operations =
+                        ClusterDatabase.listPendingApplyOperationsForNode(latestConfig);
+                if (operations.isEmpty()) {
+                    clearPendingApplyConfirmation();
+                    server.execute(() -> source.sendFailure(Component.literal(
+                            "§cPending apply уже отсутствует; рестарт не требуется."
+                    )));
+                    return;
+                }
+
+                String fingerprint = pendingApplyFingerprint(
+                        latestConfig.nodeId(),
+                        operations
+                );
+                String validationError = validatePendingApplyConfirmation(
+                        code,
+                        fingerprint
+                );
+                if (validationError != null) {
+                    server.execute(() -> source.sendFailure(Component.literal(
+                            "§c" + validationError
+                                    + " Выполни /gtocluster applyrestart status ещё раз."
+                    )));
+                    return;
+                }
+
+                String summary = pendingApplySummary(operations);
+                server.execute(() -> {
+                    String repeatedValidationError = validatePendingApplyConfirmation(
+                            code,
+                            fingerprint
+                    );
+                    if (repeatedValidationError != null) {
+                        source.sendFailure(Component.literal(
+                                "§c" + repeatedValidationError
+                                        + " Выполни /gtocluster applyrestart status ещё раз."
+                        ));
+                        return;
+                    }
+
+                    CointCoreGTO.ClusterRestartResult result =
+                            CointCoreGTO.requestClusterRestart(
+                                    latestConfig.pendingApplyRestartDelaySeconds(),
+                                    code,
+                                    "cluster pending apply: " + summary
+                            );
+                    if (!result.accepted()) {
+                        source.sendFailure(Component.literal("§c" + result.message()));
+                        return;
+                    }
+
+                    clearPendingApplyConfirmation();
+                    source.sendSuccess(() -> Component.literal(
+                            "§aПодтверждение принято. " + result.message()
+                    ), false);
+                    broadcastToOperators(
+                            server,
+                            "§cПодтверждён безопасный кластерный рестарт узла §f"
+                                    + latestConfig.nodeId()
+                                    + "§c: §f" + summary
+                    );
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось подтвердить pending apply restart: "
+                                + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int cancelPendingApplyRestart(
+            CommandSourceStack source
+    ) {
+        CointCoreGTO.ClusterRestartResult result =
+                CointCoreGTO.cancelClusterRestart();
+        if (!result.accepted()) {
+            source.sendFailure(Component.literal("§c" + result.message()));
+            return 0;
+        }
+        clearPendingApplyConfirmation();
+        source.sendSuccess(() -> Component.literal("§a" + result.message()), true);
+        return 1;
+    }
+
+    private static String pendingApplySummary(
+            List<ClusterDatabase.PendingApplyOperation> operations
+    ) {
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (ClusterDatabase.PendingApplyOperation operation : operations) {
+            counts.merge(operation.operationType(), 1, Integer::sum);
+        }
+        StringBuilder result = new StringBuilder();
+        for (Map.Entry<String, Integer> entry : counts.entrySet()) {
+            if (!result.isEmpty()) {
+                result.append(", ");
+            }
+            result.append(entry.getKey()).append('=').append(entry.getValue());
+        }
+        return result.toString();
+    }
+
+    private static String pendingApplyFingerprint(
+            String nodeId,
+            List<ClusterDatabase.PendingApplyOperation> operations
+    ) {
+        StringBuilder source = new StringBuilder(nodeId);
+        for (ClusterDatabase.PendingApplyOperation operation : operations) {
+            source.append('|')
+                    .append(operation.operationType())
+                    .append(':')
+                    .append(operation.operationId())
+                    .append(':')
+                    .append(operation.status())
+                    .append(':')
+                    .append(operation.dimensionId());
+        }
+        return UUID.nameUUIDFromBytes(
+                source.toString().getBytes(StandardCharsets.UTF_8)
+        ).toString();
+    }
+
+    private static synchronized PendingApplyConfirmation issuePendingApplyConfirmation(
+            String fingerprint,
+            int timeoutSeconds
+    ) {
+        long now = System.currentTimeMillis();
+        PendingApplyConfirmation current = PENDING_APPLY_CONFIRMATION;
+        if (current != null
+                && current.expiresAtMillis() > now
+                && current.fingerprint().equals(fingerprint)) {
+            return current;
+        }
+
+        String code = UUID.randomUUID()
+                .toString()
+                .replace("-", "")
+                .substring(0, 8)
+                .toUpperCase(java.util.Locale.ROOT);
+        PendingApplyConfirmation created = new PendingApplyConfirmation(
+                code,
+                fingerprint,
+                now + Math.max(30, timeoutSeconds) * 1_000L
+        );
+        PENDING_APPLY_CONFIRMATION = created;
+        return created;
+    }
+
+    private static synchronized String validatePendingApplyConfirmation(
+            String code,
+            String fingerprint
+    ) {
+        PendingApplyConfirmation confirmation = PENDING_APPLY_CONFIRMATION;
+        if (confirmation == null) {
+            return "Нет активного подтверждения.";
+        }
+        if (confirmation.expiresAtMillis() <= System.currentTimeMillis()) {
+            PENDING_APPLY_CONFIRMATION = null;
+            return "Код подтверждения истёк.";
+        }
+        if (!confirmation.code().equalsIgnoreCase(code)) {
+            return "Неверный код подтверждения.";
+        }
+        if (!confirmation.fingerprint().equals(fingerprint)) {
+            PENDING_APPLY_CONFIRMATION = null;
+            return "Набор pending apply изменился.";
+        }
+        return null;
+    }
+
+    private static synchronized void clearPendingApplyConfirmation() {
+        PENDING_APPLY_CONFIRMATION = null;
+    }
+
     private int showAutomaticFailoverWatch(
             CommandSourceStack source
     ) {
@@ -8468,7 +8880,7 @@ public final class ClusterTestModule {
                         if (candidate.applyingFailoverCount() > 0) {
                             state = "§cAPPLYING";
                         } else if (candidate.readyFailoverCount() > 0) {
-                            state = "§6WAITING_RESTART";
+                            state = "§6WAITING_CONFIRMATION";
                         } else if (candidate.eligible()) {
                             state = "§cREADY";
                         } else if (candidate.secondsRemaining() > 0L) {
@@ -9362,6 +9774,18 @@ public final class ClusterTestModule {
                     addHealthMessage(messages, HealthSeverity.WARNING,
                             "Автоматический failover выключен");
                 }
+                if (latestConfig.pendingApplyRestartEnabled()) {
+                    addHealthMessage(messages, HealthSeverity.OK,
+                            "Контролируемый pending apply restart включён, требуется ручное подтверждение, delay="
+                                    + latestConfig.pendingApplyRestartDelaySeconds()
+                                    + "s, confirmation timeout="
+                                    + latestConfig.pendingApplyRestartConfirmationTimeoutSeconds()
+                                    + "s");
+                } else {
+                    addHealthMessage(messages, HealthSeverity.INFO,
+                            "Контролируемый pending apply restart выключен; операции применятся при обычном рестарте");
+                }
+
                 if (latestConfig.automaticOperationRecovery()) {
                     long scanAt = lastAutomaticOperationRecoveryScanAtMillis;
                     long scanAgeSeconds = scanAt <= 0L
@@ -9398,6 +9822,8 @@ public final class ClusterTestModule {
                             ClusterDatabase.listDimensionSnapshotCoverage(latestConfig);
                     ClusterDatabase.OperationalHealth operations =
                             ClusterDatabase.readOperationalHealth(latestConfig);
+                    List<ClusterDatabase.PendingApplyOperation> localPendingApply =
+                            ClusterDatabase.listPendingApplyOperationsForNode(latestConfig);
 
                     addHealthMessage(messages, HealthSeverity.OK,
                             "MySQL доступен: " + database.databaseName()
@@ -9616,6 +10042,12 @@ public final class ClusterTestModule {
                                         + operations.readyMigrationsAwaitingApply()
                                         + ", targets="
                                         + operations.pendingApplyNodes());
+                    }
+                    if (!localPendingApply.isEmpty()) {
+                        addHealthMessage(messages, HealthSeverity.WARNING,
+                                "Текущий узел ожидает pending apply: "
+                                        + pendingApplySummary(localPendingApply)
+                                        + ". Проверь /gtocluster applyrestart status");
                     }
 
                     HealthSeverity transferSeverity =
@@ -10205,6 +10637,13 @@ public final class ClusterTestModule {
         }
 
         return suppression.dimensionId().equals(dimensionId);
+    }
+
+    private record PendingApplyConfirmation(
+            String code,
+            String fingerprint,
+            long expiresAtMillis
+    ) {
     }
 
     private enum HealthSeverity {

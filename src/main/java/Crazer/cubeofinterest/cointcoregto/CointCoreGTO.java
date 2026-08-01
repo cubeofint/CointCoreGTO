@@ -185,6 +185,9 @@ public class CointCoreGTO {
     private static long LAST_RESTART_CHECK_SECOND = -1L;
     private static boolean RESTARTING_NOW = false;
     private static boolean RESTART_PLAYERS_KICKED = false;
+    private static String RESTART_REQUEST_KIND = "none";
+    private static String CLUSTER_RESTART_CONFIRMATION_CODE;
+    private static String RESTART_REASON;
     private static final Set<Integer> SENT_RESTART_WARNINGS = ConcurrentHashMap.newKeySet();
 
     private static MinecraftServer CURRENT_SERVER;
@@ -627,6 +630,9 @@ public class CointCoreGTO {
         LAST_RESTART_CHECK_SECOND = -1L;
         RESTARTING_NOW = false;
         RESTART_PLAYERS_KICKED = false;
+        RESTART_REQUEST_KIND = "none";
+        CLUSTER_RESTART_CONFIRMATION_CODE = null;
+        RESTART_REASON = null;
         SENT_RESTART_WARNINGS.clear();
         CURRENT_SERVER = null;
     }
@@ -1554,6 +1560,9 @@ public class CointCoreGTO {
                                     NEXT_RESTART_MILLIS = -1L;
                                     RESTARTING_NOW = false;
                                     RESTART_PLAYERS_KICKED = false;
+                                    RESTART_REQUEST_KIND = "none";
+                                    CLUSTER_RESTART_CONFIRMATION_CODE = null;
+                                    RESTART_REASON = null;
                                     SENT_RESTART_WARNINGS.clear();
                                     ctx.getSource().sendSuccess(
                                             () -> Component.literal("§cБлижайший рестарт CointCoreGTO отменён до /cuberestart reload или перезапуска сервера."),
@@ -1738,6 +1747,9 @@ public class CointCoreGTO {
         RESTART_PLAYERS_KICKED = false;
         LAST_RESTART_CHECK_SECOND = -1L;
         NEXT_RESTART_MILLIS = calculateNextRestartMillis();
+        RESTART_REQUEST_KIND = NEXT_RESTART_MILLIS > 0L ? "scheduled" : "none";
+        CLUSTER_RESTART_CONFIRMATION_CODE = null;
+        RESTART_REASON = null;
 
         if (NEXT_RESTART_MILLIS > 0L) {
             System.out.println("[CointCoreGTO] Next automatic restart: " + formatDateTime(NEXT_RESTART_MILLIS));
@@ -1752,7 +1764,105 @@ public class CointCoreGTO {
         RESTART_PLAYERS_KICKED = false;
         LAST_RESTART_CHECK_SECOND = -1L;
         NEXT_RESTART_MILLIS = System.currentTimeMillis() + Math.max(5, seconds) * 1000L;
+        RESTART_REQUEST_KIND = "manual";
+        CLUSTER_RESTART_CONFIRMATION_CODE = null;
+        RESTART_REASON = "manual";
         broadcastRestartWarning(Math.max(5, seconds), true);
+    }
+
+    static synchronized ClusterRestartResult requestClusterRestart(
+            int seconds,
+            String confirmationCode,
+            String reason
+    ) {
+        int safeSeconds = Math.max(5, Math.min(3600, seconds));
+        long proposedRestartAt = System.currentTimeMillis() + safeSeconds * 1000L;
+
+        if (RESTARTING_NOW) {
+            return new ClusterRestartResult(false, false, "Рестарт уже выполняется.");
+        }
+
+        if ("cluster".equals(RESTART_REQUEST_KIND)) {
+            if (confirmationCode != null
+                    && confirmationCode.equalsIgnoreCase(CLUSTER_RESTART_CONFIRMATION_CODE)) {
+                return new ClusterRestartResult(
+                        true,
+                        false,
+                        "Кластерный рестарт уже запланирован: " + getRestartStatusText()
+                );
+            }
+            return new ClusterRestartResult(
+                    false,
+                    false,
+                    "Уже запланирован другой кластерный рестарт. Сначала проверь или отмени его."
+            );
+        }
+
+        if (NEXT_RESTART_MILLIS > 0L && NEXT_RESTART_MILLIS <= proposedRestartAt) {
+            return new ClusterRestartResult(
+                    true,
+                    false,
+                    "Более ранний рестарт уже запланирован: " + getRestartStatusText()
+            );
+        }
+
+        if (NEXT_RESTART_MILLIS > 0L && "manual".equals(RESTART_REQUEST_KIND)) {
+            return new ClusterRestartResult(
+                    false,
+                    false,
+                    "Уже запланирован ручной рестарт: " + getRestartStatusText()
+            );
+        }
+
+        SENT_RESTART_WARNINGS.clear();
+        RESTARTING_NOW = false;
+        RESTART_PLAYERS_KICKED = false;
+        LAST_RESTART_CHECK_SECOND = -1L;
+        NEXT_RESTART_MILLIS = proposedRestartAt;
+        RESTART_REQUEST_KIND = "cluster";
+        CLUSTER_RESTART_CONFIRMATION_CODE = confirmationCode;
+        RESTART_REASON = reason;
+        broadcastRestartWarning(safeSeconds, true);
+
+        return new ClusterRestartResult(
+                true,
+                true,
+                "Кластерный рестарт запланирован через " + safeSeconds + " сек."
+        );
+    }
+
+    static synchronized ClusterRestartResult cancelClusterRestart() {
+        if (!"cluster".equals(RESTART_REQUEST_KIND)) {
+            return new ClusterRestartResult(
+                    false,
+                    false,
+                    "Кластерный рестарт сейчас не запланирован."
+            );
+        }
+
+        SENT_RESTART_WARNINGS.clear();
+        RESTARTING_NOW = false;
+        RESTART_PLAYERS_KICKED = false;
+        LAST_RESTART_CHECK_SECOND = -1L;
+        NEXT_RESTART_MILLIS = calculateNextRestartMillis();
+        RESTART_REQUEST_KIND = NEXT_RESTART_MILLIS > 0L ? "scheduled" : "none";
+        CLUSTER_RESTART_CONFIRMATION_CODE = null;
+        RESTART_REASON = null;
+
+        return new ClusterRestartResult(
+                true,
+                false,
+                NEXT_RESTART_MILLIS > 0L
+                        ? "Кластерный рестарт отменён. Восстановлено обычное расписание: " + getRestartStatusText()
+                        : "Кластерный рестарт отменён. Обычное расписание выключено."
+        );
+    }
+
+    static synchronized String getClusterRestartControlStatus() {
+        String reason = RESTART_REASON == null || RESTART_REASON.isBlank()
+                ? ""
+                : " | reason=" + RESTART_REASON;
+        return "kind=" + RESTART_REQUEST_KIND + " | " + getRestartStatusText() + reason;
     }
 
     private static void handleRestartTick(MinecraftServer server) {
@@ -1916,7 +2026,12 @@ public class CointCoreGTO {
         }
 
         CointCoreGTODiscordProxy.sendToDiscord("🔄 **Сервер уходит на плановый рестарт.**");
-        System.out.println("[CointCoreGTO] Automatic restart started.");
+        System.out.println(
+                "[CointCoreGTO] Automatic restart started."
+                        + (RESTART_REASON == null || RESTART_REASON.isBlank()
+                        ? ""
+                        : " Reason: " + RESTART_REASON)
+        );
 
         server.execute(() -> {
             try {
@@ -1937,7 +2052,7 @@ public class CointCoreGTO {
         });
     }
 
-    private static String getRestartStatusText() {
+    static synchronized String getRestartStatusText() {
         if (NEXT_RESTART_MILLIS <= 0L) {
             return RESTART_ENABLED.get()
                     ? "§eАвто-рестарт включён, но ближайшее время не рассчитано. Используйте /cuberestart reload."
@@ -1946,6 +2061,14 @@ public class CointCoreGTO {
 
         long secondsLeft = Math.max(0L, (NEXT_RESTART_MILLIS - System.currentTimeMillis() + 999L) / 1000L);
         return "§aБлижайший рестарт: §e" + formatDateTime(NEXT_RESTART_MILLIS) + " МСК§7, осталось §e" + formatRestartTime((int) Math.min(Integer.MAX_VALUE, secondsLeft));
+    }
+
+
+    record ClusterRestartResult(
+            boolean accepted,
+            boolean scheduled,
+            String message
+    ) {
     }
 
     private static String formatRestartTime(int seconds) {

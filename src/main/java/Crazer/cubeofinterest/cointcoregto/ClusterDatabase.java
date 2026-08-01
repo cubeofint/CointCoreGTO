@@ -447,7 +447,13 @@ public final class ClusterDatabase {
                       WHERE status = 'READY') AS ready_failovers_awaiting_apply,
                     (SELECT COUNT(*)
                        FROM cluster_dimension_migrations
-                      WHERE status IN ('READY', 'ROLLBACK_READY')) AS ready_migrations_awaiting_apply,
+                      WHERE status IN (
+                          'READY',
+                          'APPLYING',
+                          'ROLLBACK_READY',
+                          'ROLLBACK_APPLYING',
+                          'FINALIZE_READY'
+                      )) AS ready_migrations_awaiting_apply,
                     (SELECT GROUP_CONCAT(
                                 DISTINCT pending_apply.node_id
                                 ORDER BY pending_apply.node_id
@@ -460,11 +466,15 @@ public final class ClusterDatabase {
                            UNION
                            SELECT target_node AS node_id
                              FROM cluster_dimension_migrations
-                            WHERE status = 'READY'
+                            WHERE status IN ('READY', 'APPLYING')
                            UNION
                            SELECT source_node AS node_id
                              FROM cluster_dimension_migrations
-                            WHERE status = 'ROLLBACK_READY'
+                            WHERE status IN (
+                                'ROLLBACK_READY',
+                                'ROLLBACK_APPLYING',
+                                'FINALIZE_READY'
+                            )
                        ) AS pending_apply) AS pending_apply_nodes
                 """;
 
@@ -3014,6 +3024,57 @@ public final class ClusterDatabase {
             statement.executeUpdate();
         }
     }
+    public static List<PendingApplyOperation> listPendingApplyOperationsForNode(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT operation_type, operation_id, dimension_id, source_node, target_node, status
+                     FROM (
+                         SELECT 'FAILOVER' AS operation_type, failover_id AS operation_id,
+                                dimension_id, source_node, target_node, status, created_at
+                         FROM cluster_dimension_failovers
+                         WHERE target_node = ? AND status = 'READY'
+                         UNION ALL
+                         SELECT 'MIGRATION' AS operation_type, migration_id AS operation_id,
+                                dimension_id, source_node, target_node, status, created_at
+                         FROM cluster_dimension_migrations
+                         WHERE target_node = ? AND status IN ('READY', 'APPLYING')
+                         UNION ALL
+                         SELECT 'ROLLBACK' AS operation_type, migration_id AS operation_id,
+                                dimension_id, source_node, target_node, status, created_at
+                         FROM cluster_dimension_migrations
+                         WHERE source_node = ? AND status IN ('ROLLBACK_READY', 'ROLLBACK_APPLYING')
+                         UNION ALL
+                         SELECT 'FINALIZATION' AS operation_type, migration_id AS operation_id,
+                                dimension_id, source_node, target_node, status, created_at
+                         FROM cluster_dimension_migrations
+                         WHERE source_node = ? AND status = 'FINALIZE_READY'
+                     ) AS pending_apply
+                     ORDER BY created_at, operation_type, operation_id
+                     """)) {
+            statement.setString(1, config.nodeId());
+            statement.setString(2, config.nodeId());
+            statement.setString(3, config.nodeId());
+            statement.setString(4, config.nodeId());
+            List<PendingApplyOperation> operations = new ArrayList<>();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    operations.add(new PendingApplyOperation(
+                            resultSet.getString("operation_type"),
+                            resultSet.getString("operation_id"),
+                            resultSet.getString("dimension_id"),
+                            resultSet.getString("source_node"),
+                            resultSet.getString("target_node"),
+                            resultSet.getString("status")
+                    ));
+                }
+            }
+            return List.copyOf(operations);
+        }
+    }
+
     public static List<String> listOfflineDimensionOwnerNodes(
             ClusterConfig config
     ) throws SQLException {
@@ -3096,7 +3157,7 @@ public final class ClusterDatabase {
                         reason = "failover находится в APPLYING; проверь target "
                                 + pendingTargetNodes;
                     } else if (readyFailoverCount > 0) {
-                        reason = "failover подготовлен; перезапусти target "
+                        reason = "failover подготовлен; target должен подтвердить рестарт "
                                 + pendingTargetNodes;
                     } else if (!registered) {
                         reason = "узел не зарегистрирован; требуется ручной failover";
@@ -9340,6 +9401,16 @@ public final class ClusterDatabase {
             String dimensionId,
             String ownerNode,
             Instant latestReadyAt
+    ) {
+    }
+
+    public record PendingApplyOperation(
+            String operationType,
+            String operationId,
+            String dimensionId,
+            String sourceNode,
+            String targetNode,
+            String status
     ) {
     }
 

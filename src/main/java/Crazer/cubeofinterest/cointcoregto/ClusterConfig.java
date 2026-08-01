@@ -32,6 +32,10 @@ public final class ClusterConfig {
     private final boolean automaticFailoverIncludeCleanStops;
     private final boolean automaticOperationRecovery;
     private final int automaticOperationRecoveryIntervalSeconds;
+    private final boolean pendingApplyRestartEnabled;
+    private final int pendingApplyRestartDelaySeconds;
+    private final int pendingApplyRestartConfirmationTimeoutSeconds;
+    private final int pendingApplyRestartNotificationIntervalSeconds;
     private final boolean failClosedRouting;
     private final boolean syncPlayerData;
     private final int maxPlayerDataBytes;
@@ -66,6 +70,10 @@ public final class ClusterConfig {
             boolean automaticFailoverIncludeCleanStops,
             boolean automaticOperationRecovery,
             int automaticOperationRecoveryIntervalSeconds,
+            boolean pendingApplyRestartEnabled,
+            int pendingApplyRestartDelaySeconds,
+            int pendingApplyRestartConfirmationTimeoutSeconds,
+            int pendingApplyRestartNotificationIntervalSeconds,
             boolean failClosedRouting,
             boolean syncPlayerData,
             int maxPlayerDataBytes,
@@ -99,6 +107,10 @@ public final class ClusterConfig {
         this.automaticFailoverIncludeCleanStops = automaticFailoverIncludeCleanStops;
         this.automaticOperationRecovery = automaticOperationRecovery;
         this.automaticOperationRecoveryIntervalSeconds = automaticOperationRecoveryIntervalSeconds;
+        this.pendingApplyRestartEnabled = pendingApplyRestartEnabled;
+        this.pendingApplyRestartDelaySeconds = pendingApplyRestartDelaySeconds;
+        this.pendingApplyRestartConfirmationTimeoutSeconds = pendingApplyRestartConfirmationTimeoutSeconds;
+        this.pendingApplyRestartNotificationIntervalSeconds = pendingApplyRestartNotificationIntervalSeconds;
         this.failClosedRouting = failClosedRouting;
         this.syncPlayerData = syncPlayerData;
         this.maxPlayerDataBytes = maxPlayerDataBytes;
@@ -161,6 +173,33 @@ public final class ClusterConfig {
                         "automatic_operation_recovery_interval_seconds",
                         60,
                         15,
+                        3600
+                ),
+                Boolean.parseBoolean(
+                        properties.getProperty(
+                                "pending_apply_restart_enabled",
+                                "true"
+                        ).trim()
+                ),
+                rangedInt(
+                        properties,
+                        "pending_apply_restart_delay_seconds",
+                        15,
+                        5,
+                        3600
+                ),
+                rangedInt(
+                        properties,
+                        "pending_apply_restart_confirmation_timeout_seconds",
+                        300,
+                        30,
+                        3600
+                ),
+                rangedInt(
+                        properties,
+                        "pending_apply_restart_notification_interval_seconds",
+                        300,
+                        60,
                         3600
                 ),
                 Boolean.parseBoolean(
@@ -366,6 +405,10 @@ public final class ClusterConfig {
         defaults.setProperty("automatic_failover_include_clean_stops", "false");
         defaults.setProperty("automatic_operation_recovery", "false");
         defaults.setProperty("automatic_operation_recovery_interval_seconds", "60");
+        defaults.setProperty("pending_apply_restart_enabled", "true");
+        defaults.setProperty("pending_apply_restart_delay_seconds", "15");
+        defaults.setProperty("pending_apply_restart_confirmation_timeout_seconds", "300");
+        defaults.setProperty("pending_apply_restart_notification_interval_seconds", "300");
         defaults.setProperty("fail_closed_routing", "true");
         defaults.setProperty("sync_player_data", "true");
         defaults.setProperty(
@@ -481,6 +524,22 @@ public final class ClusterConfig {
 
     public int automaticOperationRecoveryIntervalSeconds() {
         return automaticOperationRecoveryIntervalSeconds;
+    }
+
+    public boolean pendingApplyRestartEnabled() {
+        return pendingApplyRestartEnabled;
+    }
+
+    public int pendingApplyRestartDelaySeconds() {
+        return pendingApplyRestartDelaySeconds;
+    }
+
+    public int pendingApplyRestartConfirmationTimeoutSeconds() {
+        return pendingApplyRestartConfirmationTimeoutSeconds;
+    }
+
+    public int pendingApplyRestartNotificationIntervalSeconds() {
+        return pendingApplyRestartNotificationIntervalSeconds;
     }
 
     public boolean failClosedRouting() {
