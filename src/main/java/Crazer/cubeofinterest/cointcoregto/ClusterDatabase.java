@@ -7027,6 +7027,23 @@ public final class ClusterDatabase {
                   AND failovers.status = 'APPLIED'
                   AND NOT EXISTS (
                       SELECT 1
+                      FROM cluster_dimension_failovers AS newer_failovers
+                      WHERE newer_failovers.dimension_id = failovers.dimension_id
+                        AND newer_failovers.source_node = failovers.source_node
+                        AND newer_failovers.target_node = failovers.target_node
+                        AND newer_failovers.status = 'APPLIED'
+                        AND (
+                            COALESCE(newer_failovers.applied_at, newer_failovers.updated_at, newer_failovers.created_at)
+                                > COALESCE(failovers.applied_at, failovers.updated_at, failovers.created_at)
+                            OR (
+                                COALESCE(newer_failovers.applied_at, newer_failovers.updated_at, newer_failovers.created_at)
+                                    = COALESCE(failovers.applied_at, failovers.updated_at, failovers.created_at)
+                                AND newer_failovers.failover_id > failovers.failover_id
+                            )
+                        )
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
                       FROM cluster_dimension_failbacks AS failbacks
                       WHERE failbacks.failover_id = failovers.failover_id
                         AND failbacks.status IN ('PREPARING', 'READY', 'APPLYING', 'APPLIED')
