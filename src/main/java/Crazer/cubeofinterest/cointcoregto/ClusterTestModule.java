@@ -74,6 +74,8 @@ public final class ClusterTestModule {
 
     private static volatile Map<String, String>
             DIMENSION_OWNER_CACHE = Map.of();
+    private static volatile long
+            DIMENSION_OWNER_CACHE_REFRESHED_AT_MILLIS;
 
     private static final Set<String>
             DIMENSION_TICK_SUPPRESSION_LOGGED =
@@ -195,22 +197,35 @@ public final class ClusterTestModule {
             return true;
         }
 
-        if (!level.players().isEmpty()) {
+        if (!currentConfig.dimensionTickIsolation()) {
             DIMENSION_TICK_SUPPRESSION_LOGGED.remove(dimensionId);
             return false;
         }
 
-        if (!currentConfig.dimensionTickIsolation()) {
-            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(dimensionId);
-            return false;
+        if (!isDimensionOwnerCacheFresh(currentConfig)) {
+            if (DIMENSION_TICK_SUPPRESSION_LOGGED.add(dimensionId)) {
+                LOGGER.warn(
+                        "Dimension tick isolation fail-closed: freezing {} on node {} because owner cache is {}",
+                        dimensionId,
+                        currentConfig.nodeId(),
+                        dimensionOwnerCacheState(currentConfig)
+                );
+            }
+            return true;
         }
 
         String ownerNode =
                 DIMENSION_OWNER_CACHE.get(dimensionId);
 
         if (ownerNode == null || ownerNode.isBlank()) {
-            DIMENSION_TICK_SUPPRESSION_LOGGED.remove(dimensionId);
-            return false;
+            if (DIMENSION_TICK_SUPPRESSION_LOGGED.add(dimensionId)) {
+                LOGGER.warn(
+                        "Dimension tick isolation fail-closed: freezing {} on node {} because owner is unknown",
+                        dimensionId,
+                        currentConfig.nodeId()
+                );
+            }
+            return true;
         }
 
         boolean suppressed =
@@ -479,6 +494,7 @@ public final class ClusterTestModule {
                     startupConfig
             );
             refreshDimensionMigrationFreeze(startupConfig);
+            refreshDimensionOwnerCache(startupConfig);
         } catch (Exception exception) {
             lastError = exception.getClass().getSimpleName()
                     + ": "
@@ -657,6 +673,7 @@ public final class ClusterTestModule {
 
         heartbeatTickCounter = 0;
         DIMENSION_OWNER_CACHE = Map.of();
+        DIMENSION_OWNER_CACHE_REFRESHED_AT_MILLIS = 0L;
         DIMENSION_PLAYER_COUNT_SNAPSHOT = Map.of();
         DIMENSION_MIGRATION_FROZEN = Set.of();
         DIMENSION_MIGRATION_BLOCKED = Set.of();
@@ -5153,10 +5170,62 @@ public final class ClusterTestModule {
     private void refreshDimensionOwnerCache(
             ClusterConfig currentConfig
     ) throws java.sql.SQLException {
-        DIMENSION_OWNER_CACHE =
+        Map<String, String> owners =
                 ClusterDatabase.listDimensionOwners(
                         currentConfig
                 );
+        DIMENSION_OWNER_CACHE = owners;
+        DIMENSION_OWNER_CACHE_REFRESHED_AT_MILLIS =
+                System.currentTimeMillis();
+    }
+
+    private static boolean isDimensionOwnerCacheFresh(
+            ClusterConfig currentConfig
+    ) {
+        long refreshedAt = DIMENSION_OWNER_CACHE_REFRESHED_AT_MILLIS;
+        if (refreshedAt <= 0L) {
+            return false;
+        }
+
+        long maximumAgeMillis =
+                currentConfig.dimensionOwnerCacheMaxAgeSeconds()
+                        * 1_000L;
+        long ageMillis = Math.max(
+                0L,
+                System.currentTimeMillis() - refreshedAt
+        );
+        return ageMillis <= maximumAgeMillis;
+    }
+
+    private static long dimensionOwnerCacheAgeSeconds() {
+        long refreshedAt = DIMENSION_OWNER_CACHE_REFRESHED_AT_MILLIS;
+        if (refreshedAt <= 0L) {
+            return -1L;
+        }
+
+        return Math.max(
+                0L,
+                (System.currentTimeMillis() - refreshedAt) / 1_000L
+        );
+    }
+
+    private static String dimensionOwnerCacheState(
+            ClusterConfig currentConfig
+    ) {
+        long ageSeconds = dimensionOwnerCacheAgeSeconds();
+        if (ageSeconds < 0L) {
+            return "never loaded";
+        }
+
+        String freshness = isDimensionOwnerCacheFresh(currentConfig)
+                ? "fresh"
+                : "stale";
+        return freshness
+                + ", age="
+                + ageSeconds
+                + "s, max="
+                + currentConfig.dimensionOwnerCacheMaxAgeSeconds()
+                + "s";
     }
 
     private static void updateCachedDimensionOwner(
@@ -9050,8 +9119,15 @@ public final class ClusterTestModule {
 
                 if (latestConfig.dimensionTickIsolation()
                         && DIMENSION_TICK_GUARD_ACTIVE.get()) {
-                    addHealthMessage(messages, HealthSeverity.OK,
-                            "Изоляция тиков включена, mixin активен");
+                    if (isDimensionOwnerCacheFresh(latestConfig)) {
+                        addHealthMessage(messages, HealthSeverity.OK,
+                                "Изоляция тиков включена, mixin активен, owner cache "
+                                        + dimensionOwnerCacheState(latestConfig));
+                    } else {
+                        addHealthMessage(messages, HealthSeverity.CRITICAL,
+                                "Изоляция тиков fail-closed: owner cache "
+                                        + dimensionOwnerCacheState(latestConfig));
+                    }
                 } else if (!latestConfig.dimensionTickIsolation()) {
                     addHealthMessage(messages, HealthSeverity.WARNING,
                             "Изоляция тиков отключена");
@@ -9566,7 +9642,9 @@ public final class ClusterTestModule {
                                 + DIMENSION_TICK_GUARD_ACTIVE.get()
                                 + "§7 | узел: §f"
                                 + currentConfig.nodeId()
-                                + "§7 | неизвестный владелец: §aTICKING (fail-open)"
+                                + "§7 | неизвестный владелец: §cFROZEN (fail-closed)"
+                                + "§7 | owner cache: §f"
+                                + dimensionOwnerCacheState(currentConfig)
                 ),
                 false
         );
@@ -9593,9 +9671,11 @@ public final class ClusterTestModule {
                     DIMENSION_SNAPSHOT_FROZEN.contains(dimensionId);
             boolean ownerKnown =
                     ownerNode != null && !ownerNode.isBlank();
+            boolean ownerCacheFresh =
+                    isDimensionOwnerCacheFresh(currentConfig);
             boolean ownershipFrozen =
                     currentConfig.dimensionTickIsolation()
-                            && level.players().isEmpty()
+                            && ownerCacheFresh
                             && ownerKnown
                             && !ownerNode.equalsIgnoreCase(
                                     currentConfig.nodeId()
@@ -9611,10 +9691,14 @@ public final class ClusterTestModule {
                 state = "§cFROZEN §7(snapshot)";
             } else if (!currentConfig.dimensionTickIsolation()) {
                 state = "§eTICKING §7(isolation disabled)";
-            } else if (!level.players().isEmpty()) {
-                state = "§eTICKING §7(players present)";
+            } else if (!ownerCacheFresh) {
+                state = "§cFROZEN §7(owner cache "
+                        + (DIMENSION_OWNER_CACHE_REFRESHED_AT_MILLIS <= 0L
+                        ? "not loaded"
+                        : "stale")
+                        + ")";
             } else if (!ownerKnown) {
-                state = "§eTICKING §7(owner unknown)";
+                state = "§cFROZEN §7(owner unknown)";
             } else if (suppressed) {
                 state = "§cFROZEN";
             } else {
@@ -9705,6 +9789,9 @@ public final class ClusterTestModule {
                                 + currentConfig.playerBackupRetentionDays()
                                 + " days§7, dimension tick isolation: §f"
                                 + currentConfig.dimensionTickIsolation()
+                                + "§7, dimension owner cache max age: §f"
+                                + currentConfig.dimensionOwnerCacheMaxAgeSeconds()
+                                + "s"
                                 + "§7, migration staging: §f"
                                 + (currentConfig.dimensionMigrationStagingPath() == null
                                 ? "not configured"

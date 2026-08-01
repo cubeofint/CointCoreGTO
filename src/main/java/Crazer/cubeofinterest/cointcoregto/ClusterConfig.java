@@ -37,6 +37,7 @@ public final class ClusterConfig {
     private final int maxPlayerDataBytes;
     private final boolean syncForgeCapabilities;
     private final boolean dimensionTickIsolation;
+    private final int dimensionOwnerCacheMaxAgeSeconds;
     private final Path dimensionMigrationStagingPath;
     private final int dimensionMigrationBackupRetentionDays;
     private final boolean automaticDimensionSnapshots;
@@ -70,6 +71,7 @@ public final class ClusterConfig {
             int maxPlayerDataBytes,
             boolean syncForgeCapabilities,
             boolean dimensionTickIsolation,
+            int dimensionOwnerCacheMaxAgeSeconds,
             Path dimensionMigrationStagingPath,
             int dimensionMigrationBackupRetentionDays,
             boolean automaticDimensionSnapshots,
@@ -102,6 +104,7 @@ public final class ClusterConfig {
         this.maxPlayerDataBytes = maxPlayerDataBytes;
         this.syncForgeCapabilities = syncForgeCapabilities;
         this.dimensionTickIsolation = dimensionTickIsolation;
+        this.dimensionOwnerCacheMaxAgeSeconds = dimensionOwnerCacheMaxAgeSeconds;
         this.dimensionMigrationStagingPath = dimensionMigrationStagingPath;
         this.dimensionMigrationBackupRetentionDays = dimensionMigrationBackupRetentionDays;
         this.automaticDimensionSnapshots = automaticDimensionSnapshots;
@@ -188,6 +191,13 @@ public final class ClusterConfig {
                                 "dimension_tick_isolation",
                                 "false"
                         ).trim()
+                ),
+                rangedInt(
+                        properties,
+                        "dimension_owner_cache_max_age_seconds",
+                        15,
+                        5,
+                        3600
                 ),
                 optionalPath(properties, "dimension_migration_staging_path"),
                 positiveInt(properties, "dimension_migration_backup_retention_days", 7),
@@ -371,6 +381,10 @@ public final class ClusterConfig {
                 "false"
         );
         defaults.setProperty(
+                "dimension_owner_cache_max_age_seconds",
+                "15"
+        );
+        defaults.setProperty(
                 "dimension_migration_staging_path",
                 ""
         );
@@ -487,6 +501,10 @@ public final class ClusterConfig {
 
     public boolean dimensionTickIsolation() {
         return dimensionTickIsolation;
+    }
+
+    public int dimensionOwnerCacheMaxAgeSeconds() {
+        return dimensionOwnerCacheMaxAgeSeconds;
     }
 
     public Path dimensionMigrationStagingPath() {
