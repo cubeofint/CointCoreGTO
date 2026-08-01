@@ -9585,16 +9585,35 @@ public final class ClusterTestModule {
             boolean suppressed =
                     isDimensionTickSuppressed(level);
 
+            boolean migrationFrozen =
+                    DIMENSION_MIGRATION_FROZEN.contains(dimensionId);
+            boolean activeMigration =
+                    DIMENSION_MIGRATION_BLOCKED.contains(dimensionId);
+            boolean snapshotFrozen =
+                    DIMENSION_SNAPSHOT_FROZEN.contains(dimensionId);
+            boolean ownerKnown =
+                    ownerNode != null && !ownerNode.isBlank();
+            boolean ownershipFrozen =
+                    currentConfig.dimensionTickIsolation()
+                            && level.players().isEmpty()
+                            && ownerKnown
+                            && !ownerNode.equalsIgnoreCase(
+                                    currentConfig.nodeId()
+                            );
+
             String state;
             if (!currentConfig.enabled()) {
                 state = "§eTICKING §7(cluster disabled)";
-            } else if (DIMENSION_MIGRATION_FROZEN.contains(dimensionId)) {
+            } else if (migrationFrozen
+                    && (activeMigration || !ownershipFrozen)) {
                 state = "§cFROZEN §7(migration)";
+            } else if (snapshotFrozen && !ownershipFrozen) {
+                state = "§cFROZEN §7(snapshot)";
             } else if (!currentConfig.dimensionTickIsolation()) {
                 state = "§eTICKING §7(isolation disabled)";
             } else if (!level.players().isEmpty()) {
                 state = "§eTICKING §7(players present)";
-            } else if (ownerNode == null || ownerNode.isBlank()) {
+            } else if (!ownerKnown) {
                 state = "§eTICKING §7(owner unknown)";
             } else if (suppressed) {
                 state = "§cFROZEN";
