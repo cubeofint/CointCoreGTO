@@ -2760,6 +2760,20 @@ public final class ClusterTestModule {
                             Math.max(1, requestedPage),
                             totalPages
                     );
+
+                    if (requestedPage > totalPages) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "§eСтраница §f"
+                                                + requestedPage
+                                                + "§e не существует. Показываю последнюю страницу §f"
+                                                + totalPages
+                                                + "§e."
+                                ),
+                                false
+                        );
+                    }
+
                     int start = (page - 1)
                             * DIMENSION_LIST_PAGE_SIZE;
                     int end = Math.min(
@@ -2835,14 +2849,11 @@ public final class ClusterTestModule {
                         );
                     }
 
-                    if (totalPages > 1) {
+                    if (page < totalPages) {
                         source.sendSuccess(
                                 () -> Component.literal(
                                         "§7Следующая страница: §f/gtocluster dimensions list "
-                                                + Math.min(
-                                                        totalPages,
-                                                        page + 1
-                                                )
+                                                + (page + 1)
                                 ),
                                 false
                         );
