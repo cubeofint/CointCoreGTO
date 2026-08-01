@@ -185,6 +185,19 @@ public final class ClusterTestModule {
         String dimensionId =
                 level.dimension().location().toString();
 
+        if (currentConfig.dimensionTickIsolation()
+                && !isDimensionOwnerCacheFresh(currentConfig)) {
+            if (DIMENSION_TICK_SUPPRESSION_LOGGED.add(dimensionId)) {
+                LOGGER.warn(
+                        "Dimension tick isolation fail-closed: freezing {} on node {} because owner cache is {}",
+                        dimensionId,
+                        currentConfig.nodeId(),
+                        dimensionOwnerCacheState(currentConfig)
+                );
+            }
+            return true;
+        }
+
         if (DIMENSION_MIGRATION_FROZEN.contains(dimensionId)
                 || DIMENSION_SNAPSHOT_FROZEN.contains(dimensionId)) {
             if (DIMENSION_TICK_SUPPRESSION_LOGGED.add(dimensionId)) {
@@ -200,18 +213,6 @@ public final class ClusterTestModule {
         if (!currentConfig.dimensionTickIsolation()) {
             DIMENSION_TICK_SUPPRESSION_LOGGED.remove(dimensionId);
             return false;
-        }
-
-        if (!isDimensionOwnerCacheFresh(currentConfig)) {
-            if (DIMENSION_TICK_SUPPRESSION_LOGGED.add(dimensionId)) {
-                LOGGER.warn(
-                        "Dimension tick isolation fail-closed: freezing {} on node {} because owner cache is {}",
-                        dimensionId,
-                        currentConfig.nodeId(),
-                        dimensionOwnerCacheState(currentConfig)
-                );
-            }
-            return true;
         }
 
         String ownerNode =
@@ -9394,17 +9395,70 @@ public final class ClusterTestModule {
                                     + operations.expiredPlayerSessions());
                 }
             } catch (Exception exception) {
-                LOGGER.error("Cluster health check failed", exception);
-                addHealthMessage(messages, HealthSeverity.CRITICAL,
-                        "Диагностика завершилась ошибкой: "
-                                + exception.getClass().getSimpleName()
-                                + ": " + exception.getMessage());
+                if (isDatabaseConnectionFailure(exception)) {
+                    String summary = exceptionSummary(exception);
+                    LOGGER.warn(
+                            "Cluster health check could not reach MySQL: {}",
+                            summary
+                    );
+                    addHealthMessage(messages, HealthSeverity.CRITICAL,
+                            "MySQL недоступен: " + summary);
+                } else {
+                    LOGGER.error("Cluster health check failed", exception);
+                    addHealthMessage(messages, HealthSeverity.CRITICAL,
+                            "Диагностика завершилась ошибкой: "
+                                    + exception.getClass().getSimpleName()
+                                    + ": " + exceptionSummary(exception));
+                }
             }
 
             List<HealthMessage> result = List.copyOf(messages);
             server.execute(() -> sendClusterHealth(source, result));
         });
         return 1;
+    }
+
+    private static boolean isDatabaseConnectionFailure(
+            Throwable throwable
+    ) {
+        Throwable current = throwable;
+        int depth = 0;
+        while (current != null && depth++ < 16) {
+            String className = current.getClass().getName();
+            if (current instanceof java.net.ConnectException
+                    || current instanceof java.net.SocketTimeoutException
+                    || current instanceof java.net.UnknownHostException
+                    || current instanceof java.sql.SQLTransientConnectionException
+                    || current instanceof java.sql.SQLNonTransientConnectionException
+                    || className.endsWith(".CommunicationsException")
+                    || className.endsWith(".CJCommunicationsException")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static String exceptionSummary(
+            Throwable throwable
+    ) {
+        Throwable current = throwable;
+        String summary = null;
+        int depth = 0;
+        while (current != null && depth++ < 16) {
+            String message = current.getMessage();
+            if (message != null && !message.isBlank()) {
+                int lineBreak = message.indexOf('\n');
+                summary = (lineBreak >= 0
+                        ? message.substring(0, lineBreak)
+                        : message).trim();
+            }
+            current = current.getCause();
+        }
+        if (summary == null || summary.isBlank()) {
+            return throwable.getClass().getSimpleName();
+        }
+        return summary;
     }
 
     private static void checkHealthStagingPath(
@@ -9684,6 +9738,13 @@ public final class ClusterTestModule {
             String state;
             if (!currentConfig.enabled()) {
                 state = "§eTICKING §7(cluster disabled)";
+            } else if (currentConfig.dimensionTickIsolation()
+                    && !ownerCacheFresh) {
+                state = "§cFROZEN §7(owner cache "
+                        + (DIMENSION_OWNER_CACHE_REFRESHED_AT_MILLIS <= 0L
+                        ? "not loaded"
+                        : "stale")
+                        + ")";
             } else if (migrationFrozen
                     && (activeMigration || !ownershipFrozen)) {
                 state = "§cFROZEN §7(migration)";
@@ -9691,12 +9752,6 @@ public final class ClusterTestModule {
                 state = "§cFROZEN §7(snapshot)";
             } else if (!currentConfig.dimensionTickIsolation()) {
                 state = "§eTICKING §7(isolation disabled)";
-            } else if (!ownerCacheFresh) {
-                state = "§cFROZEN §7(owner cache "
-                        + (DIMENSION_OWNER_CACHE_REFRESHED_AT_MILLIS <= 0L
-                        ? "not loaded"
-                        : "stale")
-                        + ")";
             } else if (!ownerKnown) {
                 state = "§cFROZEN §7(owner unknown)";
             } else if (suppressed) {
