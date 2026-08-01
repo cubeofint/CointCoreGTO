@@ -44,6 +44,7 @@ public final class ClusterConfig {
     private final int dimensionOwnerCacheMaxAgeSeconds;
     private final Path dimensionMigrationStagingPath;
     private final int dimensionMigrationBackupRetentionDays;
+    private final int dimensionMigrationStaleWarningMinutes;
     private final boolean automaticDimensionSnapshots;
     private final int dimensionSnapshotIntervalMinutes;
     private final int dimensionSnapshotRetentionDays;
@@ -82,6 +83,7 @@ public final class ClusterConfig {
             int dimensionOwnerCacheMaxAgeSeconds,
             Path dimensionMigrationStagingPath,
             int dimensionMigrationBackupRetentionDays,
+            int dimensionMigrationStaleWarningMinutes,
             boolean automaticDimensionSnapshots,
             int dimensionSnapshotIntervalMinutes,
             int dimensionSnapshotRetentionDays,
@@ -119,6 +121,7 @@ public final class ClusterConfig {
         this.dimensionOwnerCacheMaxAgeSeconds = dimensionOwnerCacheMaxAgeSeconds;
         this.dimensionMigrationStagingPath = dimensionMigrationStagingPath;
         this.dimensionMigrationBackupRetentionDays = dimensionMigrationBackupRetentionDays;
+        this.dimensionMigrationStaleWarningMinutes = dimensionMigrationStaleWarningMinutes;
         this.automaticDimensionSnapshots = automaticDimensionSnapshots;
         this.dimensionSnapshotIntervalMinutes = dimensionSnapshotIntervalMinutes;
         this.dimensionSnapshotRetentionDays = dimensionSnapshotRetentionDays;
@@ -240,6 +243,13 @@ public final class ClusterConfig {
                 ),
                 optionalPath(properties, "dimension_migration_staging_path"),
                 positiveInt(properties, "dimension_migration_backup_retention_days", 7),
+                rangedInt(
+                        properties,
+                        "dimension_migration_stale_warning_minutes",
+                        360,
+                        1,
+                        10080
+                ),
                 Boolean.parseBoolean(properties.getProperty("automatic_dimension_snapshots", "false").trim()),
                 positiveInt(properties, "dimension_snapshot_interval_minutes", 30),
                 positiveInt(properties, "dimension_snapshot_retention_days", 7),
@@ -435,6 +445,10 @@ public final class ClusterConfig {
                 "dimension_migration_backup_retention_days",
                 "7"
         );
+        defaults.setProperty(
+                "dimension_migration_stale_warning_minutes",
+                "360"
+        );
         defaults.setProperty("automatic_dimension_snapshots", "false");
         defaults.setProperty("dimension_snapshot_interval_minutes", "30");
         defaults.setProperty("dimension_snapshot_retention_days", "7");
@@ -572,6 +586,10 @@ public final class ClusterConfig {
 
     public int dimensionMigrationBackupRetentionDays() {
         return dimensionMigrationBackupRetentionDays;
+    }
+
+    public int dimensionMigrationStaleWarningMinutes() {
+        return dimensionMigrationStaleWarningMinutes;
     }
 
     public boolean automaticDimensionSnapshots() {

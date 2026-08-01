@@ -7766,11 +7766,24 @@ public final class ClusterDatabase {
     ) throws SQLException {
         ensureDriverLoaded();
 
-        return DriverManager.getConnection(
+        Connection connection = DriverManager.getConnection(
                 config.jdbcUrl(),
                 config.username(),
                 config.password()
         );
+
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("SET SESSION time_zone = '+00:00'");
+        } catch (SQLException exception) {
+            try {
+                connection.close();
+            } catch (SQLException closeException) {
+                exception.addSuppressed(closeException);
+            }
+            throw exception;
+        }
+
+        return connection;
     }
 
     private static void ensureSchema(

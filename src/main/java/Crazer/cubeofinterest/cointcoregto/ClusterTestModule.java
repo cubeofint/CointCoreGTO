@@ -3918,10 +3918,14 @@ public final class ClusterTestModule {
                         );
 
                 server.execute(() -> {
+                    int staleWarningMinutes =
+                            currentConfig.dimensionMigrationStaleWarningMinutes();
                     if (migrations.isEmpty()) {
                         source.sendSuccess(
                                 () -> Component.literal(
-                                        "§aНезавершённых dimension migrations нет."
+                                        "§aНезавершённых dimension migrations нет. §7Порог предупреждения: §f"
+                                                + staleWarningMinutes
+                                                + " мин."
                                 ),
                                 false
                         );
@@ -3929,9 +3933,17 @@ public final class ClusterTestModule {
                     }
 
                     Map<String, Integer> counts = new LinkedHashMap<>();
+                    int staleCount = 0;
                     for (ClusterDatabase.DimensionMigration migration : migrations) {
                         counts.merge(migration.status(), 1, Integer::sum);
+                        if (isPendingMigrationStale(
+                                migration,
+                                staleWarningMinutes
+                        )) {
+                            staleCount++;
+                        }
                     }
+                    int finalStaleCount = staleCount;
 
                     source.sendSuccess(
                             () -> Component.literal(
@@ -3939,25 +3951,38 @@ public final class ClusterTestModule {
                                             + pendingMigrationCounts(counts)
                                             + " §7| всего: §f"
                                             + migrations.size()
+                                            + " §7| старше "
+                                            + staleWarningMinutes
+                                            + " мин: §f"
+                                            + finalStaleCount
                             ),
                             false
                     );
 
                     for (ClusterDatabase.DimensionMigration migration : migrations) {
-                        String color = switch (migration.status()) {
-                            case "APPLIED", "VERIFIED" -> "§a";
-                            case "READY", "FINALIZE_READY", "ROLLBACK_READY" -> "§e";
-                            case "APPLYING", "ROLLBACK_PREPARING", "ROLLBACK_APPLYING" -> "§b";
-                            default -> "§6";
-                        };
+                        boolean stale = isPendingMigrationStale(
+                                migration,
+                                staleWarningMinutes
+                        );
+                        String color = stale
+                                ? "§c"
+                                : switch (migration.status()) {
+                                    case "APPLIED", "VERIFIED" -> "§a";
+                                    case "READY", "FINALIZE_READY", "ROLLBACK_READY" -> "§e";
+                                    case "APPLYING", "ROLLBACK_PREPARING", "ROLLBACK_APPLYING" -> "§b";
+                                    default -> "§6";
+                                };
                         String updatedAt = migration.updatedAt() == null
                                 ? "unknown"
                                 : migration.updatedAt().toString();
+                        String age = pendingMigrationAge(migration);
                         String nextAction = pendingMigrationNextAction(migration);
 
                         source.sendSuccess(
                                 () -> Component.literal(
                                         color
+                                                + (stale ? "STALE §7| " : "")
+                                                + color
                                                 + migration.status()
                                                 + " §f"
                                                 + migration.migrationId()
@@ -3967,6 +3992,8 @@ public final class ClusterTestModule {
                                                 + migration.sourceNode()
                                                 + " -> "
                                                 + migration.targetNode()
+                                                + " §7| age: §f"
+                                                + age
                                                 + " §7| updated: §f"
                                                 + updatedAt
                                                 + " §7| "
@@ -3988,6 +4015,53 @@ public final class ClusterTestModule {
             }
         });
         return 1;
+    }
+
+    private static boolean isPendingMigrationStale(
+            ClusterDatabase.DimensionMigration migration,
+            int staleWarningMinutes
+    ) {
+        if (migration.updatedAt() == null) {
+            return true;
+        }
+        long thresholdSeconds = staleWarningMinutes * 60L;
+        return pendingMigrationAgeSeconds(migration) >= thresholdSeconds;
+    }
+
+    private static long pendingMigrationAgeSeconds(
+            ClusterDatabase.DimensionMigration migration
+    ) {
+        if (migration.updatedAt() == null) {
+            return Long.MAX_VALUE;
+        }
+        return Math.max(
+                0L,
+                (System.currentTimeMillis()
+                        - migration.updatedAt().toEpochMilli()) / 1_000L
+        );
+    }
+
+    private static String pendingMigrationAge(
+            ClusterDatabase.DimensionMigration migration
+    ) {
+        long ageSeconds = pendingMigrationAgeSeconds(migration);
+        if (ageSeconds == Long.MAX_VALUE) {
+            return "unknown";
+        }
+        long days = ageSeconds / 86_400L;
+        long hours = ageSeconds % 86_400L / 3_600L;
+        long minutes = ageSeconds % 3_600L / 60L;
+        long seconds = ageSeconds % 60L;
+        if (days > 0L) {
+            return days + "д " + hours + "ч";
+        }
+        if (hours > 0L) {
+            return hours + "ч " + minutes + "м";
+        }
+        if (minutes > 0L) {
+            return minutes + "м " + seconds + "с";
+        }
+        return seconds + "с";
     }
 
     private static String pendingMigrationCounts(
@@ -10196,6 +10270,44 @@ public final class ClusterTestModule {
                                         + incompleteCounts.getOrDefault("FINALIZE_READY", 0)
                                         + " | "
                                         + healthPreview(incompleteDimensions, 8)
+                                        + ". Проверь /gtocluster migration pending");
+                    }
+
+                    int migrationStaleWarningMinutes =
+                            latestConfig.dimensionMigrationStaleWarningMinutes();
+                    List<ClusterDatabase.DimensionMigration> stalePendingMigrations =
+                            pendingMigrations.stream()
+                                    .filter(migration -> isPendingMigrationStale(
+                                            migration,
+                                            migrationStaleWarningMinutes
+                                    ))
+                                    .toList();
+                    if (!stalePendingMigrations.isEmpty()) {
+                        Map<String, Integer> staleCounts = new LinkedHashMap<>();
+                        List<String> staleDimensions = new ArrayList<>();
+                        for (ClusterDatabase.DimensionMigration migration
+                                : stalePendingMigrations) {
+                            staleCounts.merge(
+                                    migration.status(),
+                                    1,
+                                    Integer::sum
+                            );
+                            staleDimensions.add(
+                                    migration.dimensionId()
+                                            + "("
+                                            + migration.status()
+                                            + ", "
+                                            + pendingMigrationAge(migration)
+                                            + ")"
+                            );
+                        }
+                        addHealthMessage(messages, HealthSeverity.WARNING,
+                                "Слишком старые незавершённые migrations: "
+                                        + pendingMigrationCounts(staleCounts)
+                                        + " | порог="
+                                        + migrationStaleWarningMinutes
+                                        + " мин | "
+                                        + healthPreview(staleDimensions, 8)
                                         + ". Проверь /gtocluster migration pending");
                     }
 
