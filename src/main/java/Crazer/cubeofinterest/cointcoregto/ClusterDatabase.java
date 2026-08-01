@@ -5397,6 +5397,67 @@ public final class ClusterDatabase {
         }
     }
 
+    public static List<DimensionMigration> listPendingDimensionMigrations(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            String sql = """
+                    SELECT
+                        migration_id,
+                        dimension_id,
+                        source_node,
+                        target_node,
+                        status,
+                        archive_name,
+                        archive_sha256,
+                        content_sha256,
+                        archive_size,
+                        error_text,
+                        created_at,
+                        updated_at,
+                        ready_at,
+                        applying_at,
+                        applied_at,
+                        verified_at,
+                        finalize_ready_at,
+                        finalized_at,
+                        rollback_previous_status,
+                        rollback_archive_name,
+                        rollback_archive_sha256,
+                        rollback_content_sha256,
+                        rollback_archive_size,
+                        rollback_ready_at,
+                        rollback_applying_at,
+                        rolled_back_at,
+                        source_backup_deleted_at
+                    FROM cluster_dimension_migrations
+                    WHERE status IN (
+                        'PREPARING',
+                        'READY',
+                        'APPLYING',
+                        'APPLIED',
+                        'VERIFIED',
+                        'FINALIZE_READY',
+                        'ROLLBACK_PREPARING',
+                        'ROLLBACK_READY',
+                        'ROLLBACK_APPLYING'
+                    )
+                    ORDER BY updated_at ASC, created_at ASC
+                    """;
+
+            List<DimensionMigration> migrations = new ArrayList<>();
+            try (PreparedStatement statement = connection.prepareStatement(sql);
+                 ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    migrations.add(readDimensionMigration(resultSet));
+                }
+            }
+            return List.copyOf(migrations);
+        }
+    }
+
     public static Set<String> listFrozenMigrationDimensions(
             ClusterConfig config
     ) throws SQLException {

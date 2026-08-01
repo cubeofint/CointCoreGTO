@@ -1581,6 +1581,15 @@ public final class ClusterTestModule {
                                                         )
                                         )
                                         .then(
+                                                Commands.literal("pending")
+                                                        .executes(
+                                                                context ->
+                                                                        showPendingDimensionMigrations(
+                                                                                context.getSource()
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
                                                 Commands.literal("verify")
                                                         .then(
                                                                 Commands.argument(
@@ -3886,6 +3895,141 @@ public final class ClusterTestModule {
         return 1;
     }
 
+
+    private int showPendingDimensionMigrations(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(
+                    Component.literal(
+                            "§cКластер выключен или конфиг ещё не загружен."
+                    )
+            );
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.DimensionMigration> migrations =
+                        ClusterDatabase.listPendingDimensionMigrations(
+                                currentConfig
+                        );
+
+                server.execute(() -> {
+                    if (migrations.isEmpty()) {
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        "§aНезавершённых dimension migrations нет."
+                                ),
+                                false
+                        );
+                        return;
+                    }
+
+                    Map<String, Integer> counts = new LinkedHashMap<>();
+                    for (ClusterDatabase.DimensionMigration migration : migrations) {
+                        counts.merge(migration.status(), 1, Integer::sum);
+                    }
+
+                    source.sendSuccess(
+                            () -> Component.literal(
+                                    "§6Незавершённые dimension migrations: §f"
+                                            + pendingMigrationCounts(counts)
+                                            + " §7| всего: §f"
+                                            + migrations.size()
+                            ),
+                            false
+                    );
+
+                    for (ClusterDatabase.DimensionMigration migration : migrations) {
+                        String color = switch (migration.status()) {
+                            case "APPLIED", "VERIFIED" -> "§a";
+                            case "READY", "FINALIZE_READY", "ROLLBACK_READY" -> "§e";
+                            case "APPLYING", "ROLLBACK_PREPARING", "ROLLBACK_APPLYING" -> "§b";
+                            default -> "§6";
+                        };
+                        String updatedAt = migration.updatedAt() == null
+                                ? "unknown"
+                                : migration.updatedAt().toString();
+                        String nextAction = pendingMigrationNextAction(migration);
+
+                        source.sendSuccess(
+                                () -> Component.literal(
+                                        color
+                                                + migration.status()
+                                                + " §f"
+                                                + migration.migrationId()
+                                                + " §7| §f"
+                                                + migration.dimensionId()
+                                                + " §7| "
+                                                + migration.sourceNode()
+                                                + " -> "
+                                                + migration.targetNode()
+                                                + " §7| updated: §f"
+                                                + updatedAt
+                                                + " §7| "
+                                                + nextAction
+                                ),
+                                false
+                        );
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(
+                        () -> source.sendFailure(
+                                Component.literal(
+                                        "§cНе удалось получить незавершённые migrations: "
+                                                + exception.getMessage()
+                                )
+                        )
+                );
+            }
+        });
+        return 1;
+    }
+
+    private static String pendingMigrationCounts(
+            Map<String, Integer> counts
+    ) {
+        List<String> parts = new ArrayList<>();
+        String[] statuses = {
+                "PREPARING",
+                "READY",
+                "APPLYING",
+                "APPLIED",
+                "VERIFIED",
+                "FINALIZE_READY",
+                "ROLLBACK_PREPARING",
+                "ROLLBACK_READY",
+                "ROLLBACK_APPLYING"
+        };
+        for (String status : statuses) {
+            int count = counts.getOrDefault(status, 0);
+            if (count > 0) {
+                parts.add(status + "=" + count);
+            }
+        }
+        return String.join(", ", parts);
+    }
+
+    private static String pendingMigrationNextAction(
+            ClusterDatabase.DimensionMigration migration
+    ) {
+        return switch (migration.status()) {
+            case "PREPARING" -> "§6подготовка на source " + migration.sourceNode();
+            case "READY" -> "§eперезапусти target " + migration.targetNode();
+            case "APPLYING" -> "§bприменение на target " + migration.targetNode();
+            case "APPLIED" -> "§everify на target " + migration.targetNode();
+            case "VERIFIED" -> "§efinalize на source " + migration.sourceNode();
+            case "FINALIZE_READY" -> "§eперезапусти source " + migration.sourceNode();
+            case "ROLLBACK_PREPARING" -> "§6подготовка rollback";
+            case "ROLLBACK_READY" -> "§eперезапусти source " + migration.sourceNode();
+            case "ROLLBACK_APPLYING" -> "§brollback на source " + migration.sourceNode();
+            default -> "§7проверь состояние вручную";
+        };
+    }
 
     private int verifyDimensionMigration(
             CommandSourceStack source,
@@ -9824,6 +9968,8 @@ public final class ClusterTestModule {
                             ClusterDatabase.readOperationalHealth(latestConfig);
                     List<ClusterDatabase.PendingApplyOperation> localPendingApply =
                             ClusterDatabase.listPendingApplyOperationsForNode(latestConfig);
+                    List<ClusterDatabase.DimensionMigration> pendingMigrations =
+                            ClusterDatabase.listPendingDimensionMigrations(latestConfig);
 
                     addHealthMessage(messages, HealthSeverity.OK,
                             "MySQL доступен: " + database.databaseName()
@@ -10017,6 +10163,41 @@ public final class ClusterTestModule {
                                     + ", drains=" + operations.activeDrains()
                                     + ", rebalances=" + operations.activeRebalances()
                                     + ", leases=" + operations.activeOperationLeases());
+
+                    List<ClusterDatabase.DimensionMigration> incompleteAppliedMigrations =
+                            pendingMigrations.stream()
+                                    .filter(migration ->
+                                            migration.status().equals("APPLIED")
+                                                    || migration.status().equals("VERIFIED")
+                                                    || migration.status().equals("FINALIZE_READY")
+                                    )
+                                    .toList();
+                    if (!incompleteAppliedMigrations.isEmpty()) {
+                        Map<String, Integer> incompleteCounts = new LinkedHashMap<>();
+                        List<String> incompleteDimensions = new ArrayList<>();
+                        for (ClusterDatabase.DimensionMigration migration
+                                : incompleteAppliedMigrations) {
+                            incompleteCounts.merge(
+                                    migration.status(),
+                                    1,
+                                    Integer::sum
+                            );
+                            incompleteDimensions.add(
+                                    migration.dimensionId()
+                                            + "(" + migration.status() + ")"
+                            );
+                        }
+                        addHealthMessage(messages, HealthSeverity.WARNING,
+                                "Незавершённые migrations после применения: APPLIED="
+                                        + incompleteCounts.getOrDefault("APPLIED", 0)
+                                        + ", VERIFIED="
+                                        + incompleteCounts.getOrDefault("VERIFIED", 0)
+                                        + ", FINALIZE_READY="
+                                        + incompleteCounts.getOrDefault("FINALIZE_READY", 0)
+                                        + " | "
+                                        + healthPreview(incompleteDimensions, 8)
+                                        + ". Проверь /gtocluster migration pending");
+                    }
 
                     if (operations.recentFailedOperations() > 0) {
                         addHealthMessage(messages, HealthSeverity.WARNING,
