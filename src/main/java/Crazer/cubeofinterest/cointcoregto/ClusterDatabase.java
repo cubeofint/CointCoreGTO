@@ -496,6 +496,8 @@ public final class ClusterDatabase {
                 SELECT
                     nodes.node_id,
                     nodes.redirect_address,
+                    nodes.node_role,
+                    nodes.node_role_capacity,
                     nodes.player_count,
                     nodes.last_seen,
                                       GREATEST(
@@ -524,6 +526,8 @@ public final class ClusterDatabase {
                 GROUP BY
                     nodes.node_id,
                     nodes.redirect_address,
+                    nodes.node_role,
+                    nodes.node_role_capacity,
                     nodes.player_count,
                     nodes.last_seen,
                     nodes.stopped_at
@@ -552,6 +556,12 @@ public final class ClusterDatabase {
                                         ),
                                         resultSet.getString(
                                                 "redirect_address"
+                                        ),
+                                        resultSet.getString(
+                                                "node_role"
+                                        ),
+                                        resultSet.getInt(
+                                                "node_role_capacity"
                                         ),
                                         resultSet.getInt(
                                                 "player_count"
@@ -1110,46 +1120,55 @@ public final class ClusterDatabase {
                     );
                 }
 
-                String existingOwner =
-                        findDimensionOwner(connection, dimensionId);
+                boolean roleRoutingEnabled = config.roleRoutingEnabled();
+                String requiredRole = roleRoutingEnabled
+                        ? config.resolveDimensionRole(dimensionId)
+                        : null;
+                DimensionAssignmentRow existingAssignment =
+                        findDimensionAssignmentRow(connection, dimensionId);
 
-                if (existingOwner != null) {
-                    if (isNodeOnline(
+                if (existingAssignment != null) {
+                    int currentAssignments = countAssignmentsForNode(
                             connection,
-                            existingOwner,
-                            config.nodeTimeoutSeconds()
-                    )) {
-                        int currentAssignments =
-                                countAssignmentsForNode(
-                                        connection,
-                                        existingOwner
-                                );
-
-                        connection.commit();
-
-                        return new AutomaticDimensionAssignment(
-                                dimensionId,
-                                existingOwner,
-                                false,
-                                currentAssignments,
-                                0,
-                                Instant.now()
-                        );
-                    }
+                            existingAssignment.nodeId()
+                    );
+                    int currentCapacity = findNodeCapacity(
+                            connection,
+                            existingAssignment.nodeId()
+                    );
+                    connection.commit();
+                    return new AutomaticDimensionAssignment(
+                            dimensionId,
+                            existingAssignment.nodeId(),
+                            requiredRole,
+                            false,
+                            currentAssignments,
+                            0,
+                            currentCapacity,
+                            Instant.now()
+                    );
                 }
 
-                DimensionActivity activeDimension =
-                        loadDimensionActivity(
-                                connection,
-                                config.nodeTimeoutSeconds()
-                        ).get(dimensionId);
+                List<PlanningNode> onlineNodes = findOnlinePlanningNodes(
+                        connection,
+                        config.nodeTimeoutSeconds()
+                );
+                Map<String, Integer> assignedCounts = new HashMap<>();
+                for (PlanningNode node : onlineNodes) {
+                    assignedCounts.put(
+                            node.nodeId(),
+                            countAssignmentsForNode(connection, node.nodeId())
+                    );
+                }
 
-                LeastAssignedNode selectedNode;
+                DimensionActivity activeDimension = loadDimensionActivity(
+                        connection,
+                        config.nodeTimeoutSeconds()
+                ).get(dimensionId);
+                PlanningNode selectedNode;
 
-                if (activeDimension != null
-                        && activeDimension.playerCount() > 0) {
+                if (activeDimension != null && activeDimension.playerCount() > 0) {
                     String activeNode = singleActiveNode(activeDimension);
-
                     if (activeNode == null) {
                         throw new SQLException(
                                 "Dimension " + dimensionId
@@ -1159,43 +1178,67 @@ public final class ClusterDatabase {
                         );
                     }
 
-                    PlanningNode activePlanningNode =
-                            findOnlinePlanningNodes(
-                                    connection,
-                                    config.nodeTimeoutSeconds()
-                            ).stream()
-                                    .filter(node -> node.nodeId()
-                                            .equalsIgnoreCase(activeNode))
-                                    .findFirst()
-                                    .orElseThrow(
-                                            () -> new SQLException(
-                                                    "Активный узел "
-                                                            + activeNode
-                                                            + " не находится ONLINE"
-                                            )
-                                    );
+                    selectedNode = onlineNodes.stream()
+                            .filter(node -> node.nodeId().equalsIgnoreCase(activeNode))
+                            .findFirst()
+                            .orElseThrow(
+                                    () -> new SQLException(
+                                            "Активный узел " + activeNode + " не находится ONLINE"
+                                    )
+                            );
 
-                    selectedNode = new LeastAssignedNode(
-                            activePlanningNode.nodeId(),
-                            countAssignmentsForNode(
-                                    connection,
-                                    activePlanningNode.nodeId()
-                            ),
-                            activePlanningNode.playerCount()
-                    );
+                    if (requiredRole != null
+                            && !requiredRole.equalsIgnoreCase(selectedNode.nodeRole())) {
+                        throw new SQLException(
+                                "Dimension " + dimensionId
+                                        + " уже активна на узле " + activeNode
+                                        + " с role " + selectedNode.nodeRole()
+                                        + ", но требуется role " + requiredRole
+                                        + "; нужен безопасный migration"
+                        );
+                    }
+
+                    if (roleRoutingEnabled
+                            && !hasPlanningCapacity(selectedNode, assignedCounts)) {
+                        throw new SQLException(
+                                "Узел " + activeNode
+                                        + " достиг capacity " + selectedNode.nodeCapacity()
+                                        + "; автоматическое назначение запрещено"
+                        );
+                    }
                 } else {
-                    selectedNode = findLeastAssignedNode(
-                            connection,
-                            config.nodeTimeoutSeconds()
+                    List<PlanningNode> roleNodes = planningNodesForRole(
+                            onlineNodes,
+                            requiredRole
                     );
-                }
+                    if (roleNodes.isEmpty()) {
+                        throw new SQLException(
+                                requiredRole == null
+                                        ? "Нет доступных ONLINE-узлов"
+                                        : "Нет доступных ONLINE-узлов с role " + requiredRole
+                        );
+                    }
 
-                if (selectedNode == null) {
-                    throw new SQLException(
-                            "Нет доступных ONLINE-узлов с heartbeat не старше "
-                                    + config.nodeTimeoutSeconds()
-                                    + " секунд"
+                    List<PlanningNode> capacityNodes = roleRoutingEnabled
+                            ? planningNodesWithCapacity(roleNodes, assignedCounts)
+                            : roleNodes;
+                    if (capacityNodes.isEmpty()) {
+                        throw new SQLException(
+                                "Все ONLINE-узлы"
+                                        + (requiredRole == null ? "" : " с role " + requiredRole)
+                                        + " достигли настроенного capacity"
+                        );
+                    }
+
+                    String selectedNodeId = selectPlanningNode(
+                            capacityNodes,
+                            assignedCounts,
+                            null
                     );
+                    selectedNode = capacityNodes.stream()
+                            .filter(node -> node.nodeId().equalsIgnoreCase(selectedNodeId))
+                            .findFirst()
+                            .orElseThrow();
                 }
 
                 String sql = """
@@ -1210,20 +1253,11 @@ public final class ClusterDatabase {
                             CURRENT_TIMESTAMP(3),
                             CURRENT_TIMESTAMP(3)
                         )
-                        ON DUPLICATE KEY UPDATE
-                            node_id = VALUES(node_id),
-                            updated_at = CURRENT_TIMESTAMP(3)
                         """;
 
-                try (PreparedStatement statement =
-                             connection.prepareStatement(sql)) {
-
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
                     statement.setString(1, dimensionId);
-                    statement.setString(
-                            2,
-                            selectedNode.nodeId()
-                    );
-
+                    statement.setString(2, selectedNode.nodeId());
                     statement.executeUpdate();
                 }
 
@@ -1232,9 +1266,11 @@ public final class ClusterDatabase {
                 return new AutomaticDimensionAssignment(
                         dimensionId,
                         selectedNode.nodeId(),
+                        requiredRole,
                         true,
-                        selectedNode.assignmentCount(),
+                        assignedCounts.getOrDefault(selectedNode.nodeId(), 0),
                         selectedNode.playerCount(),
+                        selectedNode.nodeCapacity(),
                         Instant.now()
                 );
             } catch (SQLException exception) {
@@ -1825,23 +1861,35 @@ public final class ClusterDatabase {
                         DimensionActivity dimensionActivity =
                                 activity.get(dimensionId);
 
+                        String requiredRole = config.roleRoutingEnabled()
+                                ? config.resolveDimensionRole(dimensionId)
+                                : null;
+
                         if (assignment != null) {
+                            DimensionPlanAction action;
+                            if (migratingDimensions.contains(dimensionId)) {
+                                action = DimensionPlanAction.SKIP_MIGRATING;
+                            } else {
+                                PlanningNode ownerNode = nodesById.get(assignment.nodeId());
+                                action = requiredRole != null
+                                        && ownerNode != null
+                                        && !requiredRole.equalsIgnoreCase(ownerNode.nodeRole())
+                                        ? DimensionPlanAction.KEEP_WRONG_ROLE
+                                        : DimensionPlanAction.KEEP;
+                            }
                             entries.add(
                                     createPlanEntry(
                                             dimensionId,
                                             assignment,
                                             assignment.nodeId(),
                                             dimensionActivity,
-                                            migratingDimensions.contains(dimensionId)
-                                                    ? DimensionPlanAction.SKIP_MIGRATING
-                                                    : DimensionPlanAction.KEEP
+                                            action
                                     )
                             );
                             continue;
                         }
 
-                        String activeNode =
-                                singleActiveNode(dimensionActivity);
+                        String activeNode = singleActiveNode(dimensionActivity);
 
                         if (dimensionActivity != null
                                 && dimensionActivity.playerCount() > 0
@@ -1858,14 +1906,74 @@ public final class ClusterDatabase {
                             continue;
                         }
 
-                        String targetNode = activeNode != null
-                                && nodesById.containsKey(activeNode)
-                                ? activeNode
-                                : selectPlanningNode(
-                                        onlineNodes,
-                                        assignedCounts,
-                                        null
+                        String targetNode;
+                        if (activeNode != null && nodesById.containsKey(activeNode)) {
+                            PlanningNode activePlanningNode = nodesById.get(activeNode);
+                            if (requiredRole != null
+                                    && !requiredRole.equalsIgnoreCase(activePlanningNode.nodeRole())) {
+                                entries.add(
+                                        createPlanEntry(
+                                                dimensionId,
+                                                null,
+                                                null,
+                                                dimensionActivity,
+                                                DimensionPlanAction.ACTIVE_WRONG_ROLE
+                                        )
                                 );
+                                continue;
+                            }
+                            if (config.roleRoutingEnabled()
+                                    && !hasPlanningCapacity(activePlanningNode, assignedCounts)) {
+                                entries.add(
+                                        createPlanEntry(
+                                                dimensionId,
+                                                null,
+                                                null,
+                                                dimensionActivity,
+                                                DimensionPlanAction.ROLE_CAPACITY_FULL
+                                        )
+                                );
+                                continue;
+                            }
+                            targetNode = activeNode;
+                        } else {
+                            List<PlanningNode> roleNodes = planningNodesForRole(
+                                    onlineNodes,
+                                    requiredRole
+                            );
+                            if (roleNodes.isEmpty()) {
+                                entries.add(
+                                        createPlanEntry(
+                                                dimensionId,
+                                                null,
+                                                null,
+                                                dimensionActivity,
+                                                DimensionPlanAction.NO_ROLE_NODE
+                                        )
+                                );
+                                continue;
+                            }
+                            List<PlanningNode> eligibleNodes = config.roleRoutingEnabled()
+                                    ? planningNodesWithCapacity(roleNodes, assignedCounts)
+                                    : roleNodes;
+                            if (eligibleNodes.isEmpty()) {
+                                entries.add(
+                                        createPlanEntry(
+                                                dimensionId,
+                                                null,
+                                                null,
+                                                dimensionActivity,
+                                                DimensionPlanAction.ROLE_CAPACITY_FULL
+                                        )
+                                );
+                                continue;
+                            }
+                            targetNode = selectPlanningNode(
+                                    eligibleNodes,
+                                    assignedCounts,
+                                    null
+                            );
+                        }
 
                         assignedCounts.computeIfPresent(
                                 targetNode,
@@ -2019,8 +2127,43 @@ public final class ClusterDatabase {
                                 ? null
                                 : assignment.nodeId();
 
-                        String targetNode = selectPlanningNode(
+                        String requiredRole = config.roleRoutingEnabled()
+                                ? config.resolveDimensionRole(dimensionId)
+                                : null;
+                        List<PlanningNode> roleNodes = planningNodesForRole(
                                 onlineNodes,
+                                requiredRole
+                        );
+                        if (roleNodes.isEmpty()) {
+                            entries.add(
+                                    createPlanEntry(
+                                            dimensionId,
+                                            assignment,
+                                            null,
+                                            activity.get(dimensionId),
+                                            DimensionPlanAction.NO_ROLE_NODE
+                                    )
+                            );
+                            continue;
+                        }
+                        List<PlanningNode> eligibleNodes = config.roleRoutingEnabled()
+                                ? planningNodesWithCapacity(roleNodes, assignedCounts)
+                                : roleNodes;
+                        if (eligibleNodes.isEmpty()) {
+                            entries.add(
+                                    createPlanEntry(
+                                            dimensionId,
+                                            assignment,
+                                            null,
+                                            activity.get(dimensionId),
+                                            DimensionPlanAction.ROLE_CAPACITY_FULL
+                                    )
+                            );
+                            continue;
+                        }
+
+                        String targetNode = selectPlanningNode(
+                                eligibleNodes,
                                 assignedCounts,
                                 previousNode
                         );
@@ -2127,6 +2270,8 @@ public final class ClusterDatabase {
                     finalNodes.add(
                             new PlanningNodeStatus(
                                     node.nodeId(),
+                                    node.nodeRole(),
+                                    node.nodeCapacity(),
                                     node.playerCount(),
                                     assignedCounts.getOrDefault(
                                             node.nodeId(),
@@ -2296,6 +2441,141 @@ public final class ClusterDatabase {
                         null,
                         null
                 );
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionMigration requestNewDimensionProvisioning(
+            ClusterConfig config,
+            String dimensionId
+    ) throws SQLException {
+        if (dimensionId == null || dimensionId.isBlank()) {
+            throw new SQLException("Dimension id is empty");
+        }
+        if (!config.roleRoutingEnabled()) {
+            throw new SQLException("Ролевое распределение измерений отключено");
+        }
+
+        String requiredRole = config.resolveDimensionRole(dimensionId);
+        if (requiredRole == null || requiredRole.isBlank()) {
+            throw new SQLException("Для dimension " + dimensionId + " не определена role");
+        }
+
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                lockClusterNodes(connection);
+                lockDimensionAssignments(connection);
+                lockDimensionActivity(connection);
+
+                if (findDimensionAssignmentRow(connection, dimensionId) != null) {
+                    throw new SQLException("Для dimension " + dimensionId + " владелец уже назначен");
+                }
+                if (findActiveDimensionMigration(connection, dimensionId, true) != null) {
+                    throw new SQLException("Для dimension " + dimensionId + " уже выполняется migration");
+                }
+
+                List<PlanningNode> onlineNodes = findOnlinePlanningNodes(
+                        connection,
+                        config.nodeTimeoutSeconds()
+                );
+                Map<String, Integer> reservedCounts = new HashMap<>();
+                for (PlanningNode node : onlineNodes) {
+                    int count = countAssignmentsForNode(connection, node.nodeId())
+                            + countPendingProvisionReservationsForNode(connection, node.nodeId());
+                    reservedCounts.put(node.nodeId(), count);
+                }
+
+                List<PlanningNode> roleNodes = planningNodesForRole(
+                        onlineNodes,
+                        requiredRole
+                );
+                if (roleNodes.isEmpty()) {
+                    throw new SQLException(
+                            "Нет доступных ONLINE-узлов с role " + requiredRole
+                    );
+                }
+
+                List<PlanningNode> capacityNodes = planningNodesWithCapacity(
+                        roleNodes,
+                        reservedCounts
+                );
+                if (capacityNodes.isEmpty()) {
+                    throw new SQLException(
+                            "Все ONLINE-узлы с role " + requiredRole
+                                    + " достигли настроенного capacity"
+                    );
+                }
+
+                String targetNode = selectPlanningNode(
+                        capacityNodes,
+                        reservedCounts,
+                        null
+                );
+                if (targetNode.equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException(
+                            "Выбран текущий узел; provisioning не требуется"
+                    );
+                }
+
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        INSERT INTO dimension_assignments (
+                            dimension_id,
+                            node_id,
+                            assigned_at,
+                            updated_at
+                        ) VALUES (
+                            ?, ?, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3)
+                        )
+                        """)) {
+                    statement.setString(1, dimensionId);
+                    statement.setString(2, config.nodeId());
+                    statement.executeUpdate();
+                }
+
+                String migrationId = UUID.randomUUID().toString();
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        INSERT INTO cluster_dimension_migrations (
+                            migration_id,
+                            dimension_id,
+                            source_node,
+                            target_node,
+                            status,
+                            operation_kind,
+                            created_at,
+                            updated_at
+                        ) VALUES (
+                            ?, ?, ?, ?, 'PREPARING', 'PROVISION',
+                            CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3)
+                        )
+                        """)) {
+                    statement.setString(1, migrationId);
+                    statement.setString(2, dimensionId);
+                    statement.setString(3, config.nodeId());
+                    statement.setString(4, targetNode);
+                    statement.executeUpdate();
+                }
+
+                DimensionMigration migration = findDimensionMigration(
+                        connection,
+                        migrationId,
+                        true
+                );
+                if (migration == null) {
+                    throw new SQLException(
+                            "Не удалось прочитать созданный provisioning " + migrationId
+                    );
+                }
+                connection.commit();
+                return migration;
             } catch (SQLException exception) {
                 rollbackQuietly(connection);
                 throw exception;
@@ -2714,6 +2994,7 @@ public final class ClusterDatabase {
                         source_backup_deleted_at
                     FROM cluster_dimension_migrations
                     WHERE target_node = ?
+                      AND operation_kind <> 'PROVISION'
                       AND status IN ('READY', 'APPLYING')
                     ORDER BY created_at
                     LIMIT 1
@@ -2727,6 +3008,60 @@ public final class ClusterDatabase {
                         return null;
                     }
                     return readDimensionMigration(resultSet);
+                }
+            }
+        }
+    }
+
+    public static DimensionMigration findPendingNewDimensionProvisionForTarget(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            String sql = """
+                    SELECT
+                        migration_id,
+                        dimension_id,
+                        source_node,
+                        target_node,
+                        status,
+                        archive_name,
+                        archive_sha256,
+                        content_sha256,
+                        archive_size,
+                        error_text,
+                        created_at,
+                        updated_at,
+                        ready_at,
+                        applying_at,
+                        applied_at,
+                        verified_at,
+                        finalize_ready_at,
+                        finalized_at,
+                        rollback_previous_status,
+                        rollback_archive_name,
+                        rollback_archive_sha256,
+                        rollback_content_sha256,
+                        rollback_archive_size,
+                        rollback_ready_at,
+                        rollback_applying_at,
+                        rolled_back_at,
+                        source_backup_deleted_at
+                    FROM cluster_dimension_migrations
+                    WHERE target_node = ?
+                      AND operation_kind = 'PROVISION'
+                      AND status IN ('READY', 'APPLYING')
+                    ORDER BY created_at
+                    LIMIT 1
+                    """;
+
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, config.nodeId());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    return resultSet.next()
+                            ? readDimensionMigration(resultSet)
+                            : null;
                 }
             }
         }
@@ -2927,6 +3262,94 @@ public final class ClusterDatabase {
                 }
                 connection.commit();
                 return migration;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static DimensionMigration completeNewDimensionProvisioning(
+            ClusterConfig config,
+            String migrationId
+    ) throws SQLException {
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                DimensionMigration migration = findDimensionMigration(
+                        connection,
+                        migrationId,
+                        true
+                );
+                if (migration == null) {
+                    throw new SQLException(
+                            "Provisioning не найден: " + migrationId
+                    );
+                }
+                if (!migration.targetNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException(
+                            "Provisioning предназначен для узла "
+                                    + migration.targetNode()
+                    );
+                }
+                if (!migration.status().equals("APPLYING")) {
+                    throw new SQLException(
+                            "Provisioning имеет status=" + migration.status()
+                    );
+                }
+
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE dimension_assignments
+                        SET node_id = ?, updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE dimension_id = ? AND node_id = ?
+                        """)) {
+                    statement.setString(1, migration.targetNode());
+                    statement.setString(2, migration.dimensionId());
+                    statement.setString(3, migration.sourceNode());
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException(
+                                "Владелец dimension "
+                                        + migration.dimensionId()
+                                        + " изменился во время provisioning"
+                        );
+                    }
+                }
+
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations
+                        SET status = 'PROVISIONED',
+                            error_text = NULL,
+                            applied_at = CURRENT_TIMESTAMP(3),
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ?
+                          AND operation_kind = 'PROVISION'
+                          AND status = 'APPLYING'
+                        """)) {
+                    statement.setString(1, migrationId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException(
+                                "Не удалось завершить provisioning " + migrationId
+                        );
+                    }
+                }
+
+                DimensionMigration completed = findDimensionMigration(
+                        connection,
+                        migrationId,
+                        true
+                );
+                if (completed == null) {
+                    throw new SQLException(
+                            "Не удалось прочитать завершённый provisioning "
+                                    + migrationId
+                    );
+                }
+                connection.commit();
+                return completed;
             } catch (SQLException exception) {
                 rollbackQuietly(connection);
                 throw exception;
@@ -8148,6 +8571,8 @@ public final class ClusterDatabase {
                 CREATE TABLE IF NOT EXISTS cluster_nodes (
                     node_id VARCHAR(64) NOT NULL PRIMARY KEY,
                     redirect_address VARCHAR(255) NOT NULL,
+                    node_role VARCHAR(64) NOT NULL DEFAULT 'general',
+                    node_role_capacity INT NOT NULL DEFAULT 0,
                     minecraft_version VARCHAR(32) NOT NULL,
                     player_count INT NOT NULL DEFAULT 0,
                     last_seen TIMESTAMP(3) NOT NULL
@@ -8212,6 +8637,7 @@ public final class ClusterDatabase {
                     source_node VARCHAR(64) NOT NULL,
                     target_node VARCHAR(64) NOT NULL,
                     status VARCHAR(24) NOT NULL,
+                    operation_kind VARCHAR(24) NOT NULL DEFAULT 'MIGRATION',
                     archive_name VARCHAR(255) NULL,
                     archive_sha256 CHAR(64) NULL,
                     content_sha256 CHAR(64) NULL,
@@ -8525,6 +8951,20 @@ public final class ClusterDatabase {
         ensureColumnExists(
                 connection,
                 "cluster_nodes",
+                "node_role",
+                "VARCHAR(64) NOT NULL DEFAULT 'general'"
+        );
+
+        ensureColumnExists(
+                connection,
+                "cluster_nodes",
+                "node_role_capacity",
+                "INT NOT NULL DEFAULT 0"
+        );
+
+        ensureColumnExists(
+                connection,
+                "cluster_nodes",
                 "player_count",
                 "INT NOT NULL DEFAULT 0"
         );
@@ -8592,6 +9032,7 @@ public final class ClusterDatabase {
                 "VARCHAR(64) NULL"
         );
 
+        ensureColumnExists(connection, "cluster_dimension_migrations", "operation_kind", "VARCHAR(24) NOT NULL DEFAULT 'MIGRATION'");
         ensureColumnExists(connection, "cluster_dimension_migrations", "verified_at", "TIMESTAMP(3) NULL");
         ensureColumnExists(connection, "cluster_dimension_migrations", "finalize_ready_at", "TIMESTAMP(3) NULL");
         ensureColumnExists(connection, "cluster_dimension_migrations", "finalized_at", "TIMESTAMP(3) NULL");
@@ -8676,6 +9117,8 @@ public final class ClusterDatabase {
             INSERT INTO cluster_nodes (
                 node_id,
                 redirect_address,
+                node_role,
+                node_role_capacity,
                 minecraft_version,
                 player_count,
                 last_seen,
@@ -8683,13 +9126,15 @@ public final class ClusterDatabase {
                 started_at
             )
             VALUES (
-                ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
                 CURRENT_TIMESTAMP(3),
                 NULL,
                 CURRENT_TIMESTAMP(3)
             )
             ON DUPLICATE KEY UPDATE
                 redirect_address = VALUES(redirect_address),
+                node_role = VALUES(node_role),
+                node_role_capacity = VALUES(node_role_capacity),
                 minecraft_version = VALUES(minecraft_version),
                 player_count = VALUES(player_count),
                 last_seen = CURRENT_TIMESTAMP(3),
@@ -8706,10 +9151,18 @@ public final class ClusterDatabase {
             );
             statement.setString(
                     3,
-                    server.getServerVersion()
+                    config.nodeRole()
             );
             statement.setInt(
                     4,
+                    config.nodeRoleCapacity()
+            );
+            statement.setString(
+                    5,
+                    server.getServerVersion()
+            );
+            statement.setInt(
+                    6,
                     server.getPlayerList()
                             .getPlayerCount()
             );
@@ -8941,6 +9394,17 @@ public final class ClusterDatabase {
             Connection connection,
             int timeoutSeconds
     ) throws SQLException {
+        return findLeastAssignedNode(connection, timeoutSeconds, null);
+    }
+
+    private static LeastAssignedNode findLeastAssignedNode(
+            Connection connection,
+            int timeoutSeconds,
+            String requiredRole
+    ) throws SQLException {
+        String roleCondition = requiredRole == null
+                ? ""
+                : " AND nodes.node_role = ?\n";
         String sql = """
             SELECT
                 nodes.node_id,
@@ -8956,6 +9420,9 @@ public final class ClusterDatabase {
                 -?,
                 CURRENT_TIMESTAMP(3)
             )
+            """
+                + roleCondition
+                + """
               AND NOT EXISTS (
                   SELECT 1
                   FROM cluster_node_drains AS drains
@@ -8976,6 +9443,9 @@ public final class ClusterDatabase {
                      connection.prepareStatement(sql)) {
 
             statement.setInt(1, timeoutSeconds);
+            if (requiredRole != null) {
+                statement.setString(2, requiredRole);
+            }
 
             try (ResultSet resultSet =
                          statement.executeQuery()) {
@@ -9024,6 +9494,29 @@ public final class ClusterDatabase {
                          statement.executeQuery()) {
 
                 return resultSet.next();
+            }
+        }
+    }
+
+    private static int findNodeCapacity(
+            Connection connection,
+            String nodeId
+    ) throws SQLException {
+        String sql = """
+                SELECT node_role_capacity
+                FROM cluster_nodes
+                WHERE node_id = ?
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, nodeId);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return 0;
+                }
+                return resultSet.getInt("node_role_capacity");
             }
         }
     }
@@ -9106,6 +9599,8 @@ public final class ClusterDatabase {
         String sql = """
                 SELECT
                     node_id,
+                    node_role,
+                    node_role_capacity,
                     player_count
                 FROM cluster_nodes
                 WHERE stopped_at IS NULL
@@ -9134,6 +9629,8 @@ public final class ClusterDatabase {
                     nodes.add(
                             new PlanningNode(
                                     resultSet.getString("node_id"),
+                                    resultSet.getString("node_role"),
+                                    resultSet.getInt("node_role_capacity"),
                                     resultSet.getInt("player_count")
                             )
                     );
@@ -9298,6 +9795,55 @@ public final class ClusterDatabase {
         }
 
         return activity.nodeIds().get(0);
+    }
+
+    private static List<PlanningNode> planningNodesForRole(
+            List<PlanningNode> onlineNodes,
+            String requiredRole
+    ) {
+        if (requiredRole == null) {
+            return onlineNodes;
+        }
+
+        return onlineNodes.stream()
+                .filter(node -> requiredRole.equalsIgnoreCase(node.nodeRole()))
+                .toList();
+    }
+
+    private static boolean hasPlanningCapacity(
+            PlanningNode node,
+            Map<String, Integer> assignedCounts
+    ) {
+        return node.nodeCapacity() <= 0
+                || assignedCounts.getOrDefault(node.nodeId(), 0) < node.nodeCapacity();
+    }
+
+    private static List<PlanningNode> planningNodesWithCapacity(
+            List<PlanningNode> nodes,
+            Map<String, Integer> assignedCounts
+    ) {
+        return nodes.stream()
+                .filter(node -> hasPlanningCapacity(node, assignedCounts))
+                .toList();
+    }
+
+    private static int countPendingProvisionReservationsForNode(
+            Connection connection,
+            String nodeId
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT COUNT(*)
+                FROM cluster_dimension_migrations
+                WHERE target_node = ?
+                  AND operation_kind = 'PROVISION'
+                  AND status IN ('PREPARING', 'READY', 'APPLYING')
+                """)) {
+            statement.setString(1, nodeId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                resultSet.next();
+                return resultSet.getInt(1);
+            }
+        }
     }
 
     private static String selectPlanningNode(
@@ -9591,9 +10137,11 @@ public final class ClusterDatabase {
     public record AutomaticDimensionAssignment(
             String dimensionId,
             String nodeId,
+            String requiredRole,
             boolean created,
             int assignmentCountBefore,
             int playerCountBefore,
+            int nodeCapacity,
             Instant assignedAt
     ) {
     }
@@ -9641,12 +10189,16 @@ public final class ClusterDatabase {
 
     public enum DimensionPlanAction {
         KEEP,
+        KEEP_WRONG_ROLE,
         ASSIGN,
         MOVE,
         SKIP_PINNED,
         SKIP_MIGRATING,
         SKIP_ACTIVE,
-        CONFLICT_ACTIVE
+        CONFLICT_ACTIVE,
+        ACTIVE_WRONG_ROLE,
+        NO_ROLE_NODE,
+        ROLE_CAPACITY_FULL
     }
 
     public record DimensionPlanEntry(
@@ -9662,6 +10214,8 @@ public final class ClusterDatabase {
 
     public record PlanningNodeStatus(
             String nodeId,
+            String nodeRole,
+            int nodeCapacity,
             int playerCount,
             int plannedDimensionCount
     ) {
@@ -9947,6 +10501,8 @@ public final class ClusterDatabase {
     public record ClusterNodeStatus(
             String nodeId,
             String redirectAddress,
+            String nodeRole,
+            int nodeCapacity,
             int playerCount,
             int dimensionCount,
             boolean online,
@@ -9969,6 +10525,8 @@ public final class ClusterDatabase {
 
     private record PlanningNode(
             String nodeId,
+            String nodeRole,
+            int nodeCapacity,
             int playerCount
     ) {
     }

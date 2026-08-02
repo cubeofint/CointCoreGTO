@@ -7,7 +7,10 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 
@@ -52,6 +55,14 @@ public final class ClusterConfig {
     private final int dimensionSnapshotRetentionDays;
     private final int dimensionSnapshotMaxPerDimension;
     private final int dimensionSnapshotMaxAgeMinutes;
+    private final boolean dimensionRoleRoutingEnabled;
+    private final String nodeRole;
+    private final int nodeRoleCapacity;
+    private final List<DimensionRoleRule> dimensionRoleRules;
+    private final boolean automaticDimensionRoleAssignment;
+    private final int automaticDimensionRoleAssignmentIntervalSeconds;
+    private final boolean automaticNewDimensionProvisioning;
+    private final int automaticNewDimensionProvisioningTimeoutSeconds;
     private final boolean networkChatEnabled;
     private final String networkRole;
     private final String networkChatPrefix;
@@ -99,6 +110,14 @@ public final class ClusterConfig {
             int dimensionSnapshotRetentionDays,
             int dimensionSnapshotMaxPerDimension,
             int dimensionSnapshotMaxAgeMinutes,
+            boolean dimensionRoleRoutingEnabled,
+            String nodeRole,
+            int nodeRoleCapacity,
+            List<DimensionRoleRule> dimensionRoleRules,
+            boolean automaticDimensionRoleAssignment,
+            int automaticDimensionRoleAssignmentIntervalSeconds,
+            boolean automaticNewDimensionProvisioning,
+            int automaticNewDimensionProvisioningTimeoutSeconds,
             boolean networkChatEnabled,
             String networkRole,
             String networkChatPrefix,
@@ -145,6 +164,14 @@ public final class ClusterConfig {
         this.dimensionSnapshotRetentionDays = dimensionSnapshotRetentionDays;
         this.dimensionSnapshotMaxPerDimension = dimensionSnapshotMaxPerDimension;
         this.dimensionSnapshotMaxAgeMinutes = dimensionSnapshotMaxAgeMinutes;
+        this.dimensionRoleRoutingEnabled = dimensionRoleRoutingEnabled;
+        this.nodeRole = nodeRole;
+        this.nodeRoleCapacity = nodeRoleCapacity;
+        this.dimensionRoleRules = List.copyOf(dimensionRoleRules);
+        this.automaticDimensionRoleAssignment = automaticDimensionRoleAssignment;
+        this.automaticDimensionRoleAssignmentIntervalSeconds = automaticDimensionRoleAssignmentIntervalSeconds;
+        this.automaticNewDimensionProvisioning = automaticNewDimensionProvisioning;
+        this.automaticNewDimensionProvisioningTimeoutSeconds = automaticNewDimensionProvisioningTimeoutSeconds;
         this.networkChatEnabled = networkChatEnabled;
         this.networkRole = networkRole;
         this.networkChatPrefix = networkChatPrefix;
@@ -281,6 +308,14 @@ public final class ClusterConfig {
                 positiveInt(properties, "dimension_snapshot_retention_days", 7),
                 positiveInt(properties, "dimension_snapshot_max_per_dimension", 8),
                 positiveInt(properties, "dimension_snapshot_max_age_minutes", 60),
+                Boolean.parseBoolean(properties.getProperty("dimension_role_routing_enabled", "false").trim()),
+                nodeRole(properties),
+                rangedInt(properties, "node_role_capacity", 0, 0, 1000000),
+                dimensionRoleRules(properties),
+                Boolean.parseBoolean(properties.getProperty("automatic_dimension_role_assignment", "true").trim()),
+                rangedInt(properties, "automatic_dimension_role_assignment_interval_seconds", 30, 5, 3600),
+                Boolean.parseBoolean(properties.getProperty("automatic_new_dimension_provisioning", "false").trim()),
+                rangedInt(properties, "automatic_new_dimension_provisioning_timeout_seconds", 300, 30, 1800),
                 Boolean.parseBoolean(properties.getProperty("network_chat_enabled", "false").trim()),
                 networkRole(properties),
                 networkChatPrefix(properties.getProperty("network_chat_prefix", "&8[#1] ")),
@@ -409,6 +444,86 @@ public final class ClusterConfig {
             throw new IOException("Cluster network_role may contain only A-Z, a-z, 0-9, '.', '_' and '-': " + value);
         }
         return value;
+    }
+
+    private static String nodeRole(Properties properties) throws IOException {
+        String value = properties.getProperty("node_role", "general").trim().toLowerCase(Locale.ROOT);
+        if (!value.matches("[a-z0-9._-]{1,64}")) {
+            throw new IOException("Cluster node_role may contain only a-z, 0-9, '.', '_' and '-': " + value);
+        }
+        return value;
+    }
+
+    private static List<DimensionRoleRule> dimensionRoleRules(Properties properties) throws IOException {
+        String raw = properties.getProperty("dimension_role_rules", "").trim();
+        if (raw.isEmpty()) {
+            return List.of();
+        }
+
+        List<DimensionRoleRule> rules = new ArrayList<>();
+        for (String entry : raw.split(";")) {
+            String value = entry.trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+
+            String[] parts = value.split("\\|", 2);
+            if (parts.length != 2) {
+                throw new IOException("Invalid dimension_role_rules entry: " + value);
+            }
+
+            String pattern = parts[0].trim().toLowerCase(Locale.ROOT);
+            String role = parts[1].trim().toLowerCase(Locale.ROOT);
+            if (pattern.isEmpty() || !pattern.matches("[a-z0-9._:/?*\\-]+")) {
+                throw new IOException("Invalid dimension pattern in dimension_role_rules: " + pattern);
+            }
+            if (!role.matches("[a-z0-9._-]{1,64}")) {
+                throw new IOException("Invalid role in dimension_role_rules: " + role);
+            }
+
+            rules.add(new DimensionRoleRule(pattern, role));
+        }
+
+        return List.copyOf(rules);
+    }
+
+    private static boolean globMatches(String pattern, String value) {
+        int patternIndex = 0;
+        int valueIndex = 0;
+        int starIndex = -1;
+        int starValueIndex = -1;
+
+        while (valueIndex < value.length()) {
+            if (patternIndex < pattern.length()
+                    && (pattern.charAt(patternIndex) == '?'
+                    || pattern.charAt(patternIndex) == value.charAt(valueIndex))) {
+                patternIndex++;
+                valueIndex++;
+                continue;
+            }
+
+            if (patternIndex < pattern.length()
+                    && pattern.charAt(patternIndex) == '*') {
+                starIndex = patternIndex++;
+                starValueIndex = valueIndex;
+                continue;
+            }
+
+            if (starIndex >= 0) {
+                patternIndex = starIndex + 1;
+                valueIndex = ++starValueIndex;
+                continue;
+            }
+
+            return false;
+        }
+
+        while (patternIndex < pattern.length()
+                && pattern.charAt(patternIndex) == '*') {
+            patternIndex++;
+        }
+
+        return patternIndex == pattern.length();
     }
 
     private static String networkChatPrefix(String value) {
@@ -544,6 +659,14 @@ public final class ClusterConfig {
         defaults.setProperty("dimension_snapshot_retention_days", "7");
         defaults.setProperty("dimension_snapshot_max_per_dimension", "8");
         defaults.setProperty("dimension_snapshot_max_age_minutes", "60");
+        defaults.setProperty("dimension_role_routing_enabled", "false");
+        defaults.setProperty("node_role", "general");
+        defaults.setProperty("node_role_capacity", "0");
+        defaults.setProperty("dimension_role_rules", "");
+        defaults.setProperty("automatic_dimension_role_assignment", "true");
+        defaults.setProperty("automatic_dimension_role_assignment_interval_seconds", "30");
+        defaults.setProperty("automatic_new_dimension_provisioning", "false");
+        defaults.setProperty("automatic_new_dimension_provisioning_timeout_seconds", "300");
         defaults.setProperty("network_chat_enabled", "false");
         defaults.setProperty("network_role", "gto1");
         defaults.setProperty("network_chat_prefix", "&8[#1]");
@@ -710,6 +833,57 @@ public final class ClusterConfig {
         return dimensionSnapshotMaxAgeMinutes;
     }
 
+    public boolean dimensionRoleRoutingEnabled() {
+        return dimensionRoleRoutingEnabled;
+    }
+
+    public String nodeRole() {
+        return nodeRole;
+    }
+
+    public int nodeRoleCapacity() {
+        return nodeRoleCapacity;
+    }
+
+    public List<DimensionRoleRule> dimensionRoleRules() {
+        return dimensionRoleRules;
+    }
+
+    public boolean automaticDimensionRoleAssignment() {
+        return automaticDimensionRoleAssignment;
+    }
+
+    public int automaticDimensionRoleAssignmentIntervalSeconds() {
+        return automaticDimensionRoleAssignmentIntervalSeconds;
+    }
+
+    public boolean automaticNewDimensionProvisioning() {
+        return automaticNewDimensionProvisioning;
+    }
+
+    public int automaticNewDimensionProvisioningTimeoutSeconds() {
+        return automaticNewDimensionProvisioningTimeoutSeconds;
+    }
+
+    public boolean roleRoutingEnabled() {
+        return dimensionRoleRoutingEnabled && !dimensionRoleRules.isEmpty();
+    }
+
+    public String resolveDimensionRole(String dimensionId) {
+        if (dimensionId == null || dimensionId.isBlank()) {
+            return null;
+        }
+
+        String normalized = dimensionId.trim().toLowerCase(Locale.ROOT);
+        for (DimensionRoleRule rule : dimensionRoleRules) {
+            if (rule.matches(normalized)) {
+                return rule.role();
+            }
+        }
+
+        return null;
+    }
+
     public boolean networkChatEnabled() {
         return networkChatEnabled;
     }
@@ -740,6 +914,12 @@ public final class ClusterConfig {
 
     public int discordClusterLeaseSeconds() {
         return discordClusterLeaseSeconds;
+    }
+
+    public record DimensionRoleRule(String pattern, String role) {
+        public boolean matches(String dimensionId) {
+            return globMatches(pattern, dimensionId);
+        }
     }
 
     public record NetworkChatDimensionOverride(String role, String prefix) {
