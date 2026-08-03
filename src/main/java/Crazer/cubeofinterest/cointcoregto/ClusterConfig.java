@@ -45,6 +45,16 @@ public final class ClusterConfig {
     private final boolean syncPlayerData;
     private final int maxPlayerDataBytes;
     private final boolean syncForgeCapabilities;
+    private final boolean syncFtbQuests;
+    private final int maxFtbQuestDataBytes;
+    private final int ftbQuestSyncIntervalSeconds;
+    private final boolean syncFtbQuestBook;
+    private final String ftbQuestBookAuthorityNode;
+    private final boolean ftbQuestBookAutoPublish;
+    private final int ftbQuestBookSyncIntervalSeconds;
+    private final int maxFtbQuestBookBytes;
+    private final int ftbQuestBookRevisionRetention;
+    private final int ftbQuestBookBackupRetention;
     private final boolean dimensionTickIsolation;
     private final int dimensionOwnerCacheMaxAgeSeconds;
     private final Path dimensionMigrationStagingPath;
@@ -102,6 +112,16 @@ public final class ClusterConfig {
             boolean syncPlayerData,
             int maxPlayerDataBytes,
             boolean syncForgeCapabilities,
+            boolean syncFtbQuests,
+            int maxFtbQuestDataBytes,
+            int ftbQuestSyncIntervalSeconds,
+            boolean syncFtbQuestBook,
+            String ftbQuestBookAuthorityNode,
+            boolean ftbQuestBookAutoPublish,
+            int ftbQuestBookSyncIntervalSeconds,
+            int maxFtbQuestBookBytes,
+            int ftbQuestBookRevisionRetention,
+            int ftbQuestBookBackupRetention,
             boolean dimensionTickIsolation,
             int dimensionOwnerCacheMaxAgeSeconds,
             Path dimensionMigrationStagingPath,
@@ -158,6 +178,16 @@ public final class ClusterConfig {
         this.syncPlayerData = syncPlayerData;
         this.maxPlayerDataBytes = maxPlayerDataBytes;
         this.syncForgeCapabilities = syncForgeCapabilities;
+        this.syncFtbQuests = syncFtbQuests;
+        this.maxFtbQuestDataBytes = maxFtbQuestDataBytes;
+        this.ftbQuestSyncIntervalSeconds = ftbQuestSyncIntervalSeconds;
+        this.syncFtbQuestBook = syncFtbQuestBook;
+        this.ftbQuestBookAuthorityNode = ftbQuestBookAuthorityNode;
+        this.ftbQuestBookAutoPublish = ftbQuestBookAutoPublish;
+        this.ftbQuestBookSyncIntervalSeconds = ftbQuestBookSyncIntervalSeconds;
+        this.maxFtbQuestBookBytes = maxFtbQuestBookBytes;
+        this.ftbQuestBookRevisionRetention = ftbQuestBookRevisionRetention;
+        this.ftbQuestBookBackupRetention = ftbQuestBookBackupRetention;
         this.dimensionTickIsolation = dimensionTickIsolation;
         this.dimensionOwnerCacheMaxAgeSeconds = dimensionOwnerCacheMaxAgeSeconds;
         this.dimensionMigrationStagingPath = dimensionMigrationStagingPath;
@@ -286,6 +316,69 @@ public final class ClusterConfig {
                                 "sync_forge_capabilities",
                                 "true"
                         ).trim()
+                ),
+                Boolean.parseBoolean(
+                        properties.getProperty(
+                                "sync_ftb_quests",
+                                "true"
+                        ).trim()
+                ),
+                positiveInt(
+                        properties,
+                        "max_ftb_quest_data_bytes",
+                        8 * 1024 * 1024
+                ),
+                rangedInt(
+                        properties,
+                        "ftb_quest_sync_interval_seconds",
+                        15,
+                        5,
+                        3600
+                ),
+                Boolean.parseBoolean(
+                        properties.getProperty(
+                                "sync_ftb_quest_book",
+                                "true"
+                        ).trim()
+                ),
+                nonBlank(
+                        properties.getProperty(
+                                "ftb_quest_book_authority_node",
+                                "gto1"
+                        ),
+                        "gto1"
+                ),
+                Boolean.parseBoolean(
+                        properties.getProperty(
+                                "ftb_quest_book_auto_publish",
+                                "true"
+                        ).trim()
+                ),
+                rangedInt(
+                        properties,
+                        "ftb_quest_book_sync_interval_seconds",
+                        15,
+                        5,
+                        3600
+                ),
+                positiveInt(
+                        properties,
+                        "max_ftb_quest_book_bytes",
+                        64 * 1024 * 1024
+                ),
+                rangedInt(
+                        properties,
+                        "ftb_quest_book_revision_retention",
+                        20,
+                        2,
+                        500
+                ),
+                rangedInt(
+                        properties,
+                        "ftb_quest_book_backup_retention",
+                        3,
+                        1,
+                        50
                 ),
                 Boolean.parseBoolean(
                         properties.getProperty(
@@ -420,6 +513,11 @@ public final class ClusterConfig {
                     exception
             );
         }
+    }
+
+    private static String nonBlank(String value, String fallback) {
+        String normalized = value == null ? "" : value.trim();
+        return normalized.isEmpty() ? fallback : normalized;
     }
 
     private static String required(Properties properties, String key) throws IOException {
@@ -642,6 +740,22 @@ public final class ClusterConfig {
                 "sync_forge_capabilities",
                 "true"
         );
+        defaults.setProperty("sync_ftb_quests", "true");
+        defaults.setProperty(
+                "max_ftb_quest_data_bytes",
+                Integer.toString(8 * 1024 * 1024)
+        );
+        defaults.setProperty("ftb_quest_sync_interval_seconds", "15");
+        defaults.setProperty("sync_ftb_quest_book", "true");
+        defaults.setProperty("ftb_quest_book_authority_node", "gto1");
+        defaults.setProperty("ftb_quest_book_auto_publish", "true");
+        defaults.setProperty("ftb_quest_book_sync_interval_seconds", "15");
+        defaults.setProperty(
+                "max_ftb_quest_book_bytes",
+                Integer.toString(64 * 1024 * 1024)
+        );
+        defaults.setProperty("ftb_quest_book_revision_retention", "20");
+        defaults.setProperty("ftb_quest_book_backup_retention", "3");
         defaults.setProperty(
                 "dimension_tick_isolation",
                 "false"
@@ -801,6 +915,46 @@ public final class ClusterConfig {
 
     public boolean syncForgeCapabilities() {
         return syncForgeCapabilities;
+    }
+
+    public boolean syncFtbQuests() {
+        return syncFtbQuests;
+    }
+
+    public int maxFtbQuestDataBytes() {
+        return maxFtbQuestDataBytes;
+    }
+
+    public int ftbQuestSyncIntervalSeconds() {
+        return ftbQuestSyncIntervalSeconds;
+    }
+
+    public boolean syncFtbQuestBook() {
+        return syncFtbQuestBook;
+    }
+
+    public String ftbQuestBookAuthorityNode() {
+        return ftbQuestBookAuthorityNode;
+    }
+
+    public boolean ftbQuestBookAutoPublish() {
+        return ftbQuestBookAutoPublish;
+    }
+
+    public int ftbQuestBookSyncIntervalSeconds() {
+        return ftbQuestBookSyncIntervalSeconds;
+    }
+
+    public int maxFtbQuestBookBytes() {
+        return maxFtbQuestBookBytes;
+    }
+
+    public int ftbQuestBookRevisionRetention() {
+        return ftbQuestBookRevisionRetention;
+    }
+
+    public int ftbQuestBookBackupRetention() {
+        return ftbQuestBookBackupRetention;
     }
 
     public boolean dimensionTickIsolation() {

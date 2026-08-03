@@ -301,8 +301,8 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
             graphics.drawString(this.font, "Владелец", 14, 24, 0xFFD36A, false);
         }
 
-        graphics.drawString(this.font, "Товар", 44, 67, 0xD6DCEB, false);
-        graphics.drawString(this.font, "Цена", 132, 67, 0xD6DCEB, false);
+        graphics.drawString(this.font, "Продажа", 44, 67, 0xD6DCEB, false);
+        graphics.drawString(this.font, "По цене", 132, 67, 0xD6DCEB, false);
 
         if (this.buyerMode) {
             graphics.drawString(this.font, "Сделок:", 10, 96, 0xD6DCEB, false);

@@ -2460,7 +2460,8 @@ public final class ClusterDatabase {
             double z,
             float yaw,
             float pitch,
-            ClusterPlayerDataCodec.Snapshot playerData
+            ClusterPlayerDataCodec.Snapshot playerData,
+            ClusterQuestDataCodec.Snapshot questData
     ) throws SQLException {
         if (dimensionId == null || dimensionId.isBlank()) {
             throw new SQLException("Dimension id is empty");
@@ -2589,12 +2590,20 @@ public final class ClusterDatabase {
                             player_data_sha256,
                             player_data_codec,
                             player_data_size,
+                            quest_subject_uuid,
+                            quest_scope,
+                            quest_subject_name,
+                            quest_data,
+                            quest_data_sha256,
+                            quest_data_codec,
+                            quest_data_size,
                             status,
                             created_at,
                             updated_at
                         ) VALUES (
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, 'CREATED',
+                            ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, 'CREATED',
                             CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3)
                         )
                         """)) {
@@ -2610,6 +2619,7 @@ public final class ClusterDatabase {
                     statement.setFloat(10, yaw);
                     statement.setFloat(11, pitch);
                     bindPlayerData(statement, 12, playerData);
+                    bindQuestData(statement, 16, questData);
                     statement.executeUpdate();
                 }
 
@@ -3137,7 +3147,9 @@ public final class ClusterDatabase {
                          provision_id, dimension_id, source_node, target_node,
                          player_uuid, player_name, x, y, z, yaw, pitch,
                          player_data, player_data_sha256, player_data_codec,
-                         player_data_size, status, transfer_id, retry_count,
+                         player_data_size, quest_subject_uuid, quest_scope,
+                         quest_subject_name, quest_data, quest_data_sha256,
+                         quest_data_codec, quest_data_size, status, transfer_id, retry_count,
                          error_text, created_at, updated_at, archiving_at,
                          archived_at, applying_at, ready_at, transferred_at,
                          failed_at, cancelled_at
@@ -3166,7 +3178,9 @@ public final class ClusterDatabase {
                         provision_id, dimension_id, source_node, target_node,
                         player_uuid, player_name, x, y, z, yaw, pitch,
                         player_data, player_data_sha256, player_data_codec,
-                        player_data_size, status, transfer_id, retry_count,
+                        player_data_size, quest_subject_uuid, quest_scope,
+                        quest_subject_name, quest_data, quest_data_sha256,
+                        quest_data_codec, quest_data_size, status, transfer_id, retry_count,
                         error_text, created_at, updated_at, archiving_at,
                         archived_at, applying_at, ready_at, transferred_at,
                         failed_at, cancelled_at
@@ -3209,7 +3223,9 @@ public final class ClusterDatabase {
                          provision_id, dimension_id, source_node, target_node,
                          player_uuid, player_name, x, y, z, yaw, pitch,
                          player_data, player_data_sha256, player_data_codec,
-                         player_data_size, status, transfer_id, retry_count,
+                         player_data_size, quest_subject_uuid, quest_scope,
+                         quest_subject_name, quest_data, quest_data_sha256,
+                         quest_data_codec, quest_data_size, status, transfer_id, retry_count,
                          error_text, created_at, updated_at, archiving_at,
                          archived_at, applying_at, ready_at, transferred_at,
                          failed_at, cancelled_at
@@ -3244,7 +3260,9 @@ public final class ClusterDatabase {
                          provision_id, dimension_id, source_node, target_node,
                          player_uuid, player_name, x, y, z, yaw, pitch,
                          player_data, player_data_sha256, player_data_codec,
-                         player_data_size, status, transfer_id, retry_count,
+                         player_data_size, quest_subject_uuid, quest_scope,
+                         quest_subject_name, quest_data, quest_data_sha256,
+                         quest_data_codec, quest_data_size, status, transfer_id, retry_count,
                          error_text, created_at, updated_at, archiving_at,
                          archived_at, applying_at, ready_at, transferred_at,
                          failed_at, cancelled_at
@@ -3275,7 +3293,9 @@ public final class ClusterDatabase {
                         provision_id, dimension_id, source_node, target_node,
                         player_uuid, player_name, x, y, z, yaw, pitch,
                         player_data, player_data_sha256, player_data_codec,
-                        player_data_size, status, transfer_id, retry_count,
+                        player_data_size, quest_subject_uuid, quest_scope,
+                        quest_subject_name, quest_data, quest_data_sha256,
+                        quest_data_codec, quest_data_size, status, transfer_id, retry_count,
                         error_text, created_at, updated_at, archiving_at,
                         archived_at, applying_at, ready_at, transferred_at,
                         failed_at, cancelled_at
@@ -6891,7 +6911,8 @@ public final class ClusterDatabase {
             double z,
             float yaw,
             float pitch,
-            ClusterPlayerDataCodec.Snapshot playerData
+            ClusterPlayerDataCodec.Snapshot playerData,
+            ClusterQuestDataCodec.Snapshot questData
     ) throws SQLException {
         if (targetNode == null || targetNode.isBlank()) {
             throw new SQLException("Target node is empty");
@@ -6976,6 +6997,13 @@ public final class ClusterDatabase {
                             player_data_sha256,
                             player_data_codec,
                             player_data_size,
+                            quest_subject_uuid,
+                            quest_scope,
+                            quest_subject_name,
+                            quest_data,
+                            quest_data_sha256,
+                            quest_data_codec,
+                            quest_data_size,
                             status,
                             created_at,
                             expires_at
@@ -6983,6 +7011,7 @@ public final class ClusterDatabase {
                         VALUES (
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?,
                             'READY',
                             CURRENT_TIMESTAMP(3),
                             TIMESTAMPADD(
@@ -7008,12 +7037,21 @@ public final class ClusterDatabase {
                     statement.setFloat(10, pitch);
 
                     bindPlayerData(statement, 11, playerData);
+                    bindQuestData(statement, 15, questData);
 
                     statement.setInt(
-                            15,
+                            22,
                             config.transferTtlSeconds()
                     );
                     statement.executeUpdate();
+                }
+
+                if (questData != null) {
+                    upsertQuestSnapshot(
+                            connection,
+                            config.nodeId(),
+                            questData
+                    );
                 }
 
                 if (playerData != null) {
@@ -7053,7 +7091,16 @@ public final class ClusterDatabase {
                                 : playerData.compressedSize(),
                         playerData == null
                                 ? null
-                                : playerData.sha256()
+                                : playerData.sha256(),
+                        questData == null
+                                ? 0
+                                : questData.compressedSize(),
+                        questData == null
+                                ? null
+                                : questData.scope(),
+                        questData == null
+                                ? null
+                                : questData.subjectUuid()
                 );
             } catch (SQLException exception) {
                 rollbackQuietly(connection);
@@ -7061,6 +7108,468 @@ public final class ClusterDatabase {
             } finally {
                 restoreAutoCommit(connection);
             }
+        }
+    }
+
+
+    public static List<ClusterQuestDataCodec.Snapshot> synchronizeQuestSnapshot(
+            ClusterConfig config,
+            ClusterQuestDataCodec.Snapshot snapshot
+    ) throws SQLException {
+        if (snapshot == null) {
+            return List.of();
+        }
+
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+
+            try {
+                upsertQuestSnapshot(
+                        connection,
+                        config.nodeId(),
+                        snapshot
+                );
+                List<ClusterQuestDataCodec.Snapshot> snapshots =
+                        findQuestSnapshots(
+                                connection,
+                                snapshot.subjectUuid()
+                        );
+                connection.commit();
+                return snapshots;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    private static void upsertQuestSnapshot(
+            Connection connection,
+            String nodeId,
+            ClusterQuestDataCodec.Snapshot snapshot
+    ) throws SQLException {
+        if (snapshot == null) {
+            return;
+        }
+
+        String sql = """
+                INSERT INTO cluster_quest_snapshots (
+                    subject_uuid,
+                    node_id,
+                    scope,
+                    subject_name,
+                    quest_data,
+                    quest_data_sha256,
+                    quest_data_codec,
+                    quest_data_size,
+                    updated_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3)
+                )
+                ON DUPLICATE KEY UPDATE
+                    scope = VALUES(scope),
+                    subject_name = VALUES(subject_name),
+                    quest_data = VALUES(quest_data),
+                    quest_data_sha256 = VALUES(quest_data_sha256),
+                    quest_data_codec = VALUES(quest_data_codec),
+                    quest_data_size = VALUES(quest_data_size),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                """;
+
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, snapshot.subjectUuid().toString());
+            statement.setString(2, nodeId);
+            statement.setString(3, snapshot.scope());
+            statement.setString(4, truncate(snapshot.subjectName(), 255));
+            statement.setBytes(5, snapshot.compressedNbt());
+            statement.setString(6, snapshot.sha256());
+            statement.setInt(7, snapshot.codecVersion());
+            statement.setInt(8, snapshot.compressedSize());
+            statement.executeUpdate();
+        }
+    }
+
+    private static List<ClusterQuestDataCodec.Snapshot> findQuestSnapshots(
+            Connection connection,
+            UUID subjectUuid
+    ) throws SQLException {
+        if (subjectUuid == null) {
+            return List.of();
+        }
+
+        String sql = """
+                SELECT
+                    subject_uuid,
+                    scope,
+                    subject_name,
+                    quest_data,
+                    quest_data_sha256,
+                    quest_data_codec,
+                    quest_data_size
+                FROM cluster_quest_snapshots
+                WHERE subject_uuid = ?
+                ORDER BY updated_at
+                """;
+
+        List<ClusterQuestDataCodec.Snapshot> snapshots = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, subjectUuid.toString());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    ClusterQuestDataCodec.Snapshot snapshot = readQuestSnapshot(
+                            UUID.fromString(resultSet.getString("subject_uuid")),
+                            resultSet.getString("scope"),
+                            resultSet.getString("subject_name"),
+                            resultSet.getBytes("quest_data"),
+                            resultSet.getString("quest_data_sha256"),
+                            resultSet.getInt("quest_data_codec"),
+                            resultSet.getInt("quest_data_size")
+                    );
+                    if (snapshot != null) {
+                        snapshots.add(snapshot);
+                    }
+                }
+            }
+        }
+        return List.copyOf(snapshots);
+    }
+
+
+    public static QuestBookPublishResult publishQuestBookRevision(
+            ClusterConfig config,
+            ClusterQuestBookCodec.Snapshot snapshot,
+            String revisionKind,
+            Long rollbackOfRevision,
+            boolean force
+    ) throws SQLException {
+        if (snapshot == null) {
+            throw new SQLException("FTB Quests book snapshot is unavailable");
+        }
+
+        ensureSchema(config);
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                QuestBookRevision latest = findLatestQuestBookRevision(
+                        connection,
+                        true
+                );
+                if (!force
+                        && latest != null
+                        && latest.archiveSha256().equalsIgnoreCase(snapshot.archiveSha256())) {
+                    connection.commit();
+                    return new QuestBookPublishResult(latest, false);
+                }
+
+                String sql = """
+                        INSERT INTO cluster_questbook_revisions (
+                            authority_node,
+                            source_node,
+                            revision_kind,
+                            rollback_of_revision,
+                            archive_data,
+                            archive_sha256,
+                            archive_size,
+                            file_count,
+                            created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
+                        """;
+
+                long revisionId;
+                try (PreparedStatement statement = connection.prepareStatement(
+                        sql,
+                        Statement.RETURN_GENERATED_KEYS
+                )) {
+                    statement.setString(1, config.ftbQuestBookAuthorityNode());
+                    statement.setString(2, config.nodeId());
+                    statement.setString(
+                            3,
+                            revisionKind == null || revisionKind.isBlank()
+                                    ? "PUBLISH"
+                                    : truncate(revisionKind.trim().toUpperCase(Locale.ROOT), 24)
+                    );
+                    if (rollbackOfRevision == null) {
+                        statement.setNull(4, Types.BIGINT);
+                    } else {
+                        statement.setLong(4, rollbackOfRevision);
+                    }
+                    statement.setBytes(5, snapshot.archiveData());
+                    statement.setString(6, snapshot.archiveSha256());
+                    statement.setInt(7, snapshot.archiveSize());
+                    statement.setInt(8, snapshot.fileCount());
+                    statement.executeUpdate();
+                    try (ResultSet keys = statement.getGeneratedKeys()) {
+                        if (!keys.next()) {
+                            throw new SQLException("Unable to obtain FTB Quests book revision id");
+                        }
+                        revisionId = keys.getLong(1);
+                    }
+                }
+
+                cleanupQuestBookRevisions(
+                        connection,
+                        config.ftbQuestBookRevisionRetention()
+                );
+
+                QuestBookRevision revision = findQuestBookRevision(
+                        connection,
+                        revisionId
+                );
+                connection.commit();
+                return new QuestBookPublishResult(revision, true);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static QuestBookRevision findLatestQuestBookRevision(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            return findLatestQuestBookRevision(connection, false);
+        }
+    }
+
+    public static QuestBookRevision findQuestBookRevision(
+            ClusterConfig config,
+            long revisionId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            return findQuestBookRevision(connection, revisionId);
+        }
+    }
+
+    public static List<QuestBookRevisionInfo> listQuestBookRevisions(
+            ClusterConfig config,
+            int limit
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeLimit = Math.max(1, Math.min(100, limit));
+        String sql = """
+                SELECT
+                    revision_id,
+                    authority_node,
+                    source_node,
+                    revision_kind,
+                    rollback_of_revision,
+                    archive_sha256,
+                    archive_size,
+                    file_count,
+                    created_at
+                FROM cluster_questbook_revisions
+                ORDER BY revision_id DESC
+                LIMIT ?
+                """;
+        List<QuestBookRevisionInfo> revisions = new ArrayList<>();
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, safeLimit);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    long rollbackValue = resultSet.getLong("rollback_of_revision");
+                    Long rollbackOf = resultSet.wasNull() ? null : rollbackValue;
+                    revisions.add(new QuestBookRevisionInfo(
+                            resultSet.getLong("revision_id"),
+                            resultSet.getString("authority_node"),
+                            resultSet.getString("source_node"),
+                            resultSet.getString("revision_kind"),
+                            rollbackOf,
+                            resultSet.getString("archive_sha256"),
+                            resultSet.getInt("archive_size"),
+                            resultSet.getInt("file_count"),
+                            instantOrNull(resultSet, "created_at")
+                    ));
+                }
+            }
+        }
+        return List.copyOf(revisions);
+    }
+
+    public static QuestBookNodeState findQuestBookNodeState(
+            ClusterConfig config,
+            String nodeId
+    ) throws SQLException {
+        ensureSchema(config);
+        String sql = """
+                SELECT
+                    node_id,
+                    applied_revision_id,
+                    applied_sha256,
+                    local_sha256,
+                    status,
+                    error_text,
+                    updated_at
+                FROM cluster_questbook_node_state
+                WHERE node_id = ?
+                """;
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, nodeId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return null;
+                }
+                long appliedRevision = resultSet.getLong("applied_revision_id");
+                Long appliedRevisionId = resultSet.wasNull() ? null : appliedRevision;
+                return new QuestBookNodeState(
+                        resultSet.getString("node_id"),
+                        appliedRevisionId,
+                        resultSet.getString("applied_sha256"),
+                        resultSet.getString("local_sha256"),
+                        resultSet.getString("status"),
+                        resultSet.getString("error_text"),
+                        instantOrNull(resultSet, "updated_at")
+                );
+            }
+        }
+    }
+
+    public static void updateQuestBookNodeState(
+            ClusterConfig config,
+            Long appliedRevisionId,
+            String appliedSha256,
+            String localSha256,
+            String status,
+            String errorText
+    ) throws SQLException {
+        ensureSchema(config);
+        String sql = """
+                INSERT INTO cluster_questbook_node_state (
+                    node_id,
+                    applied_revision_id,
+                    applied_sha256,
+                    local_sha256,
+                    status,
+                    error_text,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
+                ON DUPLICATE KEY UPDATE
+                    applied_revision_id = VALUES(applied_revision_id),
+                    applied_sha256 = VALUES(applied_sha256),
+                    local_sha256 = VALUES(local_sha256),
+                    status = VALUES(status),
+                    error_text = VALUES(error_text),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                """;
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, config.nodeId());
+            if (appliedRevisionId == null) {
+                statement.setNull(2, Types.BIGINT);
+            } else {
+                statement.setLong(2, appliedRevisionId);
+            }
+            statement.setString(3, appliedSha256);
+            statement.setString(4, localSha256);
+            statement.setString(5, truncate(status == null ? "UNKNOWN" : status, 24));
+            statement.setString(6, truncate(errorText, 8192));
+            statement.executeUpdate();
+        }
+    }
+
+    private static QuestBookRevision findLatestQuestBookRevision(
+            Connection connection,
+            boolean forUpdate
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    revision_id,
+                    authority_node,
+                    source_node,
+                    revision_kind,
+                    rollback_of_revision,
+                    archive_data,
+                    archive_sha256,
+                    archive_size,
+                    file_count,
+                    created_at
+                FROM cluster_questbook_revisions
+                ORDER BY revision_id DESC
+                LIMIT 1
+                """ + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            return resultSet.next() ? readQuestBookRevision(resultSet) : null;
+        }
+    }
+
+    private static QuestBookRevision findQuestBookRevision(
+            Connection connection,
+            long revisionId
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    revision_id,
+                    authority_node,
+                    source_node,
+                    revision_kind,
+                    rollback_of_revision,
+                    archive_data,
+                    archive_sha256,
+                    archive_size,
+                    file_count,
+                    created_at
+                FROM cluster_questbook_revisions
+                WHERE revision_id = ?
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, revisionId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readQuestBookRevision(resultSet) : null;
+            }
+        }
+    }
+
+    private static QuestBookRevision readQuestBookRevision(
+            ResultSet resultSet
+    ) throws SQLException {
+        long rollbackValue = resultSet.getLong("rollback_of_revision");
+        Long rollbackOf = resultSet.wasNull() ? null : rollbackValue;
+        return new QuestBookRevision(
+                resultSet.getLong("revision_id"),
+                resultSet.getString("authority_node"),
+                resultSet.getString("source_node"),
+                resultSet.getString("revision_kind"),
+                rollbackOf,
+                resultSet.getBytes("archive_data"),
+                resultSet.getString("archive_sha256"),
+                resultSet.getInt("archive_size"),
+                resultSet.getInt("file_count"),
+                instantOrNull(resultSet, "created_at")
+        );
+    }
+
+    private static void cleanupQuestBookRevisions(
+            Connection connection,
+            int retention
+    ) throws SQLException {
+        int safeRetention = Math.max(2, retention);
+        String sql = """
+                DELETE FROM cluster_questbook_revisions
+                WHERE revision_id NOT IN (
+                    SELECT revision_id
+                    FROM (
+                        SELECT revision_id
+                        FROM cluster_questbook_revisions
+                        ORDER BY revision_id DESC
+                        LIMIT ?
+                    ) retained_revisions
+                )
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, safeRetention);
+            statement.executeUpdate();
         }
     }
 
@@ -7095,6 +7604,13 @@ public final class ClusterDatabase {
                             player_data_sha256,
                             player_data_codec,
                             player_data_size,
+                            quest_subject_uuid,
+                            quest_scope,
+                            quest_subject_name,
+                            quest_data,
+                            quest_data_sha256,
+                            quest_data_codec,
+                            quest_data_size,
                             created_at,
                             expires_at
                         FROM pending_transfers
@@ -7117,7 +7633,7 @@ public final class ClusterDatabase {
                                  statement.executeQuery()) {
 
                         if (resultSet.next()) {
-                            transfer = readPendingTransfer(resultSet);
+                            transfer = readPendingTransfer(connection, resultSet);
                         }
                     }
                 }
@@ -7521,10 +8037,12 @@ public final class ClusterDatabase {
                         SET
                             status = 'FAILED',
                             claimed_at = NULL,
-                            player_data = NULL
+                            player_data = NULL,
+                            quest_data = NULL,
+                            quest_data_size = 0
                         WHERE transfer_id = ?
                           AND player_uuid = ?
-                          AND status = 'CLAIMED'
+                          AND status IN ('READY', 'CLAIMED')
                         """;
 
                 try (PreparedStatement statement =
@@ -7586,6 +8104,56 @@ public final class ClusterDatabase {
         statement.setInt(
                 firstParameter + 3,
                 playerData.compressedSize()
+        );
+    }
+
+    private static void bindQuestData(
+            PreparedStatement statement,
+            int firstParameter,
+            ClusterQuestDataCodec.Snapshot questData
+    ) throws SQLException {
+        if (questData == null) {
+            statement.setNull(firstParameter, Types.CHAR);
+            statement.setNull(firstParameter + 1, Types.VARCHAR);
+            statement.setNull(firstParameter + 2, Types.VARCHAR);
+            statement.setNull(firstParameter + 3, Types.LONGVARBINARY);
+            statement.setNull(firstParameter + 4, Types.CHAR);
+            statement.setInt(firstParameter + 5, 0);
+            statement.setInt(firstParameter + 6, 0);
+            return;
+        }
+
+        statement.setString(firstParameter, questData.subjectUuid().toString());
+        statement.setString(firstParameter + 1, questData.scope());
+        statement.setString(firstParameter + 2, truncate(questData.subjectName(), 255));
+        statement.setBytes(firstParameter + 3, questData.compressedNbt());
+        statement.setString(firstParameter + 4, questData.sha256());
+        statement.setInt(firstParameter + 5, questData.codecVersion());
+        statement.setInt(firstParameter + 6, questData.compressedSize());
+    }
+
+    private static ClusterQuestDataCodec.Snapshot readQuestSnapshot(
+            UUID subjectUuid,
+            String scope,
+            String subjectName,
+            byte[] questData,
+            String questDataSha256,
+            int questDataCodec,
+            int questDataSize
+    ) {
+        if (subjectUuid == null || questData == null || questData.length == 0) {
+            return null;
+        }
+        if (questDataSize != questData.length) {
+            return null;
+        }
+        return new ClusterQuestDataCodec.Snapshot(
+                subjectUuid,
+                scope,
+                subjectName,
+                questDataCodec,
+                questData,
+                questDataSha256
         );
     }
 
@@ -9065,7 +9633,9 @@ public final class ClusterDatabase {
                     provision_id, dimension_id, source_node, target_node,
                     player_uuid, player_name, x, y, z, yaw, pitch,
                     player_data, player_data_sha256, player_data_codec,
-                    player_data_size, status, transfer_id, retry_count,
+                    player_data_size, quest_subject_uuid, quest_scope,
+                    quest_subject_name, quest_data, quest_data_sha256,
+                    quest_data_codec, quest_data_size, status, transfer_id, retry_count,
                     error_text, created_at, updated_at, archiving_at,
                     archived_at, applying_at, ready_at, transferred_at,
                     failed_at, cancelled_at
@@ -9104,6 +9674,13 @@ public final class ClusterDatabase {
                 resultSet.getString("player_data_sha256"),
                 codec,
                 resultSet.getInt("player_data_size"),
+                uuidOrNull(resultSet.getString("quest_subject_uuid")),
+                resultSet.getString("quest_scope"),
+                resultSet.getString("quest_subject_name"),
+                resultSet.getBytes("quest_data"),
+                resultSet.getString("quest_data_sha256"),
+                nullableInt(resultSet, "quest_data_codec"),
+                resultSet.getInt("quest_data_size"),
                 resultSet.getString("status"),
                 resultSet.getString("transfer_id"),
                 resultSet.getInt("retry_count"),
@@ -9152,6 +9729,25 @@ public final class ClusterDatabase {
                 instantOrNull(resultSet, "rolled_back_at"),
                 instantOrNull(resultSet, "source_backup_deleted_at")
         );
+    }
+
+    private static UUID uuidOrNull(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(value);
+        } catch (IllegalArgumentException exception) {
+            return null;
+        }
+    }
+
+    private static int nullableInt(
+            ResultSet resultSet,
+            String column
+    ) throws SQLException {
+        int value = resultSet.getInt(column);
+        return resultSet.wasNull() ? 0 : value;
     }
 
     private static Instant instantOrNull(
@@ -9402,6 +9998,13 @@ public final class ClusterDatabase {
                     player_data_sha256 CHAR(64) NULL,
                     player_data_codec INT NULL,
                     player_data_size INT NOT NULL DEFAULT 0,
+                    quest_subject_uuid CHAR(36) NULL,
+                    quest_scope VARCHAR(16) NULL,
+                    quest_subject_name VARCHAR(255) NULL,
+                    quest_data LONGBLOB NULL,
+                    quest_data_sha256 CHAR(64) NULL,
+                    quest_data_codec INT NULL,
+                    quest_data_size INT NOT NULL DEFAULT 0,
                     status VARCHAR(24) NOT NULL,
                     transfer_id CHAR(36) NULL,
                     retry_count INT NOT NULL DEFAULT 0,
@@ -9589,6 +10192,61 @@ public final class ClusterDatabase {
                 """);
 
             statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_quest_snapshots (
+                    subject_uuid CHAR(36) NOT NULL,
+                    node_id VARCHAR(64) NOT NULL,
+                    scope VARCHAR(16) NOT NULL,
+                    subject_name VARCHAR(255) NOT NULL DEFAULT '',
+                    quest_data LONGBLOB NOT NULL,
+                    quest_data_sha256 CHAR(64) NOT NULL,
+                    quest_data_codec INT NOT NULL,
+                    quest_data_size INT NOT NULL,
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+                    PRIMARY KEY (subject_uuid, node_id),
+                    INDEX idx_cluster_quest_snapshot_updated (updated_at)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_questbook_revisions (
+                    revision_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    authority_node VARCHAR(64) NOT NULL,
+                    source_node VARCHAR(64) NOT NULL,
+                    revision_kind VARCHAR(24) NOT NULL,
+                    rollback_of_revision BIGINT NULL,
+                    archive_data LONGBLOB NOT NULL,
+                    archive_sha256 CHAR(64) NOT NULL,
+                    archive_size INT NOT NULL,
+                    file_count INT NOT NULL,
+                    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+                    INDEX idx_cluster_questbook_created (created_at),
+                    INDEX idx_cluster_questbook_hash (archive_sha256)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_questbook_node_state (
+                    node_id VARCHAR(64) NOT NULL PRIMARY KEY,
+                    applied_revision_id BIGINT NULL,
+                    applied_sha256 CHAR(64) NULL,
+                    local_sha256 CHAR(64) NULL,
+                    status VARCHAR(24) NOT NULL,
+                    error_text TEXT NULL,
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+                    INDEX idx_cluster_questbook_node_status (status, updated_at)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
                 CREATE TABLE IF NOT EXISTS pending_transfers (
                     transfer_id CHAR(36) NOT NULL PRIMARY KEY,
                     player_uuid CHAR(36) NOT NULL,
@@ -9607,6 +10265,13 @@ public final class ClusterDatabase {
                     player_data_sha256 CHAR(64) NULL,
                     player_data_codec INT NOT NULL DEFAULT 0,
                     player_data_size INT NOT NULL DEFAULT 0,
+                    quest_subject_uuid CHAR(36) NULL,
+                    quest_scope VARCHAR(16) NULL,
+                    quest_subject_name VARCHAR(255) NULL,
+                    quest_data LONGBLOB NULL,
+                    quest_data_sha256 CHAR(64) NULL,
+                    quest_data_codec INT NOT NULL DEFAULT 0,
+                    quest_data_size INT NOT NULL DEFAULT 0,
                     created_at TIMESTAMP(3) NOT NULL
                         DEFAULT CURRENT_TIMESTAMP(3),
                     expires_at TIMESTAMP(3) NOT NULL,
@@ -9760,6 +10425,21 @@ public final class ClusterDatabase {
                 "player_data_size",
                 "INT NOT NULL DEFAULT 0"
         );
+
+        ensureColumnExists(connection, "pending_transfers", "quest_subject_uuid", "CHAR(36) NULL");
+        ensureColumnExists(connection, "pending_transfers", "quest_scope", "VARCHAR(16) NULL");
+        ensureColumnExists(connection, "pending_transfers", "quest_subject_name", "VARCHAR(255) NULL");
+        ensureColumnExists(connection, "pending_transfers", "quest_data", "LONGBLOB NULL");
+        ensureColumnExists(connection, "pending_transfers", "quest_data_sha256", "CHAR(64) NULL");
+        ensureColumnExists(connection, "pending_transfers", "quest_data_codec", "INT NOT NULL DEFAULT 0");
+        ensureColumnExists(connection, "pending_transfers", "quest_data_size", "INT NOT NULL DEFAULT 0");
+        ensureColumnExists(connection, "cluster_dimension_provisions", "quest_subject_uuid", "CHAR(36) NULL");
+        ensureColumnExists(connection, "cluster_dimension_provisions", "quest_scope", "VARCHAR(16) NULL");
+        ensureColumnExists(connection, "cluster_dimension_provisions", "quest_subject_name", "VARCHAR(255) NULL");
+        ensureColumnExists(connection, "cluster_dimension_provisions", "quest_data", "LONGBLOB NULL");
+        ensureColumnExists(connection, "cluster_dimension_provisions", "quest_data_sha256", "CHAR(64) NULL");
+        ensureColumnExists(connection, "cluster_dimension_provisions", "quest_data_codec", "INT NULL");
+        ensureColumnExists(connection, "cluster_dimension_provisions", "quest_data_size", "INT NOT NULL DEFAULT 0");
 
         ensureColumnExists(
                 connection,
@@ -10783,8 +11463,37 @@ public final class ClusterDatabase {
     }
 
     private static PendingTransfer readPendingTransfer(
+            Connection connection,
             ResultSet resultSet
     ) throws SQLException {
+        UUID questSubjectUuid = uuidOrNull(
+                resultSet.getString("quest_subject_uuid")
+        );
+        ClusterQuestDataCodec.Snapshot directQuestSnapshot =
+                readQuestSnapshot(
+                        questSubjectUuid,
+                        resultSet.getString("quest_scope"),
+                        resultSet.getString("quest_subject_name"),
+                        resultSet.getBytes("quest_data"),
+                        resultSet.getString("quest_data_sha256"),
+                        resultSet.getInt("quest_data_codec"),
+                        resultSet.getInt("quest_data_size")
+                );
+        List<ClusterQuestDataCodec.Snapshot> questSnapshots =
+                questSubjectUuid == null
+                        ? List.of()
+                        : findQuestSnapshots(connection, questSubjectUuid);
+        if (directQuestSnapshot != null
+                && questSnapshots.stream().noneMatch(snapshot ->
+                snapshot.sha256().equalsIgnoreCase(
+                        directQuestSnapshot.sha256()
+                ))) {
+            List<ClusterQuestDataCodec.Snapshot> combined =
+                    new ArrayList<>(questSnapshots);
+            combined.add(directQuestSnapshot);
+            questSnapshots = List.copyOf(combined);
+        }
+
         return new PendingTransfer(
                 resultSet.getString("transfer_id"),
                 UUID.fromString(
@@ -10802,6 +11511,7 @@ public final class ClusterDatabase {
                 resultSet.getString("player_data_sha256"),
                 resultSet.getInt("player_data_codec"),
                 resultSet.getInt("player_data_size"),
+                questSnapshots,
                 resultSet
                         .getTimestamp("created_at")
                         .toInstant(),
@@ -10990,6 +11700,13 @@ public final class ClusterDatabase {
             String playerDataSha256,
             int playerDataCodec,
             int playerDataSize,
+            UUID questSubjectUuid,
+            String questScope,
+            String questSubjectName,
+            byte[] questData,
+            String questDataSha256,
+            int questDataCodec,
+            int questDataSize,
             String status,
             String transferId,
             int retryCount,
@@ -11012,6 +11729,18 @@ public final class ClusterDatabase {
                     playerDataCodec,
                     playerData.clone(),
                     playerDataSha256
+            );
+        }
+
+        public ClusterQuestDataCodec.Snapshot questDataSnapshot() {
+            return readQuestSnapshot(
+                    questSubjectUuid,
+                    questScope,
+                    questSubjectName,
+                    questData,
+                    questDataSha256,
+                    questDataCodec,
+                    questDataSize
             );
         }
     }
@@ -11437,7 +12166,10 @@ public final class ClusterDatabase {
             float yaw,
             float pitch,
             int playerDataSize,
-            String playerDataSha256
+            String playerDataSha256,
+            int questDataSize,
+            String questScope,
+            UUID questSubjectUuid
     ) {
     }
 
@@ -11493,6 +12225,58 @@ public final class ClusterDatabase {
     ) {
     }
 
+    public record QuestBookRevision(
+            long revisionId,
+            String authorityNode,
+            String sourceNode,
+            String revisionKind,
+            Long rollbackOfRevision,
+            byte[] archiveData,
+            String archiveSha256,
+            int archiveSize,
+            int fileCount,
+            Instant createdAt
+    ) {
+        public QuestBookRevision {
+            archiveData = archiveData == null ? null : archiveData.clone();
+        }
+
+        @Override
+        public byte[] archiveData() {
+            return archiveData == null ? null : archiveData.clone();
+        }
+    }
+
+    public record QuestBookRevisionInfo(
+            long revisionId,
+            String authorityNode,
+            String sourceNode,
+            String revisionKind,
+            Long rollbackOfRevision,
+            String archiveSha256,
+            int archiveSize,
+            int fileCount,
+            Instant createdAt
+    ) {
+    }
+
+    public record QuestBookPublishResult(
+            QuestBookRevision revision,
+            boolean created
+    ) {
+    }
+
+    public record QuestBookNodeState(
+            String nodeId,
+            Long appliedRevisionId,
+            String appliedSha256,
+            String localSha256,
+            String status,
+            String errorText,
+            Instant updatedAt
+    ) {
+    }
+
     public record PendingTransfer(
             String transferId,
             UUID playerUuid,
@@ -11508,6 +12292,7 @@ public final class ClusterDatabase {
             String playerDataSha256,
             int playerDataCodec,
             int playerDataSize,
+            List<ClusterQuestDataCodec.Snapshot> questSnapshots,
             Instant createdAt,
             Instant expiresAt
     ) {

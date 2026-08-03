@@ -3,6 +3,7 @@ package Crazer.cubeofinterest.cointcoregto;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.LongArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -16,6 +17,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
+import dev.ftb.mods.ftbquests.quest.TeamData;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.TickEvent;
@@ -131,6 +133,9 @@ public final class ClusterTestModule {
     private static final Set<String>
             NEW_DIMENSION_PROVISION_TEST_PAUSE_LOGGED =
             ConcurrentHashMap.newKeySet();
+    private static final Set<UUID>
+            FTB_QUEST_SYNC_IN_FLIGHT =
+            ConcurrentHashMap.newKeySet();
 
     private static final long DIMENSION_ROUTE_SUPPRESSION_NANOS =
             10_000_000_000L;
@@ -176,6 +181,7 @@ public final class ClusterTestModule {
     private volatile String lastAutomaticSnapshotSummary;
     private volatile long nextAutomaticOperationRecoveryCheckAtMillis;
     private volatile long nextAutomaticDimensionRoleAssignmentAtMillis;
+    private volatile long nextFtbQuestSyncAtMillis;
     private volatile long lastAutomaticDimensionRoleAssignmentAtMillis;
     private volatile String lastAutomaticDimensionRoleAssignmentSummary;
     private volatile long lastAutomaticOperationRecoveryScanAtMillis;
@@ -388,8 +394,13 @@ public final class ClusterTestModule {
         }
 
         ClusterPlayerDataCodec.Snapshot playerData;
+        ClusterQuestDataCodec.Snapshot questData;
         try {
             playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+            questData = captureQuestDataForTransfer(
                     player,
                     currentConfig
             );
@@ -445,7 +456,8 @@ public final class ClusterTestModule {
                                 z,
                                 yaw,
                                 pitch,
-                                playerData
+                                playerData,
+                                questData
                         );
                 updateCachedDimensionOwner(
                         dimensionId,
@@ -565,8 +577,13 @@ public final class ClusterTestModule {
         }
 
         ClusterPlayerDataCodec.Snapshot playerData;
+        ClusterQuestDataCodec.Snapshot questData;
         try {
             playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+            questData = captureQuestDataForTransfer(
                     player,
                     currentConfig
             );
@@ -639,7 +656,8 @@ public final class ClusterTestModule {
                         z,
                         yaw,
                         pitch,
-                        playerData
+                        playerData,
+                        questData
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -763,9 +781,14 @@ public final class ClusterTestModule {
                 : xRot;
 
         ClusterPlayerDataCodec.Snapshot playerData;
+        ClusterQuestDataCodec.Snapshot questData;
 
         try {
             playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+            questData = captureQuestDataForTransfer(
                     player,
                     currentConfig
             );
@@ -862,7 +885,8 @@ public final class ClusterTestModule {
                         targetZ,
                         targetYaw,
                         targetPitch,
-                        playerData
+                        playerData,
+                        questData
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -941,6 +965,7 @@ public final class ClusterTestModule {
 
         MinecraftServer server = event.getServer();
         ClusterTransferGuard.clearAll();
+        FTB_QUEST_SYNC_IN_FLIGHT.clear();
         SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
         activeServer = server;
         heartbeatTickCounter = 0;
@@ -976,6 +1001,9 @@ public final class ClusterTestModule {
                 + config.automaticOperationRecoveryIntervalSeconds() * 1_000L;
         nextAutomaticDimensionRoleAssignmentAtMillis = now
                 + config.automaticDimensionRoleAssignmentIntervalSeconds() * 1_000L;
+        nextFtbQuestSyncAtMillis = now
+                + config.ftbQuestSyncIntervalSeconds() * 1_000L;
+        ClusterQuestBookManager.started(server, config);
         lastAutomaticDimensionRoleAssignmentAtMillis = 0L;
         lastAutomaticDimensionRoleAssignmentSummary = null;
         lastAutomaticOperationRecoveryScanAtMillis = 0L;
@@ -1013,6 +1041,8 @@ public final class ClusterTestModule {
         startAutomaticDimensionSnapshotsIfDue(server, currentConfig);
         startAutomaticDimensionRoleAssignmentIfDue(server, currentConfig);
         startAutomaticNodeOperationRecoveryWatchdogIfDue(server, currentConfig);
+        startFtbQuestSyncIfDue(server, currentConfig);
+        ClusterQuestBookManager.tick(server, currentConfig);
 
         newDimensionProvisionTickCounter++;
         if (newDimensionProvisionTickCounter >= 10) {
@@ -1141,6 +1171,9 @@ public final class ClusterTestModule {
         AUTOMATIC_OPERATION_RECOVERY_SCAN_IN_FLIGHT.set(false);
         NEW_DIMENSION_PROVISION_APPLY_IN_FLIGHT.set(false);
         NEW_DIMENSION_PROVISION_STATUS_IN_FLIGHT.set(false);
+        FTB_QUEST_SYNC_IN_FLIGHT.clear();
+        ClusterQuestBookManager.stopping();
+        nextFtbQuestSyncAtMillis = 0L;
         nextAutomaticSnapshotAtMillis = 0L;
         lastAutomaticSnapshotSummary = null;
         nextAutomaticOperationRecoveryCheckAtMillis = 0L;
@@ -1212,6 +1245,118 @@ public final class ClusterTestModule {
                                                 showClusterHealth(
                                                         context.getSource()
                                                 )
+                                        )
+                        )
+
+                        .then(
+                                Commands.literal("questsync")
+                                        .executes(context ->
+                                                showFtbQuestSyncStatus(
+                                                        context.getSource()
+                                                )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(context ->
+                                                                showFtbQuestSyncStatus(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("now")
+                                                        .executes(context ->
+                                                                forceFtbQuestSync(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                        )
+
+                        .then(
+                                Commands.literal("questbook")
+                                        .executes(context ->
+                                                ClusterQuestBookManager.showStatus(
+                                                        context.getSource(),
+                                                        config
+                                                )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(context ->
+                                                                ClusterQuestBookManager.showStatus(
+                                                                        context.getSource(),
+                                                                        config
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("publish")
+                                                        .executes(context ->
+                                                                ClusterQuestBookManager.publish(
+                                                                        context.getSource(),
+                                                                        config,
+                                                                        false
+                                                                )
+                                                        )
+                                                        .then(
+                                                                Commands.literal("force")
+                                                                        .executes(context ->
+                                                                                ClusterQuestBookManager.publish(
+                                                                                        context.getSource(),
+                                                                                        config,
+                                                                                        true
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("sync")
+                                                        .executes(context ->
+                                                                ClusterQuestBookManager.sync(
+                                                                        context.getSource(),
+                                                                        config,
+                                                                        false
+                                                                )
+                                                        )
+                                                        .then(
+                                                                Commands.literal("force")
+                                                                        .executes(context ->
+                                                                                ClusterQuestBookManager.sync(
+                                                                                        context.getSource(),
+                                                                                        config,
+                                                                                        true
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("revisions")
+                                                        .executes(context ->
+                                                                ClusterQuestBookManager.revisions(
+                                                                        context.getSource(),
+                                                                        config
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("rollback")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "revision",
+                                                                                LongArgumentType.longArg(1L)
+                                                                        )
+                                                                        .executes(context ->
+                                                                                ClusterQuestBookManager.rollback(
+                                                                                        context.getSource(),
+                                                                                        config,
+                                                                                        LongArgumentType.getLong(
+                                                                                                context,
+                                                                                                "revision"
+                                                                                        )
+                                                                                )
+                                                                        )
+                                                        )
                                         )
                         )
 
@@ -2556,8 +2701,41 @@ public final class ClusterTestModule {
         }
 
         UUID playerUuid = player.getUUID();
+        ClusterQuestDataCodec.Snapshot questSnapshot = null;
 
+        if (currentConfig.syncFtbQuests()) {
+            try {
+                questSnapshot = ClusterQuestDataCodec.capture(
+                        player,
+                        currentConfig.maxFtbQuestDataBytes()
+                );
+            } catch (Exception exception) {
+                LOGGER.warn(
+                        "Unable to capture final FTB Quests snapshot for {} during logout",
+                        playerUuid,
+                        exception
+                );
+            }
+        }
+
+        ClusterQuestDataCodec.Snapshot finalQuestSnapshot = questSnapshot;
         DATABASE_EXECUTOR.execute(() -> {
+            if (finalQuestSnapshot != null) {
+                try {
+                    ClusterDatabase.synchronizeQuestSnapshot(
+                            currentConfig,
+                            finalQuestSnapshot
+                    );
+                } catch (Exception exception) {
+                    LOGGER.warn(
+                            "Unable to publish final FTB Quests snapshot for {} on node {}",
+                            playerUuid,
+                            currentConfig.nodeId(),
+                            exception
+                    );
+                }
+            }
+
             try {
                 ClusterDatabase.releasePlayerSession(
                         currentConfig,
@@ -2872,9 +3050,14 @@ public final class ClusterTestModule {
         );
 
         ClusterPlayerDataCodec.Snapshot playerData;
+        ClusterQuestDataCodec.Snapshot questData;
 
         try {
             playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+            questData = captureQuestDataForTransfer(
                     player,
                     currentConfig
             );
@@ -2963,7 +3146,8 @@ public final class ClusterTestModule {
                         z,
                         yaw,
                         pitch,
-                        playerData
+                        playerData,
+                        questData
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -3197,9 +3381,14 @@ public final class ClusterTestModule {
         }
 
         ClusterPlayerDataCodec.Snapshot playerData;
+        ClusterQuestDataCodec.Snapshot questData;
 
         try {
             playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+            questData = captureQuestDataForTransfer(
                     player,
                     currentConfig
             );
@@ -3260,7 +3449,8 @@ public final class ClusterTestModule {
                                             z,
                                             yaw,
                                             pitch,
-                                            playerData
+                                            playerData,
+                                            questData
                                     );
                             updateCachedDimensionOwner(
                                     dimensionId,
@@ -3393,7 +3583,8 @@ public final class ClusterTestModule {
                         z,
                         yaw,
                         pitch,
-                        playerData
+                        playerData,
+                        questData
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -5868,9 +6059,14 @@ public final class ClusterTestModule {
         }
 
         ClusterPlayerDataCodec.Snapshot playerData;
+        ClusterQuestDataCodec.Snapshot questData;
 
         try {
             playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+            questData = captureQuestDataForTransfer(
                     player,
                     currentConfig
             );
@@ -5950,7 +6146,8 @@ public final class ClusterTestModule {
                         z,
                         yaw,
                         pitch,
-                        playerData
+                        playerData,
+                        questData
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -6015,9 +6212,14 @@ public final class ClusterTestModule {
         }
 
         ClusterPlayerDataCodec.Snapshot playerData;
+        ClusterQuestDataCodec.Snapshot questData;
 
         try {
             playerData = capturePlayerDataForTransfer(
+                    player,
+                    currentConfig
+            );
+            questData = captureQuestDataForTransfer(
                     player,
                     currentConfig
             );
@@ -6068,7 +6270,8 @@ public final class ClusterTestModule {
                         z,
                         yaw,
                         pitch,
-                        playerData
+                        playerData,
+                        questData
                 );
             } catch (Exception exception) {
                 LOGGER.error(
@@ -7141,7 +7344,8 @@ public final class ClusterTestModule {
                 provision.z(),
                 provision.yaw(),
                 provision.pitch(),
-                provision.playerDataSnapshot()
+                provision.playerDataSnapshot(),
+                provision.questDataSnapshot()
         );
     }
 
@@ -7344,6 +7548,162 @@ public final class ClusterTestModule {
         return assignment.nodeId();
     }
 
+    private void startFtbQuestSyncIfDue(
+            MinecraftServer server,
+            ClusterConfig currentConfig
+    ) {
+        if (!currentConfig.syncFtbQuests()) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now < nextFtbQuestSyncAtMillis) {
+            return;
+        }
+
+        nextFtbQuestSyncAtMillis = now
+                + currentConfig.ftbQuestSyncIntervalSeconds() * 1_000L;
+
+        Map<UUID, ServerPlayer> representatives = new LinkedHashMap<>();
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            try {
+                TeamData teamData = TeamData.get(player);
+                if (teamData != null) {
+                    representatives.putIfAbsent(
+                            teamData.getTeamId(),
+                            player
+                    );
+                }
+            } catch (Exception exception) {
+                LOGGER.debug(
+                        "Unable to resolve FTB Quests subject for {}",
+                        player.getUUID(),
+                        exception
+                );
+            }
+        }
+
+        for (Map.Entry<UUID, ServerPlayer> entry : representatives.entrySet()) {
+            UUID subjectUuid = entry.getKey();
+            ServerPlayer representative = entry.getValue();
+
+            if (!FTB_QUEST_SYNC_IN_FLIGHT.add(subjectUuid)) {
+                continue;
+            }
+
+            ClusterQuestDataCodec.Snapshot localSnapshot;
+            try {
+                localSnapshot = ClusterQuestDataCodec.capture(
+                        representative,
+                        currentConfig.maxFtbQuestDataBytes()
+                );
+            } catch (Exception exception) {
+                FTB_QUEST_SYNC_IN_FLIGHT.remove(subjectUuid);
+                LOGGER.warn(
+                        "Unable to capture periodic FTB Quests snapshot for {}",
+                        subjectUuid,
+                        exception
+                );
+                continue;
+            }
+
+            DATABASE_EXECUTOR.execute(() -> {
+                try {
+                    List<ClusterQuestDataCodec.Snapshot> snapshots =
+                            ClusterDatabase.synchronizeQuestSnapshot(
+                                    currentConfig,
+                                    localSnapshot
+                            );
+
+                    server.execute(() -> mergePeriodicQuestSnapshots(
+                            server,
+                            currentConfig,
+                            subjectUuid,
+                            snapshots
+                    ));
+                } catch (Exception exception) {
+                    FTB_QUEST_SYNC_IN_FLIGHT.remove(subjectUuid);
+                    LOGGER.warn(
+                            "Unable to exchange periodic FTB Quests snapshots for {}",
+                            subjectUuid,
+                            exception
+                    );
+                }
+            });
+        }
+    }
+
+    private void mergePeriodicQuestSnapshots(
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            UUID subjectUuid,
+            List<ClusterQuestDataCodec.Snapshot> snapshots
+    ) {
+        ServerPlayer representative = findOnlineQuestSubjectMember(
+                server,
+                subjectUuid
+        );
+
+        if (representative == null) {
+            FTB_QUEST_SYNC_IN_FLIGHT.remove(subjectUuid);
+            return;
+        }
+
+        try {
+            ClusterQuestDataCodec.ApplyResult result =
+                    ClusterQuestDataCodec.merge(
+                            representative,
+                            snapshots,
+                            currentConfig.maxFtbQuestDataBytes()
+                    );
+
+            if (result.changed() && result.mergedSnapshot() != null) {
+                DATABASE_EXECUTOR.execute(() -> {
+                    try {
+                        ClusterDatabase.synchronizeQuestSnapshot(
+                                currentConfig,
+                                result.mergedSnapshot()
+                        );
+                    } catch (Exception exception) {
+                        LOGGER.warn(
+                                "Unable to publish merged FTB Quests snapshot for {}",
+                                subjectUuid,
+                                exception
+                        );
+                    } finally {
+                        FTB_QUEST_SYNC_IN_FLIGHT.remove(subjectUuid);
+                    }
+                });
+            } else {
+                FTB_QUEST_SYNC_IN_FLIGHT.remove(subjectUuid);
+            }
+        } catch (Exception exception) {
+            FTB_QUEST_SYNC_IN_FLIGHT.remove(subjectUuid);
+            LOGGER.warn(
+                    "Unable to merge periodic FTB Quests snapshots for {}",
+                    subjectUuid,
+                    exception
+            );
+        }
+    }
+
+    private ServerPlayer findOnlineQuestSubjectMember(
+            MinecraftServer server,
+            UUID subjectUuid
+    ) {
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            try {
+                TeamData teamData = TeamData.get(player);
+                if (teamData != null
+                        && subjectUuid.equals(teamData.getTeamId())) {
+                    return player;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
+
     private ClusterPlayerDataCodec.Snapshot
     capturePlayerDataForTransfer(
             ServerPlayer player,
@@ -7360,6 +7720,21 @@ public final class ClusterTestModule {
         );
     }
 
+    private ClusterQuestDataCodec.Snapshot
+    captureQuestDataForTransfer(
+            ServerPlayer player,
+            ClusterConfig currentConfig
+    ) throws Exception {
+        if (!currentConfig.syncFtbQuests()) {
+            return null;
+        }
+
+        return ClusterQuestDataCodec.capture(
+                player,
+                currentConfig.maxFtbQuestDataBytes()
+        );
+    }
+
     private void createTransferAndScheduleRedirect(
             MinecraftServer server,
             ClusterConfig currentConfig,
@@ -7372,7 +7747,8 @@ public final class ClusterTestModule {
             double z,
             float yaw,
             float pitch,
-            ClusterPlayerDataCodec.Snapshot playerData
+            ClusterPlayerDataCodec.Snapshot playerData,
+            ClusterQuestDataCodec.Snapshot questData
     ) throws Exception {
         if (!currentConfig.enabled()) {
             throw new IllegalStateException(
@@ -7410,11 +7786,12 @@ public final class ClusterTestModule {
                         z,
                         yaw,
                         pitch,
-                        playerData
+                        playerData,
+                        questData
                 );
 
         LOGGER.info(
-                "Created transfer {} for player {}: {} -> {}, destination={} {} {} {}, redirect={}, playerData={} bytes",
+                "Created transfer {} for player {}: {} -> {}, destination={} {} {} {}, redirect={}, playerData={} bytes, questData={} bytes, questScope={}, questSubject={}",
                 transfer.transferId(),
                 transfer.playerUuid(),
                 transfer.sourceNode(),
@@ -7424,7 +7801,10 @@ public final class ClusterTestModule {
                 transfer.y(),
                 transfer.z(),
                 transfer.redirectAddress(),
-                transfer.playerDataSize()
+                transfer.playerDataSize(),
+                transfer.questDataSize(),
+                transfer.questScope(),
+                transfer.questSubjectUuid()
         );
 
         server.execute(
@@ -7483,6 +7863,15 @@ public final class ClusterTestModule {
                                 + transfer.playerDataSize()
                                 + " байт"
                                 : "\n§7Данные игрока: §8snapshot отсутствует")
+                                + (transfer.questDataSize() > 0
+                                ? "\n§7FTB Quests: §a"
+                                + transfer.questDataSize()
+                                + " байт §7("
+                                + (ClusterQuestDataCodec.SCOPE_PLAYER.equals(
+                                        transfer.questScope()
+                                ) ? "игрок" : "команда")
+                                + ")"
+                                : "\n§7FTB Quests: §8snapshot отсутствует")
                                 + "\n§eАвтоматически перенаправляю на §f"
                                 + transfer.redirectAddress()
                 )
@@ -8068,8 +8457,29 @@ public final class ClusterTestModule {
         }
 
         try {
+            List<ClusterQuestDataCodec.Snapshot> questSnapshots =
+                    transfer.questSnapshots();
+            if (questSnapshots != null && !questSnapshots.isEmpty()) {
+                if (!currentConfig.syncFtbQuests()) {
+                    throw new IllegalStateException(
+                            "На целевом узле sync_ftb_quests=false, snapshot не применён"
+                    );
+                }
+                ClusterQuestDataCodec.validateForPlayer(
+                        player,
+                        questSnapshots,
+                        currentConfig.maxFtbQuestDataBytes()
+                );
+            }
+
             ClusterPlayerDataCodec.ApplyResult playerDataResult =
                     applyPlayerDataSnapshot(
+                            player,
+                            currentConfig,
+                            transfer
+                    );
+            ClusterQuestDataCodec.ApplyResult questDataResult =
+                    applyQuestDataSnapshots(
                             player,
                             currentConfig,
                             transfer
@@ -8094,14 +8504,17 @@ public final class ClusterTestModule {
             server.getPlayerList().saveAll();
 
             LOGGER.info(
-                    "Applied transfer {} for player {} on node {}, playerDataPresent={}, playerDataApplied={}, playerDataAlreadyApplied={}, playerDataSize={}",
+                    "Applied transfer {} for player {} on node {}, playerDataPresent={}, playerDataApplied={}, playerDataAlreadyApplied={}, playerDataSize={}, questSnapshots={}, questChanged={}, questSubject={}",
                     transfer.transferId(),
                     transfer.playerUuid(),
                     currentConfig.nodeId(),
                     playerDataResult.snapshotPresent(),
                     playerDataResult.applied(),
                     playerDataResult.alreadyApplied(),
-                    playerDataResult.compressedSize()
+                    playerDataResult.compressedSize(),
+                    questDataResult.mergedSnapshots(),
+                    questDataResult.changed(),
+                    questDataResult.subjectUuid()
             );
 
             ClusterTransferGuard.updateReason(
@@ -8111,6 +8524,13 @@ public final class ClusterTestModule {
 
             DATABASE_EXECUTOR.execute(() -> {
                 try {
+                    if (questDataResult.mergedSnapshot() != null) {
+                        ClusterDatabase.synchronizeQuestSnapshot(
+                                currentConfig,
+                                questDataResult.mergedSnapshot()
+                        );
+                    }
+
                     ClusterDatabase.markConsumed(
                             currentConfig,
                             transfer.transferId(),
@@ -8140,6 +8560,9 @@ public final class ClusterTestModule {
                                                 + transfer.dimensionId()
                                                 + formatPlayerDataApplyMessage(
                                                 playerDataResult
+                                        )
+                                                + formatQuestDataApplyMessage(
+                                                questDataResult
                                         )
                                 )
                         );
@@ -8237,6 +8660,66 @@ public final class ClusterTestModule {
                 transfer.playerDataSha256(),
                 currentConfig.maxPlayerDataBytes()
         );
+    }
+
+    private ClusterQuestDataCodec.ApplyResult
+    applyQuestDataSnapshots(
+            ServerPlayer player,
+            ClusterConfig currentConfig,
+            ClusterDatabase.PendingTransfer transfer
+    ) throws Exception {
+        List<ClusterQuestDataCodec.Snapshot> snapshots =
+                transfer.questSnapshots();
+
+        if (snapshots == null || snapshots.isEmpty()) {
+            return new ClusterQuestDataCodec.ApplyResult(
+                    false,
+                    false,
+                    null,
+                    null,
+                    0,
+                    0,
+                    null
+            );
+        }
+
+        if (!currentConfig.syncFtbQuests()) {
+            throw new IllegalStateException(
+                    "На целевом узле sync_ftb_quests=false, snapshot не применён"
+            );
+        }
+
+        return ClusterQuestDataCodec.merge(
+                player,
+                snapshots,
+                currentConfig.maxFtbQuestDataBytes()
+        );
+    }
+
+    private static String formatQuestDataApplyMessage(
+            ClusterQuestDataCodec.ApplyResult result
+    ) {
+        if (result == null || !result.snapshotsPresent()) {
+            return "\n§7FTB Quests: §8snapshot отсутствует";
+        }
+
+        String scope = ClusterQuestDataCodec.SCOPE_PLAYER.equals(result.scope())
+                ? "игрок"
+                : "команда";
+
+        if (!result.changed()) {
+            return "\n§7FTB Quests: §eданные уже актуальны §7("
+                    + scope
+                    + ", snapshots="
+                    + result.mergedSnapshots()
+                    + ")";
+        }
+
+        return "\n§7FTB Quests: §aпрогресс объединён §7("
+                + scope
+                + ", snapshots="
+                + result.mergedSnapshots()
+                + ")";
     }
 
     private static String formatPlayerDataApplyMessage(
@@ -12529,6 +13012,32 @@ public final class ClusterTestModule {
                     addHealthMessage(messages, HealthSeverity.WARNING,
                             "Синхронизация Forge capabilities выключена");
                 }
+                if (latestConfig.syncFtbQuests()) {
+                    addHealthMessage(messages, HealthSeverity.OK,
+                            "Синхронизация FTB Quests включена, interval="
+                                    + latestConfig.ftbQuestSyncIntervalSeconds()
+                                    + "s, max snapshot="
+                                    + latestConfig.maxFtbQuestDataBytes()
+                                    + " bytes, поддерживаются PLAYER и TEAM данные");
+                } else {
+                    addHealthMessage(messages, HealthSeverity.WARNING,
+                            "Синхронизация FTB Quests выключена");
+                }
+                if (latestConfig.syncFtbQuestBook()) {
+                    addHealthMessage(messages, HealthSeverity.OK,
+                            "Синхронизация книги FTB Quests включена, authority="
+                                    + latestConfig.ftbQuestBookAuthorityNode()
+                                    + ", auto publish="
+                                    + latestConfig.ftbQuestBookAutoPublish()
+                                    + ", interval="
+                                    + latestConfig.ftbQuestBookSyncIntervalSeconds()
+                                    + "s, max archive="
+                                    + latestConfig.maxFtbQuestBookBytes()
+                                    + " bytes");
+                } else {
+                    addHealthMessage(messages, HealthSeverity.WARNING,
+                            "Синхронизация книги FTB Quests выключена");
+                }
                 if (latestConfig.networkChatEnabled()) {
                     addHealthMessage(messages, HealthSeverity.OK,
                             "Межсерверный чат включён, role="
@@ -13320,6 +13829,97 @@ public final class ClusterTestModule {
         return 1;
     }
 
+    private int showFtbQuestSyncStatus(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null) {
+            source.sendFailure(Component.literal(
+                    "Конфиг кластера ещё не загружен."
+            ));
+            return 0;
+        }
+
+        MinecraftServer server = source.getServer();
+        Set<UUID> subjects = new java.util.HashSet<>();
+        int playerSubjects = 0;
+        int teamSubjects = 0;
+
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            try {
+                TeamData teamData = TeamData.get(player);
+                if (teamData == null || !subjects.add(teamData.getTeamId())) {
+                    continue;
+                }
+
+                if (teamData.getTeamId().equals(player.getUUID())) {
+                    playerSubjects++;
+                } else {
+                    teamSubjects++;
+                }
+            } catch (Exception exception) {
+                LOGGER.debug(
+                        "Unable to inspect FTB Quests subject for {}",
+                        player.getUUID(),
+                        exception
+                );
+            }
+        }
+
+        int finalPlayerSubjects = playerSubjects;
+        int finalTeamSubjects = teamSubjects;
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§6=== FTB Quests Cluster Sync ==="
+                                + "\n§7Enabled: §f"
+                                + currentConfig.syncFtbQuests()
+                                + "§7 | interval: §f"
+                                + currentConfig.ftbQuestSyncIntervalSeconds()
+                                + "s§7 | max snapshot: §f"
+                                + currentConfig.maxFtbQuestDataBytes()
+                                + " bytes"
+                                + "\n§7Online subjects: §f"
+                                + subjects.size()
+                                + "§7 | PLAYER: §f"
+                                + finalPlayerSubjects
+                                + "§7 | TEAM: §f"
+                                + finalTeamSubjects
+                                + "§7 | in flight: §f"
+                                + FTB_QUEST_SYNC_IN_FLIGHT.size()
+                ),
+                false
+        );
+        return 1;
+    }
+
+    private int forceFtbQuestSync(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null) {
+            source.sendFailure(Component.literal(
+                    "Конфиг кластера ещё не загружен."
+            ));
+            return 0;
+        }
+        if (!currentConfig.syncFtbQuests()) {
+            source.sendFailure(Component.literal(
+                    "Синхронизация FTB Quests выключена в конфиге."
+            ));
+            return 0;
+        }
+
+        nextFtbQuestSyncAtMillis = 0L;
+        startFtbQuestSyncIfDue(source.getServer(), currentConfig);
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§aПринудительная синхронизация FTB Quests запущена."
+                ),
+                false
+        );
+        return 1;
+    }
+
     private void sendStatus(
             CommandSourceStack source
     ) {
@@ -13367,6 +13967,22 @@ public final class ClusterTestModule {
                                 + currentConfig.syncForgeCapabilities()
                                 + "§7, max player-data: §f"
                                 + currentConfig.maxPlayerDataBytes()
+                                + " bytes§7, FTB Quests sync: §f"
+                                + currentConfig.syncFtbQuests()
+                                + "§7, max FTB Quests data: §f"
+                                + currentConfig.maxFtbQuestDataBytes()
+                                + " bytes§7, FTB Quests interval: §f"
+                                + currentConfig.ftbQuestSyncIntervalSeconds()
+                                + "s§7, FTB Quest Book sync: §f"
+                                + currentConfig.syncFtbQuestBook()
+                                + "§7, quest book authority: §f"
+                                + currentConfig.ftbQuestBookAuthorityNode()
+                                + "§7, quest book auto publish: §f"
+                                + currentConfig.ftbQuestBookAutoPublish()
+                                + "§7, quest book interval: §f"
+                                + currentConfig.ftbQuestBookSyncIntervalSeconds()
+                                + "s§7, max quest book: §f"
+                                + currentConfig.maxFtbQuestBookBytes()
                                 + " bytes§7, session lease: §f"
                                 + currentConfig.playerSessionLeaseSeconds()
                                 + "s§7, transfer lock timeout: §f"
