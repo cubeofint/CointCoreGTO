@@ -63,6 +63,8 @@ public final class ClusterConfig {
     private final int automaticDimensionRoleAssignmentIntervalSeconds;
     private final boolean automaticNewDimensionProvisioning;
     private final int automaticNewDimensionProvisioningTimeoutSeconds;
+    private final boolean personalSpaceProvisioningTestPauseAfterArchive;
+    private final int personalSpaceProvisioningTestPauseSeconds;
     private final boolean networkChatEnabled;
     private final String networkRole;
     private final String networkChatPrefix;
@@ -118,6 +120,8 @@ public final class ClusterConfig {
             int automaticDimensionRoleAssignmentIntervalSeconds,
             boolean automaticNewDimensionProvisioning,
             int automaticNewDimensionProvisioningTimeoutSeconds,
+            boolean personalSpaceProvisioningTestPauseAfterArchive,
+            int personalSpaceProvisioningTestPauseSeconds,
             boolean networkChatEnabled,
             String networkRole,
             String networkChatPrefix,
@@ -172,6 +176,8 @@ public final class ClusterConfig {
         this.automaticDimensionRoleAssignmentIntervalSeconds = automaticDimensionRoleAssignmentIntervalSeconds;
         this.automaticNewDimensionProvisioning = automaticNewDimensionProvisioning;
         this.automaticNewDimensionProvisioningTimeoutSeconds = automaticNewDimensionProvisioningTimeoutSeconds;
+        this.personalSpaceProvisioningTestPauseAfterArchive = personalSpaceProvisioningTestPauseAfterArchive;
+        this.personalSpaceProvisioningTestPauseSeconds = personalSpaceProvisioningTestPauseSeconds;
         this.networkChatEnabled = networkChatEnabled;
         this.networkRole = networkRole;
         this.networkChatPrefix = networkChatPrefix;
@@ -316,6 +322,8 @@ public final class ClusterConfig {
                 rangedInt(properties, "automatic_dimension_role_assignment_interval_seconds", 30, 5, 3600),
                 Boolean.parseBoolean(properties.getProperty("automatic_new_dimension_provisioning", "false").trim()),
                 rangedInt(properties, "automatic_new_dimension_provisioning_timeout_seconds", 300, 30, 1800),
+                Boolean.parseBoolean(properties.getProperty("personalspace_provisioning_test_pause_after_archive", "false").trim()),
+                rangedInt(properties, "personalspace_provisioning_test_pause_seconds", 60, 5, 600),
                 Boolean.parseBoolean(properties.getProperty("network_chat_enabled", "false").trim()),
                 networkRole(properties),
                 networkChatPrefix(properties.getProperty("network_chat_prefix", "&8[#1] ")),
@@ -667,6 +675,8 @@ public final class ClusterConfig {
         defaults.setProperty("automatic_dimension_role_assignment_interval_seconds", "30");
         defaults.setProperty("automatic_new_dimension_provisioning", "false");
         defaults.setProperty("automatic_new_dimension_provisioning_timeout_seconds", "300");
+        defaults.setProperty("personalspace_provisioning_test_pause_after_archive", "false");
+        defaults.setProperty("personalspace_provisioning_test_pause_seconds", "60");
         defaults.setProperty("network_chat_enabled", "false");
         defaults.setProperty("network_role", "gto1");
         defaults.setProperty("network_chat_prefix", "&8[#1]");
@@ -863,6 +873,14 @@ public final class ClusterConfig {
 
     public int automaticNewDimensionProvisioningTimeoutSeconds() {
         return automaticNewDimensionProvisioningTimeoutSeconds;
+    }
+
+    public boolean personalSpaceProvisioningTestPauseAfterArchive() {
+        return personalSpaceProvisioningTestPauseAfterArchive;
+    }
+
+    public int personalSpaceProvisioningTestPauseSeconds() {
+        return personalSpaceProvisioningTestPauseSeconds;
     }
 
     public boolean roleRoutingEnabled() {

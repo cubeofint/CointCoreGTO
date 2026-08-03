@@ -113,6 +113,24 @@ public final class ClusterTestModule {
             DIMENSION_ROUTE_SUPPRESSIONS = new ConcurrentHashMap<>();
     private static final ConcurrentMap<String, PendingNewDimensionProvision>
             NEW_DIMENSION_PROVISIONS = new ConcurrentHashMap<>();
+    private static final Set<String>
+            NEW_DIMENSION_PROVISION_ARCHIVES_IN_FLIGHT =
+            ConcurrentHashMap.newKeySet();
+    private static final Set<String>
+            NEW_DIMENSION_PROVISION_TRANSFERS_IN_FLIGHT =
+            ConcurrentHashMap.newKeySet();
+    private static final ConcurrentMap<String, Long>
+            NEW_DIMENSION_PROVISION_NEXT_TRANSFER_AT_MILLIS =
+            new ConcurrentHashMap<>();
+    private static final Set<String>
+            NEW_DIMENSION_PROVISION_FAILURES_HANDLED =
+            ConcurrentHashMap.newKeySet();
+    private static final ConcurrentMap<String, Long>
+            NEW_DIMENSION_PROVISION_TEST_PAUSE_UNTIL_MILLIS =
+            new ConcurrentHashMap<>();
+    private static final Set<String>
+            NEW_DIMENSION_PROVISION_TEST_PAUSE_LOGGED =
+            ConcurrentHashMap.newKeySet();
 
     private static final long DIMENSION_ROUTE_SUPPRESSION_NANOS =
             10_000_000_000L;
@@ -148,6 +166,8 @@ public final class ClusterTestModule {
             });
 
     private volatile ClusterConfig config;
+    private volatile Boolean personalSpaceProvisioningTestPauseOverride;
+    private volatile Integer personalSpaceProvisioningTestPauseSecondsOverride;
     private volatile ClusterDatabase.TestResult lastResult;
     private volatile String lastError;
     private volatile MinecraftServer activeServer;
@@ -417,7 +437,15 @@ public final class ClusterTestModule {
                 ClusterDatabase.DimensionMigration provision =
                         ClusterDatabase.requestNewDimensionProvisioning(
                                 latestConfig,
-                                dimensionId
+                                dimensionId,
+                                playerUuid,
+                                playerName,
+                                x,
+                                y,
+                                z,
+                                yaw,
+                                pitch,
+                                playerData
                         );
                 updateCachedDimensionOwner(
                         dimensionId,
@@ -447,8 +475,7 @@ public final class ClusterTestModule {
                 server.execute(() -> startNewDimensionProvisionArchive(
                         server,
                         latestConfig,
-                        provision,
-                        pending
+                        provision
                 ));
             } catch (Exception exception) {
                 LOGGER.error(
@@ -1098,6 +1125,14 @@ public final class ClusterTestModule {
         DIMENSION_SNAPSHOT_FROZEN = Set.of();
         DIMENSION_ROUTE_SUPPRESSIONS.clear();
         NEW_DIMENSION_PROVISIONS.clear();
+        NEW_DIMENSION_PROVISION_ARCHIVES_IN_FLIGHT.clear();
+        NEW_DIMENSION_PROVISION_TRANSFERS_IN_FLIGHT.clear();
+        NEW_DIMENSION_PROVISION_NEXT_TRANSFER_AT_MILLIS.clear();
+        NEW_DIMENSION_PROVISION_FAILURES_HANDLED.clear();
+        NEW_DIMENSION_PROVISION_TEST_PAUSE_UNTIL_MILLIS.clear();
+        NEW_DIMENSION_PROVISION_TEST_PAUSE_LOGGED.clear();
+        personalSpaceProvisioningTestPauseOverride = null;
+        personalSpaceProvisioningTestPauseSecondsOverride = null;
         DIMENSION_TICK_SUPPRESSION_LOGGED.clear();
         DIMENSION_TICK_GUARD_ACTIVE.set(false);
         SNAPSHOT_OPERATION_IN_FLIGHT.set(false);
@@ -2000,6 +2035,132 @@ public final class ClusterTestModule {
                         )
 
                         .then(
+                                Commands.literal("provisioning")
+                                        .then(
+                                                Commands.literal("list")
+                                                        .executes(context ->
+                                                                showNewDimensionProvisions(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("inspect")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "dimension",
+                                                                                ResourceLocationArgument.id()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                inspectNewDimensionProvision(
+                                                                                        context.getSource(),
+                                                                                        ResourceLocationArgument.getId(
+                                                                                                context,
+                                                                                                "dimension"
+                                                                                        ).toString()
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("retry")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "dimension",
+                                                                                ResourceLocationArgument.id()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                retryNewDimensionProvision(
+                                                                                        context.getSource(),
+                                                                                        ResourceLocationArgument.getId(
+                                                                                                context,
+                                                                                                "dimension"
+                                                                                        ).toString()
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("cancel")
+                                                        .then(
+                                                                Commands.argument(
+                                                                                "dimension",
+                                                                                ResourceLocationArgument.id()
+                                                                        )
+                                                                        .executes(context ->
+                                                                                cancelNewDimensionProvision(
+                                                                                        context.getSource(),
+                                                                                        ResourceLocationArgument.getId(
+                                                                                                context,
+                                                                                                "dimension"
+                                                                                        ).toString()
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("pause")
+                                                        .executes(context ->
+                                                                showPersonalSpaceProvisioningTestPause(
+                                                                        context.getSource()
+                                                                )
+                                                        )
+                                                        .then(
+                                                                Commands.literal("status")
+                                                                        .executes(context ->
+                                                                                showPersonalSpaceProvisioningTestPause(
+                                                                                        context.getSource()
+                                                                                )
+                                                                        )
+                                                        )
+                                                        .then(
+                                                                Commands.literal("on")
+                                                                        .executes(context ->
+                                                                                setPersonalSpaceProvisioningTestPause(
+                                                                                        context.getSource(),
+                                                                                        true,
+                                                                                        null
+                                                                                )
+                                                                        )
+                                                                        .then(
+                                                                                Commands.argument(
+                                                                                                "seconds",
+                                                                                                IntegerArgumentType.integer(5, 600)
+                                                                                        )
+                                                                                        .executes(context ->
+                                                                                                setPersonalSpaceProvisioningTestPause(
+                                                                                                        context.getSource(),
+                                                                                                        true,
+                                                                                                        IntegerArgumentType.getInteger(
+                                                                                                                context,
+                                                                                                                "seconds"
+                                                                                                        )
+                                                                                                )
+                                                                                        )
+                                                                        )
+                                                        )
+                                                        .then(
+                                                                Commands.literal("off")
+                                                                        .executes(context ->
+                                                                                setPersonalSpaceProvisioningTestPause(
+                                                                                        context.getSource(),
+                                                                                        false,
+                                                                                        null
+                                                                                )
+                                                                        )
+                                                        )
+                                                        .then(
+                                                                Commands.literal("reset")
+                                                                        .executes(context ->
+                                                                                resetPersonalSpaceProvisioningTestPause(
+                                                                                        context.getSource()
+                                                                                )
+                                                                        )
+                                                        )
+                                        )
+                        )
+
+                        .then(
                                 Commands.literal("migration")
                                         .then(
                                                 Commands.literal("prepare")
@@ -2314,6 +2475,23 @@ public final class ClusterTestModule {
                                 playerUuid
                         );
 
+                ClusterDatabase.NewDimensionProvision activeProvision =
+                        recoveryBackup == null
+                                ? ClusterDatabase.findActiveNewDimensionProvisionForPlayer(
+                                        latestConfig,
+                                        playerUuid
+                                )
+                                : null;
+                if (activeProvision != null) {
+                    server.execute(() -> resumeNewDimensionProvisionAfterLogin(
+                            server,
+                            latestConfig,
+                            playerUuid,
+                            activeProvision
+                    ));
+                    return;
+                }
+
                 String dimensionOwner = findOrAssignDimensionOwner(
                         latestConfig,
                         loginDimensionId
@@ -2394,6 +2572,43 @@ public final class ClusterTestModule {
                 );
             }
         });
+    }
+
+    private void resumeNewDimensionProvisionAfterLogin(
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            UUID playerUuid,
+            ClusterDatabase.NewDimensionProvision provision
+    ) {
+        ServerPlayer player = server.getPlayerList().getPlayer(playerUuid);
+        if (player == null) {
+            releaseSessionAfterLoginAbort(currentConfig, playerUuid);
+            return;
+        }
+
+        ClusterTransferGuard.unlock(player);
+        int lockSeconds = Math.max(
+                currentConfig.transferLockTimeoutSeconds(),
+                currentConfig.automaticNewDimensionProvisioningTimeoutSeconds() + 30
+        );
+        if (!ClusterTransferGuard.lock(
+                player,
+                lockSeconds,
+                "Восстановление переноса персоналки"
+        )) {
+            player.connection.disconnect(Component.literal(
+                    "Не удалось восстановить блокировку незавершённого переноса персоналки. "
+                            + "Повторите вход через несколько секунд."
+            ));
+            return;
+        }
+
+        addMigrationFreeze(provision.dimensionId());
+        player.sendSystemMessage(Component.literal(
+                "§eОбнаружена незавершённая подготовка персоналки. "
+                        + "Продолжаю с этапа §f" + provision.status()
+                        + "§e..."
+        ));
     }
 
     private void finishLoginSessionCheck(
@@ -3037,7 +3252,15 @@ public final class ClusterTestModule {
                             ClusterDatabase.DimensionMigration provision =
                                     ClusterDatabase.requestNewDimensionProvisioning(
                                             latestConfig,
-                                            dimensionId
+                                            dimensionId,
+                                            playerUuid,
+                                            playerName,
+                                            x,
+                                            y,
+                                            z,
+                                            yaw,
+                                            pitch,
+                                            playerData
                                     );
                             updateCachedDimensionOwner(
                                     dimensionId,
@@ -3067,8 +3290,7 @@ public final class ClusterTestModule {
                                     startNewDimensionProvisionArchive(
                                             server,
                                             latestConfig,
-                                            provision,
-                                            pending
+                                            provision
                                     )
                             );
                             return;
@@ -5866,6 +6088,450 @@ public final class ClusterTestModule {
         return 1;
     }
 
+    private int showNewDimensionProvisions(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal(
+                    "§cКластер выключен или конфиг ещё не загружен."
+            ));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                List<ClusterDatabase.NewDimensionProvision> provisions =
+                        ClusterDatabase.listNewDimensionProvisions(
+                                currentConfig,
+                                20
+                        );
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal(
+                            "§6Последние PersonalSpace provisioning:"
+                    ), false);
+                    if (provisions.isEmpty()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§7Записей нет."
+                        ), false);
+                        return;
+                    }
+                    for (ClusterDatabase.NewDimensionProvision provision : provisions) {
+                        String color = switch (provision.status()) {
+                            case "READY", "TRANSFERRED" -> "§a";
+                            case "ARCHIVED", "APPLYING" -> "§e";
+                            case "CREATED", "ARCHIVING" -> "§b";
+                            case "FAILED" -> "§c";
+                            case "CANCELLED" -> "§7";
+                            default -> "§f";
+                        };
+                        source.sendSuccess(() -> Component.literal(
+                                color + provision.status()
+                                        + " §f" + provision.dimensionId()
+                                        + " §7| §f" + provision.sourceNode()
+                                        + " §7-> §f" + provision.targetNode()
+                                        + " §7| player=§f" + provision.playerName()
+                                        + " §7| retries=§f" + provision.retryCount()
+                                        + " §7| id=§f" + provision.provisionId()
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось получить provisioning list: "
+                                + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int inspectNewDimensionProvision(
+            CommandSourceStack source,
+            String dimensionId
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal(
+                    "§cКластер выключен или конфиг ещё не загружен."
+            ));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.NewDimensionProvision provision =
+                        ClusterDatabase.findLatestNewDimensionProvision(
+                                currentConfig,
+                                dimensionId
+                        );
+                if (provision == null) {
+                    server.execute(() -> source.sendFailure(Component.literal(
+                            "§cProvisioning для dimension не найден: " + dimensionId
+                    )));
+                    return;
+                }
+                ClusterDatabase.DimensionMigration migration =
+                        ClusterDatabase.findDimensionMigration(
+                                currentConfig,
+                                provision.provisionId()
+                        );
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal(
+                            "§6=== PersonalSpace Provisioning ==="
+                    ), false);
+                    source.sendSuccess(() -> Component.literal(
+                            "§7ID: §f" + provision.provisionId()
+                    ), false);
+                    source.sendSuccess(() -> Component.literal(
+                            "§7Dimension: §f" + provision.dimensionId()
+                    ), false);
+                    source.sendSuccess(() -> Component.literal(
+                            "§7Status: §f" + provision.status()
+                                    + " §7| migration: §f"
+                                    + (migration == null ? "missing" : migration.status())
+                    ), false);
+                    source.sendSuccess(() -> Component.literal(
+                            "§7Route: §f" + provision.sourceNode()
+                                    + " §7-> §f" + provision.targetNode()
+                    ), false);
+                    source.sendSuccess(() -> Component.literal(
+                            "§7Player: §f" + provision.playerName()
+                                    + " §7(" + provision.playerUuid() + ")"
+                    ), false);
+                    source.sendSuccess(() -> Component.literal(
+                            "§7Retries: §f" + provision.retryCount()
+                                    + " §7| transfer: §f"
+                                    + (provision.transferId() == null
+                                    ? "-"
+                                    : provision.transferId())
+                    ), false);
+                    source.sendSuccess(() -> Component.literal(
+                            "§7Created: §f" + provision.createdAt()
+                                    + " §7| updated: §f" + provision.updatedAt()
+                    ), false);
+                    if (migration != null && migration.archiveName() != null) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§7Archive: §f" + migration.archiveName()
+                                        + " §7| bytes=§f" + migration.archiveSize()
+                        ), false);
+                    }
+                    if (provision.errorText() != null
+                            && !provision.errorText().isBlank()) {
+                        source.sendSuccess(() -> Component.literal(
+                                "§cError: §f" + provision.errorText()
+                        ), false);
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cНе удалось прочитать provisioning: "
+                                + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int retryNewDimensionProvision(
+            CommandSourceStack source,
+            String dimensionId
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal(
+                    "§cКластер выключен или конфиг ещё не загружен."
+            ));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.NewDimensionProvision current =
+                        ClusterDatabase.findLatestNewDimensionProvision(
+                                currentConfig,
+                                dimensionId
+                        );
+                if (current == null) {
+                    throw new IllegalStateException(
+                            "Provisioning не найден: " + dimensionId
+                    );
+                }
+                ClusterDatabase.NewDimensionProvision retried =
+                        ClusterDatabase.retryNewDimensionProvision(
+                                currentConfig,
+                                current.provisionId()
+                        );
+                NEW_DIMENSION_PROVISION_NEXT_TRANSFER_AT_MILLIS.remove(
+                        retried.provisionId()
+                );
+                NEW_DIMENSION_PROVISION_FAILURES_HANDLED.remove(
+                        retried.provisionId()
+                );
+                ClusterDatabase.DimensionMigration restartMigration =
+                        retried.status().equals("CREATED")
+                                ? ClusterDatabase.findDimensionMigration(
+                                        currentConfig,
+                                        retried.provisionId()
+                                )
+                                : null;
+                server.execute(() -> {
+                    source.sendSuccess(() -> Component.literal(
+                            "§aProvisioning отправлен на повтор: §f"
+                                    + retried.dimensionId()
+                                    + " §7| status=§f" + retried.status()
+                    ), false);
+                    if (restartMigration != null) {
+                        startNewDimensionProvisionArchive(
+                                server,
+                                currentConfig,
+                                restartMigration
+                        );
+                    }
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cProvisioning retry не выполнен: "
+                                + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int cancelNewDimensionProvision(
+            CommandSourceStack source,
+            String dimensionId
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null || !currentConfig.enabled()) {
+            source.sendFailure(Component.literal(
+                    "§cКластер выключен или конфиг ещё не загружен."
+            ));
+            return 0;
+        }
+        MinecraftServer server = source.getServer();
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.NewDimensionProvision current =
+                        ClusterDatabase.findLatestNewDimensionProvision(
+                                currentConfig,
+                                dimensionId
+                        );
+                if (current == null) {
+                    throw new IllegalStateException(
+                            "Provisioning не найден: " + dimensionId
+                    );
+                }
+                ClusterDatabase.DimensionMigration migration =
+                        ClusterDatabase.findDimensionMigration(
+                                currentConfig,
+                                current.provisionId()
+                        );
+                ClusterDatabase.NewDimensionProvision cancelled =
+                        ClusterDatabase.cancelNewDimensionProvision(
+                                currentConfig,
+                                current.provisionId()
+                        );
+                if (migration != null
+                        && migration.archiveName() != null
+                        && currentConfig.dimensionMigrationStagingPath() != null) {
+                    try {
+                        ClusterDimensionMigration.deleteArchive(
+                                currentConfig.dimensionMigrationStagingPath(),
+                                migration.archiveName()
+                        );
+                    } catch (Exception exception) {
+                        LOGGER.warn(
+                                "Unable to delete cancelled provisioning archive {}",
+                                migration.archiveName(),
+                                exception
+                        );
+                    }
+                }
+                PendingNewDimensionProvision pending =
+                        NEW_DIMENSION_PROVISIONS.remove(cancelled.provisionId());
+                NEW_DIMENSION_PROVISION_NEXT_TRANSFER_AT_MILLIS.remove(
+                        cancelled.provisionId()
+                );
+                server.execute(() -> {
+                    removeMigrationFreeze(cancelled.dimensionId());
+                    if (pending != null) {
+                        ServerPlayer player = server.getPlayerList().getPlayer(
+                                pending.playerUuid()
+                        );
+                        if (player != null) {
+                            ClusterTransferGuard.unlock(player);
+                            player.sendSystemMessage(Component.literal(
+                                    "§eПеренос персоналки отменён оператором. "
+                                            + "Она оставлена на текущей ноде."
+                            ));
+                        } else {
+                            ClusterTransferGuard.unlock(pending.playerUuid());
+                        }
+                        if (pending.localContinuation() != null) {
+                            pending.localContinuation().run();
+                        }
+                    }
+                    source.sendSuccess(() -> Component.literal(
+                            "§aProvisioning отменён: §f"
+                                    + cancelled.dimensionId()
+                    ), false);
+                });
+            } catch (Exception exception) {
+                server.execute(() -> source.sendFailure(Component.literal(
+                        "§cProvisioning cancel не выполнен: "
+                                + exception.getMessage()
+                )));
+            }
+        });
+        return 1;
+    }
+
+    private int showPersonalSpaceProvisioningTestPause(
+            CommandSourceStack source
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null) {
+            source.sendFailure(Component.literal(
+                    "§cКонфигурация кластера ещё не загружена."
+            ));
+            return 0;
+        }
+
+        boolean enabled = isPersonalSpaceProvisioningTestPauseEnabled(
+                currentConfig
+        );
+        int seconds = personalSpaceProvisioningTestPauseSeconds(
+                currentConfig
+        );
+        String sourceName = personalSpaceProvisioningTestPauseOverride == null
+                ? "config"
+                : "runtime override";
+
+        source.sendSuccess(() -> Component.literal(
+                "§ePersonalSpace provisioning test pause: "
+                        + (enabled ? "§aON" : "§cOFF")
+                        + "§e, duration: §f"
+                        + seconds
+                        + "s§e, source: §f"
+                        + sourceName
+                        + "§e, node: §f"
+                        + currentConfig.nodeId()
+        ), false);
+        return 1;
+    }
+
+    private int setPersonalSpaceProvisioningTestPause(
+            CommandSourceStack source,
+            boolean enabled,
+            Integer seconds
+    ) {
+        ClusterConfig currentConfig = config;
+        if (currentConfig == null) {
+            source.sendFailure(Component.literal(
+                    "§cКонфигурация кластера ещё не загружена."
+            ));
+            return 0;
+        }
+
+        personalSpaceProvisioningTestPauseOverride = enabled;
+        if (seconds != null) {
+            personalSpaceProvisioningTestPauseSecondsOverride = seconds;
+        }
+        NEW_DIMENSION_PROVISION_TEST_PAUSE_UNTIL_MILLIS.clear();
+        NEW_DIMENSION_PROVISION_TEST_PAUSE_LOGGED.clear();
+
+        int effectiveSeconds = personalSpaceProvisioningTestPauseSeconds(
+                currentConfig
+        );
+        source.sendSuccess(() -> Component.literal(
+                enabled
+                        ? "§eТестовая пауза после ARCHIVED включена на этой ноде на §f"
+                        + effectiveSeconds
+                        + "§e секунд."
+                        : "§aТестовая пауза после ARCHIVED выключена на этой ноде."
+        ), true);
+        return 1;
+    }
+
+    private int resetPersonalSpaceProvisioningTestPause(
+            CommandSourceStack source
+    ) {
+        personalSpaceProvisioningTestPauseOverride = null;
+        personalSpaceProvisioningTestPauseSecondsOverride = null;
+        NEW_DIMENSION_PROVISION_TEST_PAUSE_UNTIL_MILLIS.clear();
+        NEW_DIMENSION_PROVISION_TEST_PAUSE_LOGGED.clear();
+        return showPersonalSpaceProvisioningTestPause(source);
+    }
+
+    private boolean isPersonalSpaceProvisioningTestPauseEnabled(
+            ClusterConfig currentConfig
+    ) {
+        Boolean override = personalSpaceProvisioningTestPauseOverride;
+        return override != null
+                ? override
+                : currentConfig.personalSpaceProvisioningTestPauseAfterArchive();
+    }
+
+    private int personalSpaceProvisioningTestPauseSeconds(
+            ClusterConfig currentConfig
+    ) {
+        Integer override = personalSpaceProvisioningTestPauseSecondsOverride;
+        int requested = override != null
+                ? override
+                : currentConfig.personalSpaceProvisioningTestPauseSeconds();
+        int maximum = Math.max(
+                5,
+                currentConfig.automaticNewDimensionProvisioningTimeoutSeconds()
+                        - 5
+        );
+        return Math.max(5, Math.min(requested, maximum));
+    }
+
+    private boolean shouldPausePersonalSpaceProvisioningAfterArchive(
+            ClusterConfig currentConfig,
+            ClusterDatabase.NewDimensionProvision provision
+    ) {
+        String provisionId = provision.provisionId();
+        if (!provision.status().equals("ARCHIVED")
+                || !isPersonalSpaceProvisioningTestPauseEnabled(currentConfig)) {
+            NEW_DIMENSION_PROVISION_TEST_PAUSE_UNTIL_MILLIS.remove(provisionId);
+            NEW_DIMENSION_PROVISION_TEST_PAUSE_LOGGED.remove(provisionId);
+            return false;
+        }
+
+        long now = System.currentTimeMillis();
+        int seconds = personalSpaceProvisioningTestPauseSeconds(currentConfig);
+        long pauseUntil = NEW_DIMENSION_PROVISION_TEST_PAUSE_UNTIL_MILLIS
+                .computeIfAbsent(
+                        provisionId,
+                        ignored -> now + seconds * 1_000L
+                );
+        if (now >= pauseUntil) {
+            NEW_DIMENSION_PROVISION_TEST_PAUSE_UNTIL_MILLIS.remove(provisionId);
+            NEW_DIMENSION_PROVISION_TEST_PAUSE_LOGGED.remove(provisionId);
+            LOGGER.info(
+                    "PersonalSpace provisioning test pause expired: provision={}, dimension={}, node={}",
+                    provisionId,
+                    provision.dimensionId(),
+                    currentConfig.nodeId()
+            );
+            return false;
+        }
+
+        if (NEW_DIMENSION_PROVISION_TEST_PAUSE_LOGGED.add(provisionId)) {
+            LOGGER.warn(
+                    "PersonalSpace provisioning TEST PAUSE after ARCHIVED: provision={}, dimension={}, node={}, remaining={}s",
+                    provisionId,
+                    provision.dimensionId(),
+                    currentConfig.nodeId(),
+                    Math.max(1L, (pauseUntil - now + 999L) / 1_000L)
+            );
+        }
+        return true;
+    }
+
     private static boolean shouldProvisionNewLocalDimension(
             ClusterConfig currentConfig,
             String dimensionId
@@ -5883,10 +6549,18 @@ public final class ClusterTestModule {
     private void startNewDimensionProvisionArchive(
             MinecraftServer server,
             ClusterConfig currentConfig,
-            ClusterDatabase.DimensionMigration provision,
-            PendingNewDimensionProvision pending
+            ClusterDatabase.DimensionMigration provision
     ) {
+        if (!NEW_DIMENSION_PROVISION_ARCHIVES_IN_FLIGHT.add(
+                provision.migrationId()
+        )) {
+            return;
+        }
+
         if (currentConfig.dimensionMigrationStagingPath() == null) {
+            NEW_DIMENSION_PROVISION_ARCHIVES_IN_FLIGHT.remove(
+                    provision.migrationId()
+            );
             failNewDimensionProvision(
                     server,
                     currentConfig,
@@ -5914,6 +6588,9 @@ public final class ClusterTestModule {
                 );
             }
         } catch (Exception exception) {
+            NEW_DIMENSION_PROVISION_ARCHIVES_IN_FLIGHT.remove(
+                    provision.migrationId()
+            );
             failNewDimensionProvision(
                     server,
                     currentConfig,
@@ -5928,6 +6605,10 @@ public final class ClusterTestModule {
         MIGRATION_EXECUTOR.execute(() -> {
             ClusterDimensionMigration.PreparedArchive archive = null;
             try {
+                ClusterDatabase.markNewDimensionProvisionArchiving(
+                        currentConfig,
+                        provision.migrationId()
+                );
                 archive = ClusterDimensionMigration.createArchive(
                         server,
                         provision.dimensionId(),
@@ -5943,8 +6624,12 @@ public final class ClusterTestModule {
                                 archive.contentSha256(),
                                 archive.archiveSize()
                         );
+                ClusterDatabase.markNewDimensionProvisionArchived(
+                        currentConfig,
+                        provision.migrationId()
+                );
                 LOGGER.info(
-                        "New dimension provisioning READY: migration={}, dimension={}, source={}, target={}, files={}, bytes={}",
+                        "New dimension provisioning ARCHIVED: migration={}, dimension={}, source={}, target={}, files={}, bytes={}",
                         ready.migrationId(),
                         ready.dimensionId(),
                         ready.sourceNode(),
@@ -5970,6 +6655,10 @@ public final class ClusterTestModule {
                                 + ": "
                                 + exception.getMessage()
                 );
+            } finally {
+                NEW_DIMENSION_PROVISION_ARCHIVES_IN_FLIGHT.remove(
+                        provision.migrationId()
+                );
             }
         });
     }
@@ -5989,8 +6678,8 @@ public final class ClusterTestModule {
 
         DATABASE_EXECUTOR.execute(() -> {
             try {
-                ClusterDatabase.DimensionMigration pending =
-                        ClusterDatabase.findPendingNewDimensionProvisionForTarget(
+                ClusterDatabase.NewDimensionProvision pending =
+                        ClusterDatabase.findPendingNewDimensionProvisionRecordForTarget(
                                 currentConfig
                         );
                 if (pending == null) {
@@ -5998,12 +6687,70 @@ public final class ClusterTestModule {
                     return;
                 }
 
+                ClusterDatabase.DimensionMigration migration =
+                        ClusterDatabase.findDimensionMigration(
+                                currentConfig,
+                                pending.provisionId()
+                        );
+                if (migration == null) {
+                    throw new IllegalStateException(
+                            "Migration provisioning не найден: "
+                                    + pending.provisionId()
+                    );
+                }
+
+                if (migration.status().equals("PREPARING")
+                        && (pending.status().equals("CREATED")
+                        || pending.status().equals("ARCHIVING"))) {
+                    NEW_DIMENSION_PROVISION_APPLY_IN_FLIGHT.set(false);
+                    return;
+                }
+
+                if (migration.status().equals("READY")
+                        && (pending.status().equals("CREATED")
+                        || pending.status().equals("ARCHIVING"))) {
+                    pending = ClusterDatabase.reconcileNewDimensionProvisionArchived(
+                            currentConfig,
+                            pending.provisionId()
+                    );
+                }
+
+                if (shouldPausePersonalSpaceProvisioningAfterArchive(
+                        currentConfig,
+                        pending
+                )) {
+                    NEW_DIMENSION_PROVISION_APPLY_IN_FLIGHT.set(false);
+                    return;
+                }
+
+                if (migration.status().equals("PROVISIONED")
+                        || migration.status().equals("APPLIED")
+                        || migration.status().equals("VERIFIED")
+                        || migration.status().equals("FINALIZE_READY")
+                        || migration.status().equals("FINALIZED")) {
+                    ClusterDatabase.reconcileNewDimensionProvisionReady(
+                            currentConfig,
+                            pending.provisionId()
+                    );
+                    updateCachedDimensionOwner(
+                            pending.dimensionId(),
+                            pending.targetNode()
+                    );
+                    NEW_DIMENSION_PROVISION_APPLY_IN_FLIGHT.set(false);
+                    return;
+                }
+
+                ClusterDatabase.NewDimensionProvision applyProvision = pending;
                 MIGRATION_EXECUTOR.execute(() -> {
                     try {
+                        ClusterDatabase.markNewDimensionProvisionApplying(
+                                currentConfig,
+                                applyProvision.provisionId()
+                        );
                         ClusterDatabase.DimensionMigration applying =
                                 ClusterDatabase.markDimensionMigrationApplying(
                                         currentConfig,
-                                        pending.migrationId()
+                                        applyProvision.provisionId()
                                 );
                         ClusterDimensionMigration.applyArchive(
                                 server,
@@ -6015,6 +6762,10 @@ public final class ClusterTestModule {
                                         currentConfig,
                                         applying.migrationId()
                                 );
+                        ClusterDatabase.markNewDimensionProvisionReady(
+                                currentConfig,
+                                applyProvision.provisionId()
+                        );
                         updateCachedDimensionOwner(
                                 completed.dimensionId(),
                                 completed.targetNode()
@@ -6033,7 +6784,7 @@ public final class ClusterTestModule {
                             );
                         }
                         LOGGER.info(
-                                "New dimension provisioning APPLIED: migration={}, dimension={}, source={}, target={}",
+                                "New dimension provisioning READY: migration={}, dimension={}, source={}, target={}",
                                 completed.migrationId(),
                                 completed.dimensionId(),
                                 completed.sourceNode(),
@@ -6041,9 +6792,9 @@ public final class ClusterTestModule {
                         );
                     } catch (Exception exception) {
                         try {
-                            ClusterDatabase.failDimensionMigration(
+                            ClusterDatabase.failNewDimensionProvision(
                                     currentConfig,
-                                    pending.migrationId(),
+                                    applyProvision.provisionId(),
                                     exception.getClass().getSimpleName()
                                             + ": "
                                             + exception.getMessage()
@@ -6053,7 +6804,7 @@ public final class ClusterTestModule {
                         }
                         LOGGER.error(
                                 "Unable to apply new dimension provisioning {}",
-                                pending.migrationId(),
+                                applyProvision.provisionId(),
                                 exception
                         );
                     } finally {
@@ -6075,8 +6826,7 @@ public final class ClusterTestModule {
             MinecraftServer server,
             ClusterConfig currentConfig
     ) {
-        if (NEW_DIMENSION_PROVISIONS.isEmpty()
-                || !NEW_DIMENSION_PROVISION_STATUS_IN_FLIGHT.compareAndSet(
+        if (!NEW_DIMENSION_PROVISION_STATUS_IN_FLIGHT.compareAndSet(
                 false,
                 true
         )) {
@@ -6085,85 +6835,150 @@ public final class ClusterTestModule {
 
         DATABASE_EXECUTOR.execute(() -> {
             try {
-                for (PendingNewDimensionProvision pending
-                        : List.copyOf(NEW_DIMENSION_PROVISIONS.values())) {
+                List<ClusterDatabase.NewDimensionProvision> provisions =
+                        ClusterDatabase.listActiveNewDimensionProvisionsForSource(
+                                currentConfig
+                        );
+                for (ClusterDatabase.NewDimensionProvision provision : provisions) {
                     ClusterDatabase.DimensionMigration migration =
                             ClusterDatabase.findDimensionMigration(
                                     currentConfig,
-                                    pending.migrationId()
+                                    provision.provisionId()
                             );
                     if (migration == null) {
-                        completeNewDimensionProvisionFailure(
+                        ClusterDatabase.failNewDimensionProvision(
+                                currentConfig,
+                                provision.provisionId(),
+                                "Запись migration provisioning не найдена"
+                        );
+                        completePersistedNewDimensionProvisionFailure(
                                 server,
-                                pending,
-                                "Запись provisioning не найдена"
+                                provision,
+                                "Запись migration provisioning не найдена"
                         );
                         continue;
                     }
 
                     if (migration.status().equals("PROVISIONED")
-                            || migration.status().equals("APPLIED")
-                            || migration.status().equals("VERIFIED")
-                            || migration.status().equals("FINALIZE_READY")
-                            || migration.status().equals("FINALIZED")) {
-                        if (NEW_DIMENSION_PROVISIONS.get(
-                                pending.migrationId()
-                        ) != pending) {
-                            continue;
-                        }
-                        updateCachedDimensionOwner(
-                                pending.dimensionId(),
-                                pending.targetNode()
-                        );
-                        createTransferAndScheduleRedirect(
-                                server,
+                            && !provision.status().equals("READY")
+                            && !provision.status().equals("TRANSFERRED")) {
+                        provision =
+                                ClusterDatabase.reconcileNewDimensionProvisionReady(
+                                        currentConfig,
+                                        provision.provisionId()
+                                );
+                    } else if (migration.status().equals("FAILED")
+                            && !provision.status().equals("FAILED")) {
+                        ClusterDatabase.failNewDimensionProvision(
                                 currentConfig,
-                                pending.playerUuid(),
-                                pending.playerName(),
-                                pending.targetNode(),
-                                pending.dimensionId(),
-                                pending.x(),
-                                pending.y(),
-                                pending.z(),
-                                pending.yaw(),
-                                pending.pitch(),
-                                pending.playerData()
-                        );
-                        removeMigrationFreeze(pending.dimensionId());
-                        NEW_DIMENSION_PROVISIONS.remove(
-                                pending.migrationId(),
-                                pending
-                        );
-                        continue;
-                    }
-
-                    if (migration.status().equals("FAILED")) {
-                        completeNewDimensionProvisionFailure(
-                                server,
-                                pending,
+                                provision.provisionId(),
                                 migration.errorText() == null
-                                        ? "Provisioning завершился ошибкой"
+                                        ? "Migration provisioning завершилась ошибкой"
                                         : migration.errorText()
                         );
+                        provision = ClusterDatabase.findNewDimensionProvision(
+                                currentConfig,
+                                provision.provisionId()
+                        );
+                    }
+
+                    if (provision.status().equals("FAILED")) {
+                        if (NEW_DIMENSION_PROVISION_FAILURES_HANDLED.add(
+                                provision.provisionId()
+                        )) {
+                            completePersistedNewDimensionProvisionFailure(
+                                    server,
+                                    provision,
+                                    provision.errorText() == null
+                                            ? "Provisioning завершился ошибкой"
+                                            : provision.errorText()
+                            );
+                        }
                         continue;
                     }
 
-                    long timeoutMillis = currentConfig
-                            .automaticNewDimensionProvisioningTimeoutSeconds()
-                            * 1_000L;
-                    if (!migration.status().equals("APPLYING")
-                            && System.currentTimeMillis() - pending.startedAtMillis()
-                            > timeoutMillis) {
-                        ClusterDatabase.failDimensionMigration(
+                    if (migration.status().equals("READY")
+                            && (provision.status().equals("CREATED")
+                            || provision.status().equals("ARCHIVING"))) {
+                        ClusterDatabase.markNewDimensionProvisionArchived(
                                 currentConfig,
-                                pending.migrationId(),
-                                "Превышено время ожидания provisioning"
+                                provision.provisionId()
                         );
-                        completeNewDimensionProvisionFailure(
+                        provision = ClusterDatabase.findNewDimensionProvision(
+                                currentConfig,
+                                provision.provisionId()
+                        );
+                    }
+
+                    if (provision.status().equals("CREATED")
+                            || provision.status().equals("ARCHIVING")) {
+                        ClusterDatabase.DimensionMigration archiveMigration = migration;
+                        server.execute(() -> startNewDimensionProvisionArchive(
                                 server,
-                                pending,
-                                "Превышено время ожидания provisioning"
-                        );
+                                currentConfig,
+                                archiveMigration
+                        ));
+                        continue;
+                    }
+
+                    if (provision.status().equals("READY")
+                            || provision.status().equals("TRANSFERRED")) {
+                        long nextTransferAt =
+                                NEW_DIMENSION_PROVISION_NEXT_TRANSFER_AT_MILLIS
+                                        .getOrDefault(provision.provisionId(), 0L);
+                        if (System.currentTimeMillis() < nextTransferAt) {
+                            continue;
+                        }
+                        if (provision.status().equals("TRANSFERRED")) {
+                            String transferStatus = ClusterDatabase.findTransferStatus(
+                                    currentConfig,
+                                    provision.transferId()
+                            );
+                            if (transferStatus != null
+                                    && (transferStatus.equals("READY")
+                                    || transferStatus.equals("CLAIMED")
+                                    || transferStatus.equals("CONSUMED"))) {
+                                continue;
+                            }
+                            long transferredAgeMillis = provision.transferredAt() == null
+                                    ? Long.MAX_VALUE
+                                    : Math.max(
+                                            0L,
+                                            System.currentTimeMillis()
+                                                    - provision.transferredAt().toEpochMilli()
+                                    );
+                            if (transferredAgeMillis < 5_000L) {
+                                continue;
+                            }
+                        }
+                        ClusterDatabase.NewDimensionProvision transferable = provision;
+                        server.execute(() -> startPersistedNewDimensionProvisionTransfer(
+                                server,
+                                currentConfig,
+                                transferable
+                        ));
+                        continue;
+                    }
+
+                    if (provision.status().equals("ARCHIVED")) {
+                        long timeoutMillis = currentConfig
+                                .automaticNewDimensionProvisioningTimeoutSeconds()
+                                * 1_000L;
+                        if (provision.updatedAt() != null
+                                && System.currentTimeMillis()
+                                - provision.updatedAt().toEpochMilli()
+                                > timeoutMillis) {
+                            ClusterDatabase.failNewDimensionProvision(
+                                    currentConfig,
+                                    provision.provisionId(),
+                                    "Превышено время ожидания target node"
+                            );
+                            completePersistedNewDimensionProvisionFailure(
+                                    server,
+                                    provision,
+                                    "Превышено время ожидания target node"
+                            );
+                        }
                     }
                 }
             } catch (Exception exception) {
@@ -6177,6 +6992,199 @@ public final class ClusterTestModule {
         });
     }
 
+    private void startPersistedNewDimensionProvisionTransfer(
+            MinecraftServer server,
+            ClusterConfig currentConfig,
+            ClusterDatabase.NewDimensionProvision provision
+    ) {
+        if (!NEW_DIMENSION_PROVISION_TRANSFERS_IN_FLIGHT.add(
+                provision.provisionId()
+        )) {
+            return;
+        }
+
+        ServerPlayer player = server.getPlayerList().getPlayer(
+                provision.playerUuid()
+        );
+        if (player == null) {
+            NEW_DIMENSION_PROVISION_TRANSFERS_IN_FLIGHT.remove(
+                    provision.provisionId()
+            );
+            return;
+        }
+
+        int lockSeconds = Math.max(
+                currentConfig.transferLockTimeoutSeconds(),
+                60
+        );
+        if (!ClusterTransferGuard.isLocked(player)
+                && !ClusterTransferGuard.lock(
+                player,
+                lockSeconds,
+                "Перенос в подготовленную персоналку"
+        )) {
+            NEW_DIMENSION_PROVISION_TRANSFERS_IN_FLIGHT.remove(
+                    provision.provisionId()
+            );
+            return;
+        }
+        ClusterTransferGuard.updateReason(
+                provision.playerUuid(),
+                "Перенос в подготовленную персоналку"
+        );
+
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                ClusterDatabase.NewDimensionProvision latest =
+                        ClusterDatabase.findNewDimensionProvision(
+                                currentConfig,
+                                provision.provisionId()
+                        );
+                if (latest == null
+                        || (!latest.status().equals("READY")
+                        && !latest.status().equals("TRANSFERRED"))) {
+                    throw new IllegalStateException(
+                            "Provisioning больше не готов к transfer"
+                    );
+                }
+                ClusterDatabase.CreatedTransfer transfer =
+                        createProvisionTransfer(
+                                currentConfig,
+                                latest
+                        );
+                ClusterDatabase.markNewDimensionProvisionTransferred(
+                        currentConfig,
+                        latest.provisionId(),
+                        transfer.transferId()
+                );
+                updateCachedDimensionOwner(
+                        latest.dimensionId(),
+                        latest.targetNode()
+                );
+                removeMigrationFreeze(latest.dimensionId());
+                NEW_DIMENSION_PROVISIONS.remove(latest.provisionId());
+                NEW_DIMENSION_PROVISION_NEXT_TRANSFER_AT_MILLIS.remove(
+                        latest.provisionId()
+                );
+                LOGGER.info(
+                        "New dimension provisioning TRANSFERRED: provision={}, player={}, source={}, target={}, transfer={}",
+                        latest.provisionId(),
+                        latest.playerUuid(),
+                        latest.sourceNode(),
+                        latest.targetNode(),
+                        transfer.transferId()
+                );
+                server.execute(() -> redirectPlayer(
+                        server,
+                        currentConfig,
+                        latest.playerUuid(),
+                        latest.playerName(),
+                        transfer
+                ));
+            } catch (Exception exception) {
+                NEW_DIMENSION_PROVISION_NEXT_TRANSFER_AT_MILLIS.put(
+                        provision.provisionId(),
+                        System.currentTimeMillis() + 5_000L
+                );
+                LOGGER.warn(
+                        "Unable to create transfer for ready provisioning {}",
+                        provision.provisionId(),
+                        exception
+                );
+                server.execute(() -> {
+                    ServerPlayer online = server.getPlayerList().getPlayer(
+                            provision.playerUuid()
+                    );
+                    if (online != null) {
+                        ClusterTransferGuard.unlock(online);
+                        online.displayClientMessage(
+                                Component.literal(
+                                        "§eПерсоналка готова, но целевая нода пока недоступна. Повторяю переход..."
+                                ),
+                                false
+                        );
+                    } else {
+                        ClusterTransferGuard.unlock(provision.playerUuid());
+                    }
+                });
+            } finally {
+                NEW_DIMENSION_PROVISION_TRANSFERS_IN_FLIGHT.remove(
+                        provision.provisionId()
+                );
+            }
+        });
+    }
+
+    private ClusterDatabase.CreatedTransfer createProvisionTransfer(
+            ClusterConfig currentConfig,
+            ClusterDatabase.NewDimensionProvision provision
+    ) throws Exception {
+        String assignedOwner = ClusterDatabase.findDimensionOwner(
+                currentConfig,
+                provision.dimensionId()
+        );
+        if (assignedOwner == null
+                || !assignedOwner.equalsIgnoreCase(provision.targetNode())) {
+            throw new IllegalStateException(
+                    "Dimension " + provision.dimensionId()
+                            + " принадлежит узлу " + assignedOwner
+                            + ", ожидался " + provision.targetNode()
+            );
+        }
+        return ClusterDatabase.createTransfer(
+                currentConfig,
+                provision.playerUuid(),
+                provision.targetNode(),
+                provision.dimensionId(),
+                provision.x(),
+                provision.y(),
+                provision.z(),
+                provision.yaw(),
+                provision.pitch(),
+                provision.playerDataSnapshot()
+        );
+    }
+
+    private void completePersistedNewDimensionProvisionFailure(
+            MinecraftServer server,
+            ClusterDatabase.NewDimensionProvision provision,
+            String error
+    ) {
+        PendingNewDimensionProvision pending =
+                NEW_DIMENSION_PROVISIONS.get(provision.provisionId());
+        if (pending != null) {
+            completeNewDimensionProvisionFailure(
+                    server,
+                    pending,
+                    error
+            );
+            return;
+        }
+
+        server.execute(() -> {
+            removeMigrationFreeze(provision.dimensionId());
+            NEW_DIMENSION_PROVISION_NEXT_TRANSFER_AT_MILLIS.remove(
+                    provision.provisionId()
+            );
+            ServerPlayer player = server.getPlayerList().getPlayer(
+                    provision.playerUuid()
+            );
+            if (player == null) {
+                ClusterTransferGuard.unlock(provision.playerUuid());
+                NEW_DIMENSION_PROVISION_FAILURES_HANDLED.remove(
+                        provision.provisionId()
+                );
+                return;
+            }
+            ClusterTransferGuard.unlock(player);
+            player.sendSystemMessage(Component.literal(
+                    "§cПодготовка персоналки завершилась ошибкой. "
+                            + "Персоналка оставлена на исходной ноде: §f"
+                            + error
+            ));
+        });
+    }
+
     private void failNewDimensionProvision(
             MinecraftServer server,
             ClusterConfig currentConfig,
@@ -6185,7 +7193,7 @@ public final class ClusterTestModule {
     ) {
         DATABASE_EXECUTOR.execute(() -> {
             try {
-                ClusterDatabase.failDimensionMigration(
+                ClusterDatabase.failNewDimensionProvision(
                         currentConfig,
                         provision.migrationId(),
                         error
@@ -6201,6 +7209,9 @@ public final class ClusterTestModule {
             PendingNewDimensionProvision pending =
                     NEW_DIMENSION_PROVISIONS.get(provision.migrationId());
             if (pending != null) {
+                NEW_DIMENSION_PROVISION_FAILURES_HANDLED.add(
+                        provision.migrationId()
+                );
                 completeNewDimensionProvisionFailure(
                         server,
                         pending,
@@ -6228,6 +7239,9 @@ public final class ClusterTestModule {
                     .getPlayer(pending.playerUuid());
             if (player == null) {
                 ClusterTransferGuard.unlock(pending.playerUuid());
+                NEW_DIMENSION_PROVISION_FAILURES_HANDLED.remove(
+                        pending.migrationId()
+                );
                 return;
             }
 

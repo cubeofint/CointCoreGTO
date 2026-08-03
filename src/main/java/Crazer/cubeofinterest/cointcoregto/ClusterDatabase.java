@@ -2452,7 +2452,15 @@ public final class ClusterDatabase {
 
     public static DimensionMigration requestNewDimensionProvisioning(
             ClusterConfig config,
-            String dimensionId
+            String dimensionId,
+            UUID playerUuid,
+            String playerName,
+            double x,
+            double y,
+            double z,
+            float yaw,
+            float pitch,
+            ClusterPlayerDataCodec.Snapshot playerData
     ) throws SQLException {
         if (dimensionId == null || dimensionId.isBlank()) {
             throw new SQLException("Dimension id is empty");
@@ -2561,6 +2569,47 @@ public final class ClusterDatabase {
                     statement.setString(2, dimensionId);
                     statement.setString(3, config.nodeId());
                     statement.setString(4, targetNode);
+                    statement.executeUpdate();
+                }
+
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        INSERT INTO cluster_dimension_provisions (
+                            provision_id,
+                            dimension_id,
+                            source_node,
+                            target_node,
+                            player_uuid,
+                            player_name,
+                            x,
+                            y,
+                            z,
+                            yaw,
+                            pitch,
+                            player_data,
+                            player_data_sha256,
+                            player_data_codec,
+                            player_data_size,
+                            status,
+                            created_at,
+                            updated_at
+                        ) VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, 'CREATED',
+                            CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3)
+                        )
+                        """)) {
+                    statement.setString(1, migrationId);
+                    statement.setString(2, dimensionId);
+                    statement.setString(3, config.nodeId());
+                    statement.setString(4, targetNode);
+                    statement.setString(5, playerUuid.toString());
+                    statement.setString(6, truncate(playerName, 64));
+                    statement.setDouble(7, x);
+                    statement.setDouble(8, y);
+                    statement.setDouble(9, z);
+                    statement.setFloat(10, yaw);
+                    statement.setFloat(11, pitch);
+                    bindPlayerData(statement, 12, playerData);
                     statement.executeUpdate();
                 }
 
@@ -3063,6 +3112,595 @@ public final class ClusterDatabase {
                             ? readDimensionMigration(resultSet)
                             : null;
                 }
+            }
+        }
+    }
+
+    public static NewDimensionProvision findNewDimensionProvision(
+            ClusterConfig config,
+            String provisionId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            return findNewDimensionProvision(connection, provisionId, false);
+        }
+    }
+
+    public static NewDimensionProvision findLatestNewDimensionProvision(
+            ClusterConfig config,
+            String dimensionId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT
+                         provision_id, dimension_id, source_node, target_node,
+                         player_uuid, player_name, x, y, z, yaw, pitch,
+                         player_data, player_data_sha256, player_data_codec,
+                         player_data_size, status, transfer_id, retry_count,
+                         error_text, created_at, updated_at, archiving_at,
+                         archived_at, applying_at, ready_at, transferred_at,
+                         failed_at, cancelled_at
+                     FROM cluster_dimension_provisions
+                     WHERE dimension_id = ?
+                     ORDER BY created_at DESC
+                     LIMIT 1
+                     """)) {
+            statement.setString(1, dimensionId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readNewDimensionProvision(resultSet) : null;
+            }
+        }
+    }
+
+    public static NewDimensionProvision findActiveNewDimensionProvisionForPlayer(
+            ClusterConfig config,
+            UUID playerUuid
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            expireTransfers(connection);
+            recoverStaleClaims(connection, config);
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT
+                        provision_id, dimension_id, source_node, target_node,
+                        player_uuid, player_name, x, y, z, yaw, pitch,
+                        player_data, player_data_sha256, player_data_codec,
+                        player_data_size, status, transfer_id, retry_count,
+                        error_text, created_at, updated_at, archiving_at,
+                        archived_at, applying_at, ready_at, transferred_at,
+                        failed_at, cancelled_at
+                    FROM cluster_dimension_provisions AS provisions
+                    WHERE provisions.source_node = ?
+                      AND provisions.player_uuid = ?
+                      AND provisions.status IN (
+                          'CREATED', 'ARCHIVING', 'ARCHIVED',
+                          'APPLYING', 'READY', 'TRANSFERRED'
+                      )
+                      AND (
+                          provisions.status <> 'TRANSFERRED'
+                          OR provisions.transfer_id IS NULL
+                          OR NOT EXISTS (
+                              SELECT 1
+                              FROM pending_transfers AS transfers
+                              WHERE transfers.transfer_id = provisions.transfer_id
+                                AND transfers.status = 'CONSUMED'
+                          )
+                      )
+                    ORDER BY provisions.created_at DESC
+                    LIMIT 1
+                    """)) {
+                statement.setString(1, config.nodeId());
+                statement.setString(2, playerUuid.toString());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    return resultSet.next() ? readNewDimensionProvision(resultSet) : null;
+                }
+            }
+        }
+    }
+
+    public static NewDimensionProvision findPendingNewDimensionProvisionRecordForTarget(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT
+                         provision_id, dimension_id, source_node, target_node,
+                         player_uuid, player_name, x, y, z, yaw, pitch,
+                         player_data, player_data_sha256, player_data_codec,
+                         player_data_size, status, transfer_id, retry_count,
+                         error_text, created_at, updated_at, archiving_at,
+                         archived_at, applying_at, ready_at, transferred_at,
+                         failed_at, cancelled_at
+                     FROM cluster_dimension_provisions
+                     WHERE target_node = ?
+                       AND status IN ('CREATED', 'ARCHIVING', 'ARCHIVED', 'APPLYING')
+                       AND provision_id IN (
+                           SELECT migration_id
+                           FROM cluster_dimension_migrations
+                           WHERE operation_kind = 'PROVISION'
+                             AND status IN ('READY', 'APPLYING', 'PROVISIONED')
+                       )
+                     ORDER BY created_at
+                     LIMIT 1
+                     """)) {
+            statement.setString(1, config.nodeId());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readNewDimensionProvision(resultSet) : null;
+            }
+        }
+    }
+
+    public static List<NewDimensionProvision> listNewDimensionProvisions(
+            ClusterConfig config,
+            int limit
+    ) throws SQLException {
+        ensureSchema(config);
+        int safeLimit = Math.max(1, Math.min(limit, 100));
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT
+                         provision_id, dimension_id, source_node, target_node,
+                         player_uuid, player_name, x, y, z, yaw, pitch,
+                         player_data, player_data_sha256, player_data_codec,
+                         player_data_size, status, transfer_id, retry_count,
+                         error_text, created_at, updated_at, archiving_at,
+                         archived_at, applying_at, ready_at, transferred_at,
+                         failed_at, cancelled_at
+                     FROM cluster_dimension_provisions
+                     ORDER BY created_at DESC
+                     LIMIT ?
+                     """)) {
+            statement.setInt(1, safeLimit);
+            List<NewDimensionProvision> result = new ArrayList<>();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    result.add(readNewDimensionProvision(resultSet));
+                }
+            }
+            return List.copyOf(result);
+        }
+    }
+
+    public static List<NewDimensionProvision> listActiveNewDimensionProvisionsForSource(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            expireTransfers(connection);
+            recoverStaleClaims(connection, config);
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT
+                        provision_id, dimension_id, source_node, target_node,
+                        player_uuid, player_name, x, y, z, yaw, pitch,
+                        player_data, player_data_sha256, player_data_codec,
+                        player_data_size, status, transfer_id, retry_count,
+                        error_text, created_at, updated_at, archiving_at,
+                        archived_at, applying_at, ready_at, transferred_at,
+                        failed_at, cancelled_at
+                    FROM cluster_dimension_provisions AS provisions
+                    WHERE provisions.source_node = ?
+                      AND provisions.status IN (
+                          'CREATED', 'ARCHIVING', 'ARCHIVED',
+                          'APPLYING', 'READY', 'TRANSFERRED', 'FAILED'
+                      )
+                      AND (
+                          provisions.status <> 'TRANSFERRED'
+                          OR provisions.transfer_id IS NULL
+                          OR NOT EXISTS (
+                              SELECT 1
+                              FROM pending_transfers AS transfers
+                              WHERE transfers.transfer_id = provisions.transfer_id
+                                AND transfers.status = 'CONSUMED'
+                          )
+                      )
+                    ORDER BY provisions.created_at
+                    """)) {
+                statement.setString(1, config.nodeId());
+                List<NewDimensionProvision> result = new ArrayList<>();
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    while (resultSet.next()) {
+                        result.add(readNewDimensionProvision(resultSet));
+                    }
+                }
+                return List.copyOf(result);
+            }
+        }
+    }
+
+    public static String findTransferStatus(
+            ClusterConfig config,
+            String transferId
+    ) throws SQLException {
+        if (transferId == null || transferId.isBlank()) {
+            return null;
+        }
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            expireTransfers(connection);
+            recoverStaleClaims(connection, config);
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT status
+                    FROM pending_transfers
+                    WHERE transfer_id = ?
+                    """)) {
+                statement.setString(1, transferId);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    return resultSet.next() ? resultSet.getString("status") : null;
+                }
+            }
+        }
+    }
+
+    public static NewDimensionProvision markNewDimensionProvisionArchiving(
+            ClusterConfig config,
+            String provisionId
+    ) throws SQLException {
+        updateNewDimensionProvisionStatus(
+                config,
+                provisionId,
+                "source_node",
+                "ARCHIVING",
+                "archiving_at",
+                List.of("CREATED", "ARCHIVING")
+        );
+        return findNewDimensionProvision(config, provisionId);
+    }
+
+    public static NewDimensionProvision markNewDimensionProvisionArchived(
+            ClusterConfig config,
+            String provisionId
+    ) throws SQLException {
+        updateNewDimensionProvisionStatus(
+                config,
+                provisionId,
+                "source_node",
+                "ARCHIVED",
+                "archived_at",
+                List.of("CREATED", "ARCHIVING", "ARCHIVED")
+        );
+        return findNewDimensionProvision(config, provisionId);
+    }
+
+    public static NewDimensionProvision markNewDimensionProvisionApplying(
+            ClusterConfig config,
+            String provisionId
+    ) throws SQLException {
+        updateNewDimensionProvisionStatus(
+                config,
+                provisionId,
+                "target_node",
+                "APPLYING",
+                "applying_at",
+                List.of("ARCHIVED", "APPLYING")
+        );
+        return findNewDimensionProvision(config, provisionId);
+    }
+
+    public static NewDimensionProvision markNewDimensionProvisionReady(
+            ClusterConfig config,
+            String provisionId
+    ) throws SQLException {
+        updateNewDimensionProvisionStatus(
+                config,
+                provisionId,
+                "target_node",
+                "READY",
+                "ready_at",
+                List.of("APPLYING", "READY")
+        );
+        return findNewDimensionProvision(config, provisionId);
+    }
+
+    public static NewDimensionProvision reconcileNewDimensionProvisionArchived(
+            ClusterConfig config,
+            String provisionId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_dimension_provisions
+                     SET status = 'ARCHIVED',
+                         error_text = NULL,
+                         archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP(3)),
+                         updated_at = CURRENT_TIMESTAMP(3)
+                     WHERE provision_id = ?
+                       AND (source_node = ? OR target_node = ?)
+                       AND status IN ('CREATED', 'ARCHIVING', 'ARCHIVED')
+                     """)) {
+            statement.setString(1, provisionId);
+            statement.setString(2, config.nodeId());
+            statement.setString(3, config.nodeId());
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException(
+                        "Не удалось восстановить ARCHIVED provisioning " + provisionId
+                );
+            }
+        }
+        return findNewDimensionProvision(config, provisionId);
+    }
+
+    public static NewDimensionProvision reconcileNewDimensionProvisionReady(
+            ClusterConfig config,
+            String provisionId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_dimension_provisions
+                     SET status = 'READY',
+                         error_text = NULL,
+                         applying_at = COALESCE(applying_at, CURRENT_TIMESTAMP(3)),
+                         ready_at = COALESCE(ready_at, CURRENT_TIMESTAMP(3)),
+                         updated_at = CURRENT_TIMESTAMP(3)
+                     WHERE provision_id = ?
+                       AND (source_node = ? OR target_node = ?)
+                       AND status IN (
+                           'CREATED', 'ARCHIVING', 'ARCHIVED',
+                           'APPLYING', 'READY', 'FAILED'
+                       )
+                     """)) {
+            statement.setString(1, provisionId);
+            statement.setString(2, config.nodeId());
+            statement.setString(3, config.nodeId());
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException(
+                        "Не удалось восстановить READY provisioning " + provisionId
+                );
+            }
+        }
+        return findNewDimensionProvision(config, provisionId);
+    }
+
+    public static NewDimensionProvision markNewDimensionProvisionTransferred(
+            ClusterConfig config,
+            String provisionId,
+            String transferId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     UPDATE cluster_dimension_provisions
+                     SET status = 'TRANSFERRED',
+                         transfer_id = ?,
+                         error_text = NULL,
+                         transferred_at = CURRENT_TIMESTAMP(3),
+                         updated_at = CURRENT_TIMESTAMP(3)
+                     WHERE provision_id = ?
+                       AND source_node = ?
+                       AND status IN ('READY', 'TRANSFERRED')
+                     """)) {
+            statement.setString(1, transferId);
+            statement.setString(2, provisionId);
+            statement.setString(3, config.nodeId());
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("Не удалось отметить provisioning как TRANSFERRED: " + provisionId);
+            }
+        }
+        return findNewDimensionProvision(config, provisionId);
+    }
+
+    public static NewDimensionProvision failNewDimensionProvision(
+            ClusterConfig config,
+            String provisionId,
+            String errorText
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_provisions
+                        SET status = 'FAILED',
+                            error_text = ?,
+                            failed_at = CURRENT_TIMESTAMP(3),
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE provision_id = ?
+                          AND (source_node = ? OR target_node = ?)
+                          AND status NOT IN ('TRANSFERRED', 'CANCELLED')
+                        """)) {
+                    statement.setString(1, truncate(errorText, 4000));
+                    statement.setString(2, provisionId);
+                    statement.setString(3, config.nodeId());
+                    statement.setString(4, config.nodeId());
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations
+                        SET status = 'FAILED', error_text = ?, updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ?
+                          AND operation_kind = 'PROVISION'
+                          AND status IN ('PREPARING', 'READY', 'APPLYING')
+                        """)) {
+                    statement.setString(1, truncate(errorText, 4000));
+                    statement.setString(2, provisionId);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+        return findNewDimensionProvision(config, provisionId);
+    }
+
+    public static NewDimensionProvision retryNewDimensionProvision(
+            ClusterConfig config,
+            String provisionId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                NewDimensionProvision provision = findNewDimensionProvision(connection, provisionId, true);
+                if (provision == null) {
+                    throw new SQLException("Provisioning не найден: " + provisionId);
+                }
+                if (!provision.sourceNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException("Retry должен выполняться на source node " + provision.sourceNode());
+                }
+                if (!provision.status().equals("FAILED")) {
+                    throw new SQLException("Retry доступен только для FAILED, status=" + provision.status());
+                }
+                DimensionMigration migration = findDimensionMigration(connection, provisionId, true);
+                if (migration == null) {
+                    throw new SQLException("Migration provisioning не найден: " + provisionId);
+                }
+                DimensionAssignmentRow assignment = findDimensionAssignmentRow(connection, provision.dimensionId());
+                boolean alreadyReady = assignment != null
+                        && assignment.nodeId().equalsIgnoreCase(provision.targetNode());
+                String provisionStatus = alreadyReady ? "READY" : "CREATED";
+                String migrationStatus = alreadyReady ? "PROVISIONED" : "PREPARING";
+
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations
+                        SET status = ?,
+                            archive_name = CASE WHEN ? = 'PREPARING' THEN NULL ELSE archive_name END,
+                            archive_sha256 = CASE WHEN ? = 'PREPARING' THEN NULL ELSE archive_sha256 END,
+                            content_sha256 = CASE WHEN ? = 'PREPARING' THEN NULL ELSE content_sha256 END,
+                            archive_size = CASE WHEN ? = 'PREPARING' THEN 0 ELSE archive_size END,
+                            error_text = NULL,
+                            ready_at = CASE WHEN ? = 'PREPARING' THEN NULL ELSE ready_at END,
+                            applying_at = CASE WHEN ? = 'PREPARING' THEN NULL ELSE applying_at END,
+                            applied_at = CASE WHEN ? = 'PREPARING' THEN NULL ELSE applied_at END,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ? AND operation_kind = 'PROVISION'
+                        """)) {
+                    statement.setString(1, migrationStatus);
+                    statement.setString(2, migrationStatus);
+                    statement.setString(3, migrationStatus);
+                    statement.setString(4, migrationStatus);
+                    statement.setString(5, migrationStatus);
+                    statement.setString(6, migrationStatus);
+                    statement.setString(7, migrationStatus);
+                    statement.setString(8, migrationStatus);
+                    statement.setString(9, provisionId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("Не удалось сбросить migration provisioning " + provisionId);
+                    }
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_provisions
+                        SET status = ?, error_text = NULL,
+                            transfer_id = NULL,
+                            retry_count = retry_count + 1,
+                            archiving_at = CASE WHEN ? = 'CREATED' THEN NULL ELSE archiving_at END,
+                            archived_at = CASE WHEN ? = 'CREATED' THEN NULL ELSE archived_at END,
+                            applying_at = CASE WHEN ? = 'CREATED' THEN NULL ELSE applying_at END,
+                            ready_at = CASE WHEN ? = 'CREATED' THEN NULL ELSE ready_at END,
+                            transferred_at = NULL,
+                            failed_at = NULL,
+                            cancelled_at = NULL,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE provision_id = ? AND status = 'FAILED'
+                        """)) {
+                    statement.setString(1, provisionStatus);
+                    statement.setString(2, provisionStatus);
+                    statement.setString(3, provisionStatus);
+                    statement.setString(4, provisionStatus);
+                    statement.setString(5, provisionStatus);
+                    statement.setString(6, provisionId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("Не удалось повторить provisioning " + provisionId);
+                    }
+                }
+                NewDimensionProvision result = findNewDimensionProvision(connection, provisionId, true);
+                connection.commit();
+                return result;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static NewDimensionProvision cancelNewDimensionProvision(
+            ClusterConfig config,
+            String provisionId
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                NewDimensionProvision provision = findNewDimensionProvision(connection, provisionId, true);
+                if (provision == null) {
+                    throw new SQLException("Provisioning не найден: " + provisionId);
+                }
+                if (!provision.sourceNode().equalsIgnoreCase(config.nodeId())) {
+                    throw new SQLException("Cancel должен выполняться на source node " + provision.sourceNode());
+                }
+                if (provision.status().equals("APPLYING")
+                        || provision.status().equals("READY")
+                        || provision.status().equals("TRANSFERRED")) {
+                    throw new SQLException("Provisioning уже применяется или готов; используй migration для возврата измерения");
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_provisions
+                        SET status = 'CANCELLED',
+                            error_text = NULL,
+                            cancelled_at = CURRENT_TIMESTAMP(3),
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE provision_id = ?
+                          AND status IN ('CREATED', 'ARCHIVING', 'ARCHIVED', 'FAILED')
+                        """)) {
+                    statement.setString(1, provisionId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("Provisioning нельзя отменить: " + provision.status());
+                    }
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE cluster_dimension_migrations
+                        SET status = 'CANCELLED', error_text = NULL, updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE migration_id = ?
+                          AND operation_kind = 'PROVISION'
+                          AND status IN ('PREPARING', 'READY', 'APPLYING', 'FAILED')
+                        """)) {
+                    statement.setString(1, provisionId);
+                    statement.executeUpdate();
+                }
+                NewDimensionProvision result = findNewDimensionProvision(connection, provisionId, true);
+                connection.commit();
+                return result;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    private static void updateNewDimensionProvisionStatus(
+            ClusterConfig config,
+            String provisionId,
+            String nodeColumn,
+            String status,
+            String timestampColumn,
+            List<String> allowedStatuses
+    ) throws SQLException {
+        ensureSchema(config);
+        String placeholders = String.join(",", java.util.Collections.nCopies(allowedStatuses.size(), "?"));
+        String sql = "UPDATE cluster_dimension_provisions SET status = ?, error_text = NULL, "
+                + timestampColumn + " = COALESCE(" + timestampColumn + ", CURRENT_TIMESTAMP(3)), "
+                + "updated_at = CURRENT_TIMESTAMP(3) WHERE provision_id = ? AND "
+                + nodeColumn + " = ? AND status IN (" + placeholders + ")";
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            int index = 1;
+            statement.setString(index++, status);
+            statement.setString(index++, provisionId);
+            statement.setString(index++, config.nodeId());
+            for (String allowedStatus : allowedStatuses) {
+                statement.setString(index++, allowedStatus);
+            }
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("Не удалось перевести provisioning " + provisionId + " в " + status);
             }
         }
     }
@@ -8417,6 +9055,71 @@ public final class ClusterDatabase {
         );
     }
 
+    private static NewDimensionProvision findNewDimensionProvision(
+            Connection connection,
+            String provisionId,
+            boolean forUpdate
+    ) throws SQLException {
+        String sql = """
+                SELECT
+                    provision_id, dimension_id, source_node, target_node,
+                    player_uuid, player_name, x, y, z, yaw, pitch,
+                    player_data, player_data_sha256, player_data_codec,
+                    player_data_size, status, transfer_id, retry_count,
+                    error_text, created_at, updated_at, archiving_at,
+                    archived_at, applying_at, ready_at, transferred_at,
+                    failed_at, cancelled_at
+                FROM cluster_dimension_provisions
+                WHERE provision_id = ?
+                """ + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, provisionId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? readNewDimensionProvision(resultSet) : null;
+            }
+        }
+    }
+
+    private static NewDimensionProvision readNewDimensionProvision(
+            ResultSet resultSet
+    ) throws SQLException {
+        byte[] playerData = resultSet.getBytes("player_data");
+        int codec = resultSet.getInt("player_data_codec");
+        if (resultSet.wasNull()) {
+            codec = 0;
+        }
+        return new NewDimensionProvision(
+                resultSet.getString("provision_id"),
+                resultSet.getString("dimension_id"),
+                resultSet.getString("source_node"),
+                resultSet.getString("target_node"),
+                UUID.fromString(resultSet.getString("player_uuid")),
+                resultSet.getString("player_name"),
+                resultSet.getDouble("x"),
+                resultSet.getDouble("y"),
+                resultSet.getDouble("z"),
+                resultSet.getFloat("yaw"),
+                resultSet.getFloat("pitch"),
+                playerData,
+                resultSet.getString("player_data_sha256"),
+                codec,
+                resultSet.getInt("player_data_size"),
+                resultSet.getString("status"),
+                resultSet.getString("transfer_id"),
+                resultSet.getInt("retry_count"),
+                resultSet.getString("error_text"),
+                instantOrNull(resultSet, "created_at"),
+                instantOrNull(resultSet, "updated_at"),
+                instantOrNull(resultSet, "archiving_at"),
+                instantOrNull(resultSet, "archived_at"),
+                instantOrNull(resultSet, "applying_at"),
+                instantOrNull(resultSet, "ready_at"),
+                instantOrNull(resultSet, "transferred_at"),
+                instantOrNull(resultSet, "failed_at"),
+                instantOrNull(resultSet, "cancelled_at")
+        );
+    }
+
     private static DimensionMigration readDimensionMigration(
             ResultSet resultSet
     ) throws SQLException {
@@ -8677,6 +9380,46 @@ public final class ClusterDatabase {
                         source_node,
                         status
                     )
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_dimension_provisions (
+                    provision_id CHAR(36) NOT NULL PRIMARY KEY,
+                    dimension_id VARCHAR(255) NOT NULL,
+                    source_node VARCHAR(64) NOT NULL,
+                    target_node VARCHAR(64) NOT NULL,
+                    player_uuid CHAR(36) NOT NULL,
+                    player_name VARCHAR(64) NOT NULL,
+                    x DOUBLE NOT NULL,
+                    y DOUBLE NOT NULL,
+                    z DOUBLE NOT NULL,
+                    yaw FLOAT NOT NULL,
+                    pitch FLOAT NOT NULL,
+                    player_data LONGBLOB NULL,
+                    player_data_sha256 CHAR(64) NULL,
+                    player_data_codec INT NULL,
+                    player_data_size INT NOT NULL DEFAULT 0,
+                    status VARCHAR(24) NOT NULL,
+                    transfer_id CHAR(36) NULL,
+                    retry_count INT NOT NULL DEFAULT 0,
+                    error_text TEXT NULL,
+                    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    archiving_at TIMESTAMP(3) NULL,
+                    archived_at TIMESTAMP(3) NULL,
+                    applying_at TIMESTAMP(3) NULL,
+                    ready_at TIMESTAMP(3) NULL,
+                    transferred_at TIMESTAMP(3) NULL,
+                    failed_at TIMESTAMP(3) NULL,
+                    cancelled_at TIMESTAMP(3) NULL,
+
+                    INDEX idx_dimension_provision_dimension (dimension_id, created_at),
+                    INDEX idx_dimension_provision_source_status (source_node, status),
+                    INDEX idx_dimension_provision_target_status (target_node, status),
+                    INDEX idx_dimension_provision_player_status (player_uuid, status)
                 )
                 ENGINE=InnoDB
                 DEFAULT CHARSET=utf8mb4
@@ -10229,6 +10972,48 @@ public final class ClusterDatabase {
             List<PlanningNodeStatus> nodes,
             Instant createdAt
     ) {
+    }
+
+    public record NewDimensionProvision(
+            String provisionId,
+            String dimensionId,
+            String sourceNode,
+            String targetNode,
+            UUID playerUuid,
+            String playerName,
+            double x,
+            double y,
+            double z,
+            float yaw,
+            float pitch,
+            byte[] playerData,
+            String playerDataSha256,
+            int playerDataCodec,
+            int playerDataSize,
+            String status,
+            String transferId,
+            int retryCount,
+            String errorText,
+            Instant createdAt,
+            Instant updatedAt,
+            Instant archivingAt,
+            Instant archivedAt,
+            Instant applyingAt,
+            Instant readyAt,
+            Instant transferredAt,
+            Instant failedAt,
+            Instant cancelledAt
+    ) {
+        public ClusterPlayerDataCodec.Snapshot playerDataSnapshot() {
+            if (playerData == null || playerData.length == 0) {
+                return null;
+            }
+            return new ClusterPlayerDataCodec.Snapshot(
+                    playerDataCodec,
+                    playerData.clone(),
+                    playerDataSha256
+            );
+        }
     }
 
     public record DimensionMigration(
