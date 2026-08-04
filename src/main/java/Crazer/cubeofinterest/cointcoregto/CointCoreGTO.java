@@ -8,6 +8,12 @@ import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerRegistry;
 import Crazer.cubeofinterest.cointcoregto.currency.CurrencyCommands;
 import Crazer.cubeofinterest.cointcoregto.currency.CurrencyConfig;
 import Crazer.cubeofinterest.cointcoregto.currency.CurrencyService;
+import Crazer.cubeofinterest.cointcoregto.trade.TradeClient;
+import Crazer.cubeofinterest.cointcoregto.trade.TradeCommands;
+import Crazer.cubeofinterest.cointcoregto.trade.TradeConfig;
+import Crazer.cubeofinterest.cointcoregto.trade.TradeNetwork;
+import Crazer.cubeofinterest.cointcoregto.trade.TradeRegistry;
+import Crazer.cubeofinterest.cointcoregto.trade.TradeService;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
@@ -490,6 +496,7 @@ public class CointCoreGTO {
 
         CointRadioBlocks.register(modEventBus);
         CointExchangerRegistry.register(modEventBus);
+        TradeRegistry.register(modEventBus);
 
         modEventBus.addListener(this::onClientSetup);
 
@@ -498,18 +505,23 @@ public class CointCoreGTO {
         CointCoreGTOEmoji.registerNetwork();
         CointRadioNetwork.register();
         CointExchangerNetwork.register();
+        TradeNetwork.register();
         CointCoreGTONetwork.register();
         ClusterTestModule.register();
 
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC, "cubechat-common.toml");
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, BlockedBlockPlacementConfig.SPEC, BlockedBlockPlacementConfig.FILE_NAME);
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CurrencyConfig.SPEC, CurrencyConfig.FILE_NAME);
+        ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, TradeConfig.SPEC, TradeConfig.FILE_NAME);
         ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, DimensionQuestLockConfig.SPEC, "CointCoreGTO-FTBQuest-Dimension-Locking.toml");
         MinecraftForge.EVENT_BUS.register(this);
     }
 
     private void onClientSetup(FMLClientSetupEvent event) {
-        event.enqueueWork(CointExchangerClient::registerScreens);
+        event.enqueueWork(() -> {
+            CointExchangerClient.registerScreens();
+            TradeClient.registerScreens();
+        });
     }
 
 
@@ -535,6 +547,10 @@ public class CointCoreGTO {
         BlockedBlockPlacementConfig.reload();
         CurrencyConfig.reload();
         CurrencyService.reload();
+        TradeConfig.reload();
+        if (CURRENT_SERVER != null) {
+            TradeService.start(CURRENT_SERVER);
+        }
 
         resetRestartSchedule();
         reloadDiscordBridgeFromConfig();
@@ -654,6 +670,7 @@ public class CointCoreGTO {
         loadPunishmentHistory();
         startNetworkChatAndDiscord(CURRENT_SERVER);
         CurrencyService.start(CURRENT_SERVER);
+        TradeService.start(CURRENT_SERVER);
 
         resetRestartSchedule();
     }
@@ -665,6 +682,7 @@ public class CointCoreGTO {
         saveWarns();
         savePunishmentHistory();
         ClusterNetworkChat.stop();
+        TradeService.stop();
         CurrencyService.stop();
         NEXT_RESTART_MILLIS = -1L;
         LAST_RESTART_CHECK_SECOND = -1L;
@@ -691,6 +709,7 @@ public class CointCoreGTO {
 
         saveLastLocation(player);
         CointCoreGTOEmoji.sendEmojiRegistry(player);
+        TradeService.onJoin(player);
 
         CHAT_VIEWS.putIfAbsent(player.getUUID(), ChatView.ALL);
 
@@ -707,6 +726,7 @@ public class CointCoreGTO {
             return;
         }
 
+        TradeService.onLeave(player);
         saveLastLocation(player);
         saveLastLocations();
         CHAT_HISTORY.remove(player.getUUID());
@@ -749,6 +769,7 @@ public class CointCoreGTO {
     public void onRegisterCommands(RegisterCommandsEvent event) {
         removeRootCommand(event.getDispatcher(), "me");
         CurrencyCommands.register(event.getDispatcher());
+        TradeCommands.register(event.getDispatcher());
 
         event.getDispatcher().register(
                 Commands.literal("cointcoregto")
@@ -1694,7 +1715,24 @@ public class CointCoreGTO {
         );
 
         event.getDispatcher().register(
-                Commands.literal("trade")
+                Commands.literal("tradechat")
+                        .then(Commands.argument("message", StringArgumentType.greedyString())
+                                .executes(ctx -> {
+                                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                                    String message = StringArgumentType.getString(ctx, "message");
+
+                                    if (isMuted(player)) {
+                                        sendMutedMessage(player);
+                                        return 0;
+                                    }
+
+                                    sendTradeChat(player, message);
+                                    return 1;
+                                }))
+        );
+
+        event.getDispatcher().register(
+                Commands.literal("tc")
                         .then(Commands.argument("message", StringArgumentType.greedyString())
                                 .executes(ctx -> {
                                     ServerPlayer player = ctx.getSource().getPlayerOrException();
@@ -1775,6 +1813,7 @@ public class CointCoreGTO {
 
         ClusterNetworkChat.tick();
         CurrencyService.tick(server);
+        TradeService.tick(server);
 
         long currentSecond = System.currentTimeMillis() / 1000L;
         if (currentSecond == LAST_RESTART_CHECK_SECOND) {
