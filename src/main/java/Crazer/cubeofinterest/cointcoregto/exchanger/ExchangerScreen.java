@@ -1,5 +1,6 @@
 package Crazer.cubeofinterest.cointcoregto.exchanger;
 
+import Crazer.cubeofinterest.cointcoregto.currency.CurrencyService;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
@@ -15,6 +16,9 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
     private Button buyButton;
     private Button switchModeButton;
     private Button aeModeButton;
+    private EditBox currencyPriceBox;
+    private Button saveCurrencyButton;
+    private Button requiredTierButton;
 
     private boolean buyerMode;
     private boolean buyerAeMode;
@@ -61,6 +65,31 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         ).bounds(this.leftPos + 136, this.topPos + 90, 54, 20).build();
         this.addRenderableWidget(this.aeModeButton);
 
+        this.currencyPriceBox = new EditBox(
+                this.font,
+                this.leftPos + 91,
+                this.topPos + 89,
+                55,
+                18,
+                Component.literal("Монет за сделку")
+        );
+        this.currencyPriceBox.setValue(Long.toString(this.menu.getCurrencyPricePerDeal()));
+        this.currencyPriceBox.setMaxLength(19);
+        this.currencyPriceBox.setFilter(value -> value.matches("[0-9]*"));
+        this.addRenderableWidget(this.currencyPriceBox);
+
+        this.saveCurrencyButton = Button.builder(
+                Component.literal("ОК"),
+                button -> saveCurrencyPrice()
+        ).bounds(this.leftPos + 150, this.topPos + 88, 40, 20).build();
+        this.addRenderableWidget(this.saveCurrencyButton);
+
+        this.requiredTierButton = Button.builder(
+                Component.literal("Без ограничения"),
+                button -> cycleRequiredTier(Screen.hasShiftDown() ? -1 : 1)
+        ).bounds(this.leftPos + 80, this.topPos + 105, 110, 18).build();
+        this.addRenderableWidget(this.requiredTierButton);
+
         this.switchModeButton = Button.builder(
                 Component.literal("К покупателю"),
                 button -> switchMode()
@@ -68,6 +97,21 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         this.addRenderableWidget(this.switchModeButton);
 
         refreshModeWidgets();
+    }
+
+    @Override
+    protected void containerTick() {
+        super.containerTick();
+        if (!this.buyerMode
+                && this.currencyPriceBox != null
+                && !this.currencyPriceBox.isFocused()) {
+            String synced = Long.toString(this.menu.getCurrencyPricePerDeal());
+            if (!synced.equals(this.currencyPriceBox.getValue())) {
+                this.currencyPriceBox.setValue(synced);
+            }
+        }
+        updateRequiredTierButton();
+        updateBuyButtonState();
     }
 
     private void toggleAeMode() {
@@ -84,6 +128,9 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
 
         this.buyerMode = !this.buyerMode;
         this.menu.setEditMode(!this.buyerMode);
+        if (!this.buyerMode && this.currencyPriceBox != null) {
+            this.currencyPriceBox.setValue(Long.toString(this.menu.getCurrencyPricePerDeal()));
+        }
         CointExchangerNetwork.CHANNEL.sendToServer(
                 new ExchangerSetModePacket(this.menu.getBlockPos(), !this.buyerMode)
         );
@@ -98,6 +145,12 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         this.buyButton.active = this.buyerMode;
         this.aeModeButton.visible = this.buyerMode;
         this.aeModeButton.active = this.buyerMode;
+        this.currencyPriceBox.visible = canEdit && !this.buyerMode;
+        this.currencyPriceBox.active = canEdit && !this.buyerMode;
+        this.saveCurrencyButton.visible = canEdit && !this.buyerMode;
+        this.saveCurrencyButton.active = canEdit && !this.buyerMode;
+        this.requiredTierButton.visible = canEdit && !this.buyerMode;
+        this.requiredTierButton.active = this.menu.canEditTier() && !this.buyerMode;
         this.switchModeButton.visible = canEdit;
         this.switchModeButton.active = canEdit;
 
@@ -110,6 +163,56 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         this.switchModeButton.setX(this.leftPos + this.imageWidth - 96);
         this.switchModeButton.setY(this.topPos + 12);
         this.switchModeButton.setWidth(86);
+        updateRequiredTierButton();
+        updateBuyButtonState();
+    }
+
+    private void cycleRequiredTier(int direction) {
+        CointExchangerNetwork.CHANNEL.sendToServer(
+                new ExchangerCycleRequiredTierPacket(this.menu.getBlockPos(), direction)
+        );
+    }
+
+    private void updateRequiredTierButton() {
+        if (this.requiredTierButton == null) {
+            return;
+        }
+        int requiredTier = this.menu.getRequiredTierIndex();
+        this.requiredTierButton.setMessage(Component.literal(
+                requiredTier < 0
+                        ? "Без ограничения"
+                        : "Эпоха: " + this.menu.getRequiredTierName()
+        ));
+    }
+
+    private void updateBuyButtonState() {
+        if (this.buyButton == null || !this.buyerMode) {
+            return;
+        }
+        ExchangerProgression.Status status = this.menu.getProgressionStatus();
+        this.buyButton.active = !this.menu.isViewerOwner()
+                && status != ExchangerProgression.Status.BELOW_REQUIRED
+                && status != ExchangerProgression.Status.INVALID_REQUIRED_TIER;
+    }
+
+    private void saveCurrencyPrice() {
+        long amount = 0L;
+        try {
+            String value = this.currencyPriceBox.getValue();
+            if (value != null && !value.isBlank()) {
+                amount = Long.parseLong(value);
+            }
+        } catch (NumberFormatException ignored) {
+            this.currencyPriceBox.setValue("0");
+            return;
+        }
+        if (amount < 0L) {
+            amount = 0L;
+        }
+        CointExchangerNetwork.CHANNEL.sendToServer(
+                new ExchangerSetCurrencyPricePacket(this.menu.getBlockPos(), amount)
+        );
+        this.currencyPriceBox.setValue(Long.toString(amount));
     }
 
     private void buy() {
@@ -301,8 +404,8 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
             graphics.drawString(this.font, "Владелец", 14, 24, 0xFFD36A, false);
         }
 
-        graphics.drawString(this.font, "Продажа", 44, 67, 0xD6DCEB, false);
-        graphics.drawString(this.font, "По цене", 132, 67, 0xD6DCEB, false);
+        graphics.drawString(this.font, "Товар", 44, 67, 0xD6DCEB, false);
+        graphics.drawString(this.font, "Цена", 132, 67, 0xD6DCEB, false);
 
         if (this.buyerMode) {
             graphics.drawString(this.font, "Сделок:", 10, 96, 0xD6DCEB, false);
@@ -321,13 +424,48 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
                     79,
                     availableItems > 0 ? 0x8FE59A : 0xF27D7D
             );
+            String currencyText;
+            int currencyColor;
+            if (this.menu.isViewerOwner()) {
+                currencyText = "Свой обменник: покупка запрещена";
+                currencyColor = 0xF27D7D;
+            } else if (this.menu.getProgressionStatus() == ExchangerProgression.Status.BELOW_REQUIRED) {
+                currencyText = "Нужно: " + this.menu.getRequiredTierName()
+                        + " | Ваша: " + this.menu.getViewerTierName();
+                currencyColor = 0xF27D7D;
+            } else if (this.menu.getProgressionStatus() == ExchangerProgression.Status.INVALID_REQUIRED_TIER) {
+                currencyText = "Ошибка минимальной эпохи";
+                currencyColor = 0xF27D7D;
+            } else {
+                long basePrice = this.menu.getCurrencyPricePerDeal();
+                long effectivePrice = this.menu.getEffectiveCurrencyPricePerDeal();
+                currencyText = basePrice > 0L
+                        ? "Монеты: " + CurrencyService.format(effectivePrice)
+                        : "Монеты: нет";
+                if (this.menu.getDiscountBasisPoints() > 0 && basePrice > 0L) {
+                    currencyText += " (-" + formatPercent(this.menu.getDiscountBasisPoints()) + "%)";
+                }
+                currencyText += " | Баланс: " + CurrencyService.format(this.menu.getViewerCurrencyBalance());
+                currencyColor = 0xFFD36A;
+            }
+            graphics.drawCenteredString(this.font, currencyText, this.imageWidth / 2, 108, currencyColor);
         } else {
-            graphics.drawString(this.font, "Слева товар, справа цена.", 12, 82, 0xD6DCEB, false);
-            graphics.drawString(this.font, "Колесо: ±1", 12, 95, 0x8C93A6, false);
-            graphics.drawString(this.font, "Shift: 16 / 32 / 48 / 64", 12, 106, 0x8C93A6, false);
+            graphics.drawString(this.font, "Цена ресурсами — слот справа.", 12, 80, 0xD6DCEB, false);
+            graphics.drawString(this.font, "Монет/сделку:", 12, 94, 0xFFD36A, false);
+            graphics.drawString(this.font, "Мин. эпоха:", 12, 110, 0x8C93A6, false);
         }
 
         graphics.drawString(this.font, "Инвентарь", 19, 120, 0xD6DCEB, false);
+    }
+
+    private static String formatPercent(int basisPoints) {
+        if (basisPoints % 100 == 0) {
+            return Integer.toString(basisPoints / 100);
+        }
+        if (basisPoints % 10 == 0) {
+            return String.format(java.util.Locale.ROOT, "%.1f", basisPoints / 100.0D);
+        }
+        return String.format(java.util.Locale.ROOT, "%.2f", basisPoints / 100.0D);
     }
 
     private static String formatAmount(long amount) {

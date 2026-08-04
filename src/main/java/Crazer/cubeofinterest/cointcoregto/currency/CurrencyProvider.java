@@ -1,6 +1,7 @@
 package Crazer.cubeofinterest.cointcoregto.currency;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 public interface CurrencyProvider {
@@ -56,6 +57,23 @@ public interface CurrencyProvider {
             UUID operationId,
             CurrencyContext context
     ) throws Exception;
+
+    default CurrencyOperationResult settle(
+            UUID holdId,
+            List<CurrencySettlementEntry> entries,
+            UUID operationId,
+            CurrencyContext context
+    ) throws Exception {
+        if (entries != null && entries.size() == 1) {
+            CurrencySettlementEntry entry = entries.get(0);
+            return capture(holdId, entry.recipientUuid(), operationId, context);
+        }
+        return CurrencyOperationResult.failure(
+                operationId,
+                "SETTLEMENT_UNSUPPORTED",
+                "Провайдер валюты не поддерживает разделение платежа"
+        );
+    }
 
     default int releaseExpiredHolds(int maximumCount, CurrencyContext context) throws Exception {
         return 0;

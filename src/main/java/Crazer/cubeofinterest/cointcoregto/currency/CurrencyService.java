@@ -6,6 +6,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -212,6 +213,29 @@ public final class CurrencyService {
                 ownerUuid,
                 null
         );
+    }
+
+    public static CurrencyOperationResult settle(
+            UUID holdId,
+            UUID ownerUuid,
+            List<CurrencySettlementEntry> entries,
+            UUID operationId,
+            CurrencyContext context
+    ) {
+        CurrencyOperationResult result = execute(
+                operationId,
+                () -> activeProvider.settle(holdId, entries, operationId, context),
+                ownerUuid,
+                null
+        );
+        if (entries != null) {
+            for (CurrencySettlementEntry entry : entries) {
+                if (entry != null && entry.recipientUuid() != null) {
+                    BALANCE_CACHE.remove(entry.recipientUuid());
+                }
+            }
+        }
+        return result;
     }
 
     public static CurrencyContext context(

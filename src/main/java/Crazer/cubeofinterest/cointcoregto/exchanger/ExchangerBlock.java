@@ -1,5 +1,6 @@
 package Crazer.cubeofinterest.cointcoregto.exchanger;
 
+import Crazer.cubeofinterest.cointcoregto.currency.CurrencyConfig;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
@@ -72,6 +73,12 @@ public class ExchangerBlock extends BaseEntityBlock {
                         buffer -> {
                             buffer.writeBlockPos(pos);
                             buffer.writeBoolean(exchanger.canEdit(serverPlayer));
+                            buffer.writeBoolean(exchanger.canEditRequiredTier(serverPlayer));
+                            var tiers = CurrencyConfig.exchangerTierOrder();
+                            buffer.writeVarInt(tiers.size());
+                            for (String tier : tiers) {
+                                buffer.writeUtf(tier, 64);
+                            }
                         }
                 );
             }

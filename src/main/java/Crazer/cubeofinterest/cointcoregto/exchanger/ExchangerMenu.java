@@ -1,5 +1,8 @@
 package Crazer.cubeofinterest.cointcoregto.exchanger;
 
+import Crazer.cubeofinterest.cointcoregto.currency.CurrencyBalance;
+import Crazer.cubeofinterest.cointcoregto.currency.CurrencyConfig;
+import Crazer.cubeofinterest.cointcoregto.currency.CurrencyService;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
@@ -13,6 +16,8 @@ import net.minecraftforge.items.IItemHandler;
 import net.minecraftforge.items.SlotItemHandler;
 import org.jetbrains.annotations.NotNull;
 
+import java.util.List;
+
 public class ExchangerMenu extends AbstractContainerMenu {
     private static final int TEMPLATE_SLOT_COUNT = 2;
     private static final int PLAYER_INVENTORY_START = TEMPLATE_SLOT_COUNT;
@@ -23,11 +28,21 @@ public class ExchangerMenu extends AbstractContainerMenu {
     private final ExchangerBlockEntity exchanger;
     private final BlockPos blockPos;
     private final boolean canEdit;
+    private final boolean canEditTier;
+    private final Player viewer;
+    private final List<String> tierIds;
     private boolean editMode;
-    private final SimpleContainerData syncedData = new SimpleContainerData(2);
+    private final SimpleContainerData syncedData = new SimpleContainerData(13);
 
-    public ExchangerMenu(int windowId, Inventory playerInventory, BlockPos pos, boolean canEdit) {
-        this(windowId, playerInventory, getBlockEntity(playerInventory, pos), canEdit);
+    public ExchangerMenu(
+            int windowId,
+            Inventory playerInventory,
+            BlockPos pos,
+            boolean canEdit,
+            boolean canEditTier,
+            List<String> tierIds
+    ) {
+        this(windowId, playerInventory, getBlockEntity(playerInventory, pos), canEdit, canEditTier, tierIds);
     }
 
     public ExchangerMenu(
@@ -36,10 +51,31 @@ public class ExchangerMenu extends AbstractContainerMenu {
             ExchangerBlockEntity exchanger,
             boolean canEdit
     ) {
+        this(
+                windowId,
+                playerInventory,
+                exchanger,
+                canEdit,
+                exchanger.canEditRequiredTier(playerInventory.player),
+                CurrencyConfig.exchangerTierOrder()
+        );
+    }
+
+    public ExchangerMenu(
+            int windowId,
+            Inventory playerInventory,
+            ExchangerBlockEntity exchanger,
+            boolean canEdit,
+            boolean canEditTier,
+            List<String> tierIds
+    ) {
         super(CointExchangerRegistry.EXCHANGER_MENU.get(), windowId);
         this.exchanger = exchanger;
         this.blockPos = exchanger.getBlockPos();
         this.canEdit = canEdit;
+        this.canEditTier = canEditTier;
+        this.viewer = playerInventory.player;
+        this.tierIds = tierIds == null ? List.of() : List.copyOf(tierIds);
         this.editMode = canEdit;
         addDataSlots(this.syncedData);
 
@@ -76,6 +112,10 @@ public class ExchangerMenu extends AbstractContainerMenu {
         return canEdit;
     }
 
+    public boolean canEditTier() {
+        return canEditTier;
+    }
+
     public boolean isEditMode() {
         return canEdit && editMode;
     }
@@ -98,12 +138,98 @@ public class ExchangerMenu extends AbstractContainerMenu {
         return (high << 32) | low;
     }
 
+    public long getCurrencyPricePerDeal() {
+        long low = Integer.toUnsignedLong(this.syncedData.get(2));
+        long high = Integer.toUnsignedLong(this.syncedData.get(3));
+        return (high << 32) | low;
+    }
+
+    public List<String> getTierIds() {
+        return tierIds;
+    }
+
+    public int getRequiredTierIndex() {
+        return this.syncedData.get(4) - 1;
+    }
+
+    public int getViewerTierIndex() {
+        return this.syncedData.get(5) - 1;
+    }
+
+    public int getDiscountBasisPoints() {
+        return Math.max(0, this.syncedData.get(6));
+    }
+
+    public long getEffectiveCurrencyPricePerDeal() {
+        long low = Integer.toUnsignedLong(this.syncedData.get(7));
+        long high = Integer.toUnsignedLong(this.syncedData.get(8));
+        return (high << 32) | low;
+    }
+
+    public long getViewerCurrencyBalance() {
+        long low = Integer.toUnsignedLong(this.syncedData.get(9));
+        long high = Integer.toUnsignedLong(this.syncedData.get(10));
+        return (high << 32) | low;
+    }
+
+    public boolean isViewerOwner() {
+        return this.syncedData.get(11) != 0;
+    }
+
+    public ExchangerProgression.Status getProgressionStatus() {
+        int ordinal = this.syncedData.get(12);
+        ExchangerProgression.Status[] values = ExchangerProgression.Status.values();
+        return ordinal >= 0 && ordinal < values.length
+                ? values[ordinal]
+                : ExchangerProgression.Status.INVALID_REQUIRED_TIER;
+    }
+
+    public String getRequiredTierName() {
+        return ExchangerProgression.tierDisplayName(tierIds, getRequiredTierIndex());
+    }
+
+    public String getViewerTierName() {
+        return ExchangerProgression.tierDisplayName(tierIds, getViewerTierIndex());
+    }
+
     @Override
     public void broadcastChanges() {
         if (this.exchanger.getLevel() != null && !this.exchanger.getLevel().isClientSide) {
             long available = this.exchanger.getAvailableProductCount();
             this.syncedData.set(0, (int) available);
             this.syncedData.set(1, (int) (available >>> 32));
+            long currencyPrice = this.exchanger.getCurrencyPricePerDeal();
+            this.syncedData.set(2, (int) currencyPrice);
+            this.syncedData.set(3, (int) (currencyPrice >>> 32));
+            ExchangerProgression.Quote quote = this.viewer instanceof net.minecraft.server.level.ServerPlayer serverPlayer
+                    ? ExchangerProgression.quote(
+                            serverPlayer,
+                            this.exchanger.getEffectiveRequiredTierId(),
+                            currencyPrice,
+                            1
+                    )
+                    : new ExchangerProgression.Quote(
+                            ExchangerProgression.Status.UNRESTRICTED,
+                            "",
+                            -1,
+                            -1,
+                            0,
+                            currencyPrice,
+                            currencyPrice
+                    );
+            this.syncedData.set(4, quote.requiredTierIndex() + 1);
+            this.syncedData.set(5, quote.playerTierIndex() + 1);
+            this.syncedData.set(6, quote.discountBasisPoints());
+            long effectivePrice = quote.effectiveTotal();
+            this.syncedData.set(7, (int) effectivePrice);
+            this.syncedData.set(8, (int) (effectivePrice >>> 32));
+            CurrencyBalance balance = CurrencyService.balance(this.viewer.getUUID());
+            long amount = balance.success() ? balance.amount() : 0L;
+            this.syncedData.set(9, (int) amount);
+            this.syncedData.set(10, (int) (amount >>> 32));
+            this.syncedData.set(11, this.exchanger.getOwnerUuid() != null
+                    && this.exchanger.getOwnerUuid().equals(this.viewer.getUUID()) ? 1 : 0);
+            this.syncedData.set(12, quote.status().ordinal());
         }
         super.broadcastChanges();
     }

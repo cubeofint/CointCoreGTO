@@ -1,5 +1,6 @@
 package Crazer.cubeofinterest.cointcoregto.currency;
 
+import Crazer.cubeofinterest.cointcoregto.exchanger.ExchangerProgression;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.CommandSourceStack;
@@ -39,6 +40,12 @@ public final class CurrencyCommands {
                         .then(Commands.literal("balance")
                                 .then(Commands.argument("player", EntityArgument.player())
                                         .executes(context -> showBalance(
+                                                context.getSource(),
+                                                EntityArgument.getPlayer(context, "player")
+                                        ))))
+                        .then(Commands.literal("tier")
+                                .then(Commands.argument("player", EntityArgument.player())
+                                        .executes(context -> showTier(
                                                 context.getSource(),
                                                 EntityArgument.getPlayer(context, "player")
                                         ))))
@@ -106,6 +113,23 @@ public final class CurrencyCommands {
         return 1;
     }
 
+    private static int showTier(CommandSourceStack source, ServerPlayer player) {
+        int tierIndex = ExchangerProgression.playerTier(player);
+        String tier = ExchangerProgression.tierDisplayName(
+                CurrencyConfig.exchangerTierOrder(),
+                tierIndex
+        );
+        source.sendSuccess(
+                () -> Component.literal(
+                        "§aЭпоха §f" + player.getGameProfile().getName()
+                                + "§a: §e" + tier
+                                + " §7(index=" + tierIndex + ")"
+                ),
+                false
+        );
+        return tierIndex >= 0 ? 1 : 0;
+    }
+
     private static int status(CommandSourceStack source) {
         source.sendSuccess(
                 () -> Component.literal(
@@ -118,6 +142,7 @@ public final class CurrencyCommands {
     }
 
     private static int reload(CommandSourceStack source) {
+        CurrencyConfig.reload();
         CurrencyService.reload();
         if (!CurrencyService.available()) {
             source.sendFailure(Component.literal("§cВалютная система недоступна: " + CurrencyService.lastError()));

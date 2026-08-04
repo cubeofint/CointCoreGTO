@@ -6,7 +6,7 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class CointExchangerNetwork {
-    private static final String PROTOCOL = "3";
+    private static final String PROTOCOL = "5";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(CointCoreGTO.MODID, "exchanger"),
@@ -38,10 +38,22 @@ public final class CointExchangerNetwork {
                 .consumerMainThread(ExchangerSetTemplatePacket::handle)
                 .add();
 
-        CHANNEL.messageBuilder(ExchangerSetModePacket.class, id)
+        CHANNEL.messageBuilder(ExchangerSetModePacket.class, id++)
                 .encoder(ExchangerSetModePacket::encode)
                 .decoder(ExchangerSetModePacket::decode)
                 .consumerMainThread(ExchangerSetModePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(ExchangerSetCurrencyPricePacket.class, id++)
+                .encoder(ExchangerSetCurrencyPricePacket::encode)
+                .decoder(ExchangerSetCurrencyPricePacket::decode)
+                .consumerMainThread(ExchangerSetCurrencyPricePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(ExchangerCycleRequiredTierPacket.class, id)
+                .encoder(ExchangerCycleRequiredTierPacket::encode)
+                .decoder(ExchangerCycleRequiredTierPacket::decode)
+                .consumerMainThread(ExchangerCycleRequiredTierPacket::handle)
                 .add();
 
         registered = true;

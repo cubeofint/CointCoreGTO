@@ -12,11 +12,15 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 import java.util.UUID;
 
 public final class MysqlCurrencyProvider implements CurrencyProvider {
@@ -342,6 +346,188 @@ public final class MysqlCurrencyProvider implements CurrencyProvider {
     }
 
     @Override
+    public CurrencyOperationResult settle(
+            UUID holdId,
+            List<CurrencySettlementEntry> entries,
+            UUID operationId,
+            CurrencyContext context
+    ) throws Exception {
+        requireReady();
+        Objects.requireNonNull(holdId, "holdId");
+        Objects.requireNonNull(operationId, "operationId");
+
+        TreeMap<String, Long> credits = new TreeMap<>();
+        if (entries != null) {
+            for (CurrencySettlementEntry entry : entries) {
+                if (entry == null || entry.recipientUuid() == null || entry.amount() <= 0L) {
+                    throw new IllegalArgumentException("settlement entry");
+                }
+                credits.merge(
+                        entry.recipientUuid().toString(),
+                        entry.amount(),
+                        Math::addExact
+                );
+            }
+        }
+
+        try (Connection connection = open()) {
+            connection.setAutoCommit(false);
+            try {
+                HoldRow hold = readHold(connection, holdId, true);
+                if (hold == null) {
+                    connection.commit();
+                    return CurrencyOperationResult.failure(operationId, "HOLD_NOT_FOUND", "Резерв не найден");
+                }
+
+                long creditedAmount = 0L;
+                for (long amount : credits.values()) {
+                    creditedAmount = Math.addExact(creditedAmount, amount);
+                }
+                if (creditedAmount > hold.amount()) {
+                    connection.commit();
+                    return CurrencyOperationResult.failure(
+                            operationId,
+                            "SETTLEMENT_AMOUNT_MISMATCH",
+                            "Сумма распределения превышает резерв"
+                    );
+                }
+
+                long burnedAmount = hold.amount() - creditedAmount;
+                String fingerprint = settlementFingerprint(credits, burnedAmount);
+                CurrencyOperationResult existing = readOperation(
+                        connection,
+                        operationId,
+                        "SETTLE",
+                        hold.ownerUuid(),
+                        null,
+                        holdId,
+                        hold.amount(),
+                        fingerprint
+                );
+                if (existing != null) {
+                    connection.commit();
+                    return existing;
+                }
+
+                insertOperation(
+                        connection,
+                        operationId,
+                        "SETTLE",
+                        hold.ownerUuid(),
+                        null,
+                        holdId,
+                        hold.amount(),
+                        context,
+                        fingerprint
+                );
+
+                if (!"RESERVED".equals(hold.status())) {
+                    String code = "CAPTURED".equals(hold.status())
+                            ? "HOLD_ALREADY_CAPTURED"
+                            : "HOLD_NOT_RESERVED";
+                    String message = "CAPTURED".equals(hold.status())
+                            ? "Резерв уже списан"
+                            : "Резерв уже освобождён";
+                    updateOperation(connection, operationId, "REJECTED", code, message, 0L, 0L);
+                    connection.commit();
+                    return new CurrencyOperationResult(false, false, code, message, operationId, 0L, 0L);
+                }
+
+                TreeMap<String, Long> balances = new TreeMap<>();
+                for (String recipient : credits.keySet()) {
+                    UUID recipientUuid = UUID.fromString(recipient);
+                    ensureAccount(connection, recipientUuid);
+                }
+                for (String recipient : credits.keySet()) {
+                    UUID recipientUuid = UUID.fromString(recipient);
+                    long balance = readBalance(connection, recipientUuid, true);
+                    long reserved = readReservedAmountExcludingHold(connection, recipientUuid, holdId);
+                    long credit = credits.get(recipient);
+                    long maximum = descriptor().maximumBalance();
+                    if (reserved > maximum
+                            || credit > maximum - reserved
+                            || balance > maximum - reserved - credit) {
+                        updateOperation(
+                                connection,
+                                operationId,
+                                "REJECTED",
+                                "MAXIMUM_BALANCE",
+                                "Баланс одного из получателей достиг максимума",
+                                0L,
+                                balance
+                        );
+                        connection.commit();
+                        return new CurrencyOperationResult(
+                                false,
+                                false,
+                                "MAXIMUM_BALANCE",
+                                "Баланс одного из получателей достиг максимума",
+                                operationId,
+                                0L,
+                                balance
+                        );
+                    }
+                    balances.put(recipient, balance);
+                }
+
+                long firstTargetBalance = 0L;
+                boolean first = true;
+                for (Map.Entry<String, Long> entry : credits.entrySet()) {
+                    UUID recipientUuid = UUID.fromString(entry.getKey());
+                    long newBalance = Math.addExact(balances.get(entry.getKey()), entry.getValue());
+                    updateBalance(connection, recipientUuid, newBalance);
+                    if (first) {
+                        firstTargetBalance = newBalance;
+                        first = false;
+                    }
+                }
+
+                UUID singleRecipient = credits.size() == 1 && burnedAmount == 0L
+                        ? UUID.fromString(credits.firstKey())
+                        : null;
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        UPDATE coint_currency_holds
+                        SET status = 'CAPTURED', recipient_uuid = ?, captured_operation_id = ?,
+                            updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE hold_id = ? AND status = 'RESERVED'
+                        """)) {
+                    setUuid(statement, 1, singleRecipient);
+                    statement.setString(2, operationId.toString());
+                    statement.setString(3, holdId.toString());
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("Currency settlement lost optimistic lock");
+                    }
+                }
+
+                updateOperation(
+                        connection,
+                        operationId,
+                        "COMPLETED",
+                        "OK",
+                        burnedAmount > 0L ? "burned=" + burnedAmount : "",
+                        0L,
+                        firstTargetBalance
+                );
+                connection.commit();
+                return new CurrencyOperationResult(
+                        true,
+                        false,
+                        "OK",
+                        burnedAmount > 0L ? "burned=" + burnedAmount : "",
+                        operationId,
+                        0L,
+                        firstTargetBalance
+                );
+            } catch (Exception exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    @Override
     public CurrencyOperationResult release(
             UUID holdId,
             UUID operationId,
@@ -587,8 +773,30 @@ public final class MysqlCurrencyProvider implements CurrencyProvider {
             UUID expectedHold,
             long expectedAmount
     ) throws SQLException {
+        return readOperation(
+                connection,
+                operationId,
+                expectedType,
+                expectedSource,
+                expectedTarget,
+                expectedHold,
+                expectedAmount,
+                ""
+        );
+    }
+
+    private CurrencyOperationResult readOperation(
+            Connection connection,
+            UUID operationId,
+            String expectedType,
+            UUID expectedSource,
+            UUID expectedTarget,
+            UUID expectedHold,
+            long expectedAmount,
+            String expectedFingerprint
+    ) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT operation_type, source_uuid, target_uuid, hold_id, amount,
+                SELECT operation_type, source_uuid, target_uuid, hold_id, amount, operation_fingerprint,
                        status, result_code, result_message, source_balance, target_balance
                 FROM coint_currency_operations
                 WHERE operation_id = ?
@@ -603,11 +811,14 @@ public final class MysqlCurrencyProvider implements CurrencyProvider {
                 UUID target = readUuid(resultSet, "target_uuid");
                 UUID hold = readUuid(resultSet, "hold_id");
                 long amount = resultSet.getLong("amount");
+                String fingerprint = resultSet.getString("operation_fingerprint");
                 if (!expectedType.equals(type)
                         || !Objects.equals(expectedSource, source)
                         || !Objects.equals(expectedTarget, target)
                         || !Objects.equals(expectedHold, hold)
-                        || expectedAmount != amount) {
+                        || expectedAmount != amount
+                        || !Objects.equals(expectedFingerprint == null ? "" : expectedFingerprint,
+                        fingerprint == null ? "" : fingerprint)) {
                     return new CurrencyOperationResult(
                             false,
                             true,
@@ -642,14 +853,38 @@ public final class MysqlCurrencyProvider implements CurrencyProvider {
             long amount,
             CurrencyContext context
     ) throws SQLException {
+        insertOperation(
+                connection,
+                operationId,
+                type,
+                sourceUuid,
+                targetUuid,
+                holdId,
+                amount,
+                context,
+                ""
+        );
+    }
+
+    private void insertOperation(
+            Connection connection,
+            UUID operationId,
+            String type,
+            UUID sourceUuid,
+            UUID targetUuid,
+            UUID holdId,
+            long amount,
+            CurrencyContext context,
+            String fingerprint
+    ) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 INSERT INTO coint_currency_operations (
                     operation_id, provider_id, currency_id, operation_type, status,
-                    source_uuid, target_uuid, hold_id, amount,
+                    source_uuid, target_uuid, hold_id, amount, operation_fingerprint,
                     actor_uuid, actor_name, node_id, reason, source_type, source_id,
                     context_json, result_code, result_message,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'PROCESSING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '',
+                ) VALUES (?, ?, ?, ?, 'PROCESSING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '',
                           CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
                 """)) {
             statement.setString(1, operationId.toString());
@@ -660,13 +895,14 @@ public final class MysqlCurrencyProvider implements CurrencyProvider {
             setUuid(statement, 6, targetUuid);
             setUuid(statement, 7, holdId);
             statement.setLong(8, amount);
-            setUuid(statement, 9, context == null ? null : context.actorUuid());
-            statement.setString(10, truncate(context == null ? "" : context.actorName(), 64));
-            statement.setString(11, truncate(context == null ? "" : context.nodeId(), 64));
-            statement.setString(12, truncate(context == null ? "" : context.reason(), 255));
-            statement.setString(13, truncate(context == null ? "" : context.sourceType(), 64));
-            statement.setString(14, truncate(context == null ? "" : context.sourceId(), 255));
-            statement.setString(15, contextJson(context));
+            statement.setString(9, truncate(fingerprint, 128));
+            setUuid(statement, 10, context == null ? null : context.actorUuid());
+            statement.setString(11, truncate(context == null ? "" : context.actorName(), 64));
+            statement.setString(12, truncate(context == null ? "" : context.nodeId(), 64));
+            statement.setString(13, truncate(context == null ? "" : context.reason(), 255));
+            statement.setString(14, truncate(context == null ? "" : context.sourceType(), 64));
+            statement.setString(15, truncate(context == null ? "" : context.sourceId(), 255));
+            statement.setString(16, contextJson(context));
             statement.executeUpdate();
         }
     }
@@ -780,6 +1016,46 @@ public final class MysqlCurrencyProvider implements CurrencyProvider {
         }
     }
 
+    private long readReservedAmountExcludingHold(
+            Connection connection,
+            UUID playerUuid,
+            UUID excludedHoldId
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT COALESCE(SUM(amount), 0)
+                FROM coint_currency_holds
+                WHERE provider_id = ? AND currency_id = ? AND owner_uuid = ?
+                  AND status = 'RESERVED' AND hold_id <> ?
+                """)) {
+            statement.setString(1, providerId());
+            statement.setString(2, descriptor().currencyId());
+            statement.setString(3, playerUuid.toString());
+            statement.setString(4, excludedHoldId.toString());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? resultSet.getLong(1) : 0L;
+            }
+        }
+    }
+
+    private static String settlementFingerprint(TreeMap<String, Long> credits, long burnedAmount) {
+        StringBuilder canonical = new StringBuilder();
+        for (Map.Entry<String, Long> entry : credits.entrySet()) {
+            canonical.append(entry.getKey()).append('=').append(entry.getValue()).append(';');
+        }
+        canonical.append("burn=").append(burnedAmount);
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(canonical.toString().getBytes(StandardCharsets.UTF_8));
+            StringBuilder result = new StringBuilder(hash.length * 2);
+            for (byte value : hash) {
+                result.append(String.format("%02x", value & 0xff));
+            }
+            return result.toString();
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
     private void updateBalance(Connection connection, UUID playerUuid, long balance) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 UPDATE coint_currency_accounts
@@ -829,6 +1105,7 @@ public final class MysqlCurrencyProvider implements CurrencyProvider {
                         target_uuid CHAR(36) NULL,
                         hold_id CHAR(36) NULL,
                         amount BIGINT NOT NULL,
+                        operation_fingerprint VARCHAR(128) NOT NULL DEFAULT '',
                         actor_uuid CHAR(36) NULL,
                         actor_name VARCHAR(64) NOT NULL DEFAULT '',
                         node_id VARCHAR(64) NOT NULL DEFAULT '',
@@ -848,6 +1125,12 @@ public final class MysqlCurrencyProvider implements CurrencyProvider {
                         INDEX idx_currency_operations_status (status, created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """);
+            ensureColumnExists(
+                    connection,
+                    "coint_currency_operations",
+                    "operation_fingerprint",
+                    "VARCHAR(128) NOT NULL DEFAULT '' AFTER amount"
+            );
             statement.executeUpdate("""
                     CREATE TABLE IF NOT EXISTS coint_currency_holds (
                         hold_id CHAR(36) NOT NULL PRIMARY KEY,
@@ -867,6 +1150,43 @@ public final class MysqlCurrencyProvider implements CurrencyProvider {
                         INDEX idx_currency_holds_expiration (status, expires_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """);
+        }
+    }
+
+    private void ensureColumnExists(
+            Connection connection,
+            String tableName,
+            String columnName,
+            String columnDefinition
+    ) throws SQLException {
+        if (columnExists(connection, tableName, columnName)) {
+            return;
+        }
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    "ALTER TABLE `" + tableName + "` ADD COLUMN `" + columnName + "` " + columnDefinition
+            );
+        } catch (SQLException exception) {
+            if (!columnExists(connection, tableName, columnName)) {
+                throw exception;
+            }
+        }
+    }
+
+    private boolean columnExists(Connection connection, String tableName, String columnName) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT 1
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = ?
+                  AND COLUMN_NAME = ?
+                LIMIT 1
+                """)) {
+            statement.setString(1, tableName);
+            statement.setString(2, columnName);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
         }
     }
 

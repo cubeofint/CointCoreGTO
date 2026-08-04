@@ -54,14 +54,17 @@ public final class CointExchangerRegistry {
     public static final RegistryObject<MenuType<ExchangerMenu>> EXCHANGER_MENU =
             MENUS.register(
                     "exchanger",
-                    () -> IForgeMenuType.create((windowId, inventory, data) ->
-                            new ExchangerMenu(
-                                    windowId,
-                                    inventory,
-                                    data.readBlockPos(),
-                                    data.readBoolean()
-                            )
-                    )
+                    () -> IForgeMenuType.create((windowId, inventory, data) -> {
+                        var pos = data.readBlockPos();
+                        boolean canEdit = data.readBoolean();
+                        boolean canEditTier = data.readBoolean();
+                        int tierCount = Math.max(0, Math.min(64, data.readVarInt()));
+                        java.util.List<String> tiers = new java.util.ArrayList<>(tierCount);
+                        for (int index = 0; index < tierCount; index++) {
+                            tiers.add(data.readUtf(64));
+                        }
+                        return new ExchangerMenu(windowId, inventory, pos, canEdit, canEditTier, tiers);
+                    })
             );
 
     public static void register(IEventBus eventBus) {
