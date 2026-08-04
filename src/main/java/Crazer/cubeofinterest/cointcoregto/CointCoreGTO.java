@@ -5,6 +5,9 @@ import Crazer.cubeofinterest.cointcoregto.compat.radio.CointRadioNetwork;
 import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerClient;
 import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerNetwork;
 import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerRegistry;
+import Crazer.cubeofinterest.cointcoregto.currency.CurrencyCommands;
+import Crazer.cubeofinterest.cointcoregto.currency.CurrencyConfig;
+import Crazer.cubeofinterest.cointcoregto.currency.CurrencyService;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
@@ -500,6 +503,7 @@ public class CointCoreGTO {
 
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC, "cubechat-common.toml");
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, BlockedBlockPlacementConfig.SPEC, BlockedBlockPlacementConfig.FILE_NAME);
+        ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CurrencyConfig.SPEC, CurrencyConfig.FILE_NAME);
         ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, DimensionQuestLockConfig.SPEC, "CointCoreGTO-FTBQuest-Dimension-Locking.toml");
         MinecraftForge.EVENT_BUS.register(this);
     }
@@ -529,6 +533,8 @@ public class CointCoreGTO {
         configData.load();
         CONFIG_SPEC.setConfig(configData);
         BlockedBlockPlacementConfig.reload();
+        CurrencyConfig.reload();
+        CurrencyService.reload();
 
         resetRestartSchedule();
         reloadDiscordBridgeFromConfig();
@@ -647,6 +653,7 @@ public class CointCoreGTO {
         loadWarns();
         loadPunishmentHistory();
         startNetworkChatAndDiscord(CURRENT_SERVER);
+        CurrencyService.start(CURRENT_SERVER);
 
         resetRestartSchedule();
     }
@@ -658,6 +665,7 @@ public class CointCoreGTO {
         saveWarns();
         savePunishmentHistory();
         ClusterNetworkChat.stop();
+        CurrencyService.stop();
         NEXT_RESTART_MILLIS = -1L;
         LAST_RESTART_CHECK_SECOND = -1L;
         RESTARTING_NOW = false;
@@ -740,6 +748,7 @@ public class CointCoreGTO {
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         removeRootCommand(event.getDispatcher(), "me");
+        CurrencyCommands.register(event.getDispatcher());
 
         event.getDispatcher().register(
                 Commands.literal("cointcoregto")
@@ -1765,6 +1774,7 @@ public class CointCoreGTO {
         }
 
         ClusterNetworkChat.tick();
+        CurrencyService.tick(server);
 
         long currentSecond = System.currentTimeMillis() / 1000L;
         if (currentSecond == LAST_RESTART_CHECK_SECOND) {
