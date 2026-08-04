@@ -9,7 +9,10 @@
     "AdAstraLandPacketMixin",
     "FtbEssentialsTeleportPosMixin",
     "ClusterTransferPacketGuardMixin",
-    "ClusterDimensionTickGuardMixin"
+    "ClusterDimensionTickGuardMixin",
+    "BlockedBlockLevelSetMixin",
+    "BlockedBlockPlacementMixin",
+    "Ae2SpatialStorageBlockGuardMixin"
   ],
   "client": [
     "CointCoreGTOChatComponentMixin",

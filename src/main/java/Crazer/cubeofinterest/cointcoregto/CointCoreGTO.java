@@ -499,6 +499,7 @@ public class CointCoreGTO {
         ClusterTestModule.register();
 
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, CONFIG_SPEC, "cubechat-common.toml");
+        ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, BlockedBlockPlacementConfig.SPEC, BlockedBlockPlacementConfig.FILE_NAME);
         ModLoadingContext.get().registerConfig(ModConfig.Type.SERVER, DimensionQuestLockConfig.SPEC, "CointCoreGTO-FTBQuest-Dimension-Locking.toml");
         MinecraftForge.EVENT_BUS.register(this);
     }
@@ -527,6 +528,7 @@ public class CointCoreGTO {
 
         configData.load();
         CONFIG_SPEC.setConfig(configData);
+        BlockedBlockPlacementConfig.reload();
 
         resetRestartSchedule();
         reloadDiscordBridgeFromConfig();
@@ -747,7 +749,7 @@ public class CointCoreGTO {
                                     try {
                                         reloadCointCoreGTOConfig();
                                         ctx.getSource().sendSuccess(
-                                                () -> Component.literal("§aКонфиг CointCoreGTO перезагружен. Расписание рестартов и Discord bridge обновлены."),
+                                                () -> Component.literal("§aКонфиг CointCoreGTO перезагружен. Защита блоков, расписание рестартов и Discord bridge обновлены."),
                                                 false
                                         );
                                         return 1;
