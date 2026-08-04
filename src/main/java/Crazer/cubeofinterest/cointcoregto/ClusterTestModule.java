@@ -1004,6 +1004,7 @@ public final class ClusterTestModule {
         nextFtbQuestSyncAtMillis = now
                 + config.ftbQuestSyncIntervalSeconds() * 1_000L;
         ClusterQuestBookManager.started(server, config);
+        ClusterFtbChunksManager.started(server, config);
         lastAutomaticDimensionRoleAssignmentAtMillis = 0L;
         lastAutomaticDimensionRoleAssignmentSummary = null;
         lastAutomaticOperationRecoveryScanAtMillis = 0L;
@@ -1043,6 +1044,7 @@ public final class ClusterTestModule {
         startAutomaticNodeOperationRecoveryWatchdogIfDue(server, currentConfig);
         startFtbQuestSyncIfDue(server, currentConfig);
         ClusterQuestBookManager.tick(server, currentConfig);
+        ClusterFtbChunksManager.tick(server, currentConfig);
 
         newDimensionProvisionTickCounter++;
         if (newDimensionProvisionTickCounter >= 10) {
@@ -1173,6 +1175,7 @@ public final class ClusterTestModule {
         NEW_DIMENSION_PROVISION_STATUS_IN_FLIGHT.set(false);
         FTB_QUEST_SYNC_IN_FLIGHT.clear();
         ClusterQuestBookManager.stopping();
+        ClusterFtbChunksManager.stopping();
         nextFtbQuestSyncAtMillis = 0L;
         nextAutomaticSnapshotAtMillis = 0L;
         lastAutomaticSnapshotSummary = null;
@@ -1356,6 +1359,43 @@ public final class ClusterTestModule {
                                                                                         )
                                                                                 )
                                                                         )
+                                                        )
+                                        )
+                        )
+
+                        .then(
+                                Commands.literal("chunksync")
+                                        .executes(context ->
+                                                ClusterFtbChunksManager.showStatus(
+                                                        context.getSource(),
+                                                        config
+                                                )
+                                        )
+                                        .then(
+                                                Commands.literal("status")
+                                                        .executes(context ->
+                                                                ClusterFtbChunksManager.showStatus(
+                                                                        context.getSource(),
+                                                                        config
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("now")
+                                                        .executes(context ->
+                                                                ClusterFtbChunksManager.syncNow(
+                                                                        context.getSource(),
+                                                                        config
+                                                                )
+                                                        )
+                                        )
+                                        .then(
+                                                Commands.literal("repair")
+                                                        .executes(context ->
+                                                                ClusterFtbChunksManager.syncNow(
+                                                                        context.getSource(),
+                                                                        config
+                                                                )
                                                         )
                                         )
                         )
@@ -2515,6 +2555,8 @@ public final class ClusterTestModule {
             return;
         }
 
+        ClusterFtbChunksManager.requestSyncSoon();
+
         UUID playerUuid = player.getUUID();
         String loginDimensionId =
                 player.level()
@@ -2692,6 +2734,7 @@ public final class ClusterTestModule {
 
         ClusterTransferGuard.unlock(player.getUUID());
         DIMENSION_ROUTE_SUPPRESSIONS.remove(player.getUUID());
+        ClusterFtbChunksManager.requestSyncSoon();
 
         ClusterConfig currentConfig = config;
 

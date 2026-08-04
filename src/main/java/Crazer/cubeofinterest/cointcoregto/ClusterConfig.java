@@ -55,6 +55,12 @@ public final class ClusterConfig {
     private final int maxFtbQuestBookBytes;
     private final int ftbQuestBookRevisionRetention;
     private final int ftbQuestBookBackupRetention;
+    private final boolean syncFtbChunks;
+    private final int ftbChunksSyncIntervalSeconds;
+    private final boolean ftbChunksForceLoadOwnerOnly;
+    private final String ftbChunksDefaultAuthorityNode;
+    private final int ftbChunksApplyBatchSize;
+    private final int ftbChunksEventRetentionDays;
     private final boolean dimensionTickIsolation;
     private final int dimensionOwnerCacheMaxAgeSeconds;
     private final Path dimensionMigrationStagingPath;
@@ -122,6 +128,12 @@ public final class ClusterConfig {
             int maxFtbQuestBookBytes,
             int ftbQuestBookRevisionRetention,
             int ftbQuestBookBackupRetention,
+            boolean syncFtbChunks,
+            int ftbChunksSyncIntervalSeconds,
+            boolean ftbChunksForceLoadOwnerOnly,
+            String ftbChunksDefaultAuthorityNode,
+            int ftbChunksApplyBatchSize,
+            int ftbChunksEventRetentionDays,
             boolean dimensionTickIsolation,
             int dimensionOwnerCacheMaxAgeSeconds,
             Path dimensionMigrationStagingPath,
@@ -188,6 +200,12 @@ public final class ClusterConfig {
         this.maxFtbQuestBookBytes = maxFtbQuestBookBytes;
         this.ftbQuestBookRevisionRetention = ftbQuestBookRevisionRetention;
         this.ftbQuestBookBackupRetention = ftbQuestBookBackupRetention;
+        this.syncFtbChunks = syncFtbChunks;
+        this.ftbChunksSyncIntervalSeconds = ftbChunksSyncIntervalSeconds;
+        this.ftbChunksForceLoadOwnerOnly = ftbChunksForceLoadOwnerOnly;
+        this.ftbChunksDefaultAuthorityNode = ftbChunksDefaultAuthorityNode;
+        this.ftbChunksApplyBatchSize = ftbChunksApplyBatchSize;
+        this.ftbChunksEventRetentionDays = ftbChunksEventRetentionDays;
         this.dimensionTickIsolation = dimensionTickIsolation;
         this.dimensionOwnerCacheMaxAgeSeconds = dimensionOwnerCacheMaxAgeSeconds;
         this.dimensionMigrationStagingPath = dimensionMigrationStagingPath;
@@ -379,6 +397,46 @@ public final class ClusterConfig {
                         3,
                         1,
                         50
+                ),
+                Boolean.parseBoolean(
+                        properties.getProperty(
+                                "sync_ftb_chunks",
+                                "true"
+                        ).trim()
+                ),
+                rangedInt(
+                        properties,
+                        "ftb_chunks_sync_interval_seconds",
+                        5,
+                        1,
+                        3600
+                ),
+                Boolean.parseBoolean(
+                        properties.getProperty(
+                                "ftb_chunks_force_load_owner_only",
+                                "true"
+                        ).trim()
+                ),
+                nonBlank(
+                        properties.getProperty(
+                                "ftb_chunks_default_authority_node",
+                                "gto1"
+                        ),
+                        "gto1"
+                ),
+                rangedInt(
+                        properties,
+                        "ftb_chunks_apply_batch_size",
+                        128,
+                        1,
+                        10000
+                ),
+                rangedInt(
+                        properties,
+                        "ftb_chunks_event_retention_days",
+                        30,
+                        1,
+                        3650
                 ),
                 Boolean.parseBoolean(
                         properties.getProperty(
@@ -756,6 +814,12 @@ public final class ClusterConfig {
         );
         defaults.setProperty("ftb_quest_book_revision_retention", "20");
         defaults.setProperty("ftb_quest_book_backup_retention", "3");
+        defaults.setProperty("sync_ftb_chunks", "true");
+        defaults.setProperty("ftb_chunks_sync_interval_seconds", "5");
+        defaults.setProperty("ftb_chunks_force_load_owner_only", "true");
+        defaults.setProperty("ftb_chunks_default_authority_node", "gto1");
+        defaults.setProperty("ftb_chunks_apply_batch_size", "128");
+        defaults.setProperty("ftb_chunks_event_retention_days", "30");
         defaults.setProperty(
                 "dimension_tick_isolation",
                 "false"
@@ -955,6 +1019,30 @@ public final class ClusterConfig {
 
     public int ftbQuestBookBackupRetention() {
         return ftbQuestBookBackupRetention;
+    }
+
+    public boolean syncFtbChunks() {
+        return syncFtbChunks;
+    }
+
+    public int ftbChunksSyncIntervalSeconds() {
+        return ftbChunksSyncIntervalSeconds;
+    }
+
+    public boolean ftbChunksForceLoadOwnerOnly() {
+        return ftbChunksForceLoadOwnerOnly;
+    }
+
+    public String ftbChunksDefaultAuthorityNode() {
+        return ftbChunksDefaultAuthorityNode;
+    }
+
+    public int ftbChunksApplyBatchSize() {
+        return ftbChunksApplyBatchSize;
+    }
+
+    public int ftbChunksEventRetentionDays() {
+        return ftbChunksEventRetentionDays;
     }
 
     public boolean dimensionTickIsolation() {

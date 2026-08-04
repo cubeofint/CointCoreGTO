@@ -7573,6 +7573,599 @@ public final class ClusterDatabase {
         }
     }
 
+    public static FtbChunkClusterSnapshot loadFtbChunkClusterSnapshot(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            List<ClusterFtbChunksCodec.ClaimState> claims = new ArrayList<>();
+            String claimSql = """
+                    SELECT
+                        dimension_id,
+                        chunk_x,
+                        chunk_z,
+                        team_uuid,
+                        team_scope,
+                        team_name,
+                        claimed,
+                        force_loaded
+                    FROM cluster_ftb_chunk_state
+                    WHERE claimed = 1
+                    ORDER BY dimension_id, chunk_x, chunk_z
+                    """;
+            try (PreparedStatement statement = connection.prepareStatement(claimSql);
+                 ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    claims.add(readFtbChunkClaim(resultSet));
+                }
+            }
+
+            Set<String> initializedDimensions = new LinkedHashSet<>();
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT dimension_id
+                    FROM cluster_ftb_chunk_dimensions
+                    ORDER BY dimension_id
+                    """);
+                 ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    initializedDimensions.add(
+                            resultSet.getString("dimension_id")
+                                    .toLowerCase(Locale.ROOT)
+                    );
+                }
+            }
+
+            long latestRevisionId = 0L;
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT COALESCE(MAX(revision_id), 0) AS latest_revision
+                    FROM cluster_ftb_chunk_events
+                    """);
+                 ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    latestRevisionId = resultSet.getLong("latest_revision");
+                }
+            }
+
+            return new FtbChunkClusterSnapshot(
+                    List.copyOf(claims),
+                    Set.copyOf(initializedDimensions),
+                    latestRevisionId
+            );
+        }
+    }
+
+    public static FtbChunkPublishResult publishFtbChunkSnapshot(
+            ClusterConfig config,
+            Collection<ClusterFtbChunksCodec.ClaimState> localClaims,
+            Collection<String> authoritativeDimensions,
+            Map<String, String> dimensionOwners
+    ) throws SQLException {
+        ensureSchema(config);
+
+        Set<String> dimensions = new LinkedHashSet<>();
+        if (authoritativeDimensions != null) {
+            for (String dimensionId : authoritativeDimensions) {
+                if (dimensionId != null && !dimensionId.isBlank()) {
+                    dimensions.add(dimensionId.trim().toLowerCase(Locale.ROOT));
+                }
+            }
+        }
+        if (dimensions.isEmpty()) {
+            return new FtbChunkPublishResult(0L, 0);
+        }
+
+        Map<ClusterFtbChunksCodec.ChunkKey, ClusterFtbChunksCodec.ClaimState> localByKey =
+                new LinkedHashMap<>();
+        if (localClaims != null) {
+            for (ClusterFtbChunksCodec.ClaimState claim : localClaims) {
+                if (claim != null
+                        && claim.claimed()
+                        && dimensions.contains(claim.dimensionId())) {
+                    localByKey.put(claim.key(), claim);
+                }
+            }
+        }
+
+        try (Connection connection = open(config)) {
+            acquireFtbChunkPublishLock(connection);
+            connection.setAutoCommit(false);
+            try {
+                lockFtbChunkTables(connection);
+                Map<ClusterFtbChunksCodec.ChunkKey, FtbChunkStateRow> existing =
+                        loadFtbChunkStateRows(connection);
+
+                for (String dimensionId : dimensions) {
+                    String owner = normalizedOwner(
+                            dimensionOwners == null ? null : dimensionOwners.get(dimensionId),
+                            config.nodeId()
+                    );
+                    upsertFtbChunkDimension(connection, dimensionId, owner, null);
+                }
+
+                int changedRows = 0;
+                long latestRevisionId = latestFtbChunkRevision(connection);
+
+                for (ClusterFtbChunksCodec.ClaimState local : localByKey.values()) {
+                    FtbChunkStateRow previous = existing.get(local.key());
+                    String owner = normalizedOwner(
+                            dimensionOwners == null
+                                    ? null
+                                    : dimensionOwners.get(local.dimensionId()),
+                            config.nodeId()
+                    );
+                    String eventKind = ftbChunkEventKind(previous, local, owner);
+                    if (eventKind == null) {
+                        continue;
+                    }
+
+                    latestRevisionId = insertFtbChunkEvent(
+                            connection,
+                            local,
+                            owner,
+                            config.nodeId(),
+                            eventKind
+                    );
+                    upsertFtbChunkState(
+                            connection,
+                            local,
+                            owner,
+                            config.nodeId(),
+                            latestRevisionId
+                    );
+                    changedRows++;
+                }
+
+                for (FtbChunkStateRow previous : existing.values()) {
+                    if (!previous.claimed()
+                            || !dimensions.contains(previous.claim().dimensionId())
+                            || localByKey.containsKey(previous.claim().key())) {
+                        continue;
+                    }
+
+                    String owner = normalizedOwner(
+                            dimensionOwners == null
+                                    ? null
+                                    : dimensionOwners.get(previous.claim().dimensionId()),
+                            config.nodeId()
+                    );
+                    ClusterFtbChunksCodec.ClaimState removed =
+                            new ClusterFtbChunksCodec.ClaimState(
+                                    previous.claim().dimensionId(),
+                                    previous.claim().chunkX(),
+                                    previous.claim().chunkZ(),
+                                    previous.claim().teamUuid(),
+                                    previous.claim().teamScope(),
+                                    previous.claim().teamName(),
+                                    false,
+                                    false
+                            );
+                    latestRevisionId = insertFtbChunkEvent(
+                            connection,
+                            removed,
+                            owner,
+                            config.nodeId(),
+                            "UNCLAIM"
+                    );
+                    upsertFtbChunkState(
+                            connection,
+                            removed,
+                            owner,
+                            config.nodeId(),
+                            latestRevisionId
+                    );
+                    changedRows++;
+                }
+
+                for (String dimensionId : dimensions) {
+                    String owner = normalizedOwner(
+                            dimensionOwners == null ? null : dimensionOwners.get(dimensionId),
+                            config.nodeId()
+                    );
+                    upsertFtbChunkDimension(
+                            connection,
+                            dimensionId,
+                            owner,
+                            latestRevisionId > 0L ? latestRevisionId : null
+                    );
+                }
+
+                connection.commit();
+                return new FtbChunkPublishResult(latestRevisionId, changedRows);
+            } catch (SQLException | RuntimeException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+                releaseFtbChunkPublishLock(connection);
+            }
+        }
+    }
+
+    public static void updateFtbChunkNodeState(
+            ClusterConfig config,
+            Long appliedRevisionId,
+            int localClaimCount,
+            int localForceLoadedCount,
+            String status,
+            String errorText
+    ) throws SQLException {
+        ensureSchema(config);
+        String sql = """
+                INSERT INTO cluster_ftb_chunk_node_state (
+                    node_id,
+                    applied_revision_id,
+                    local_claim_count,
+                    local_force_loaded_count,
+                    status,
+                    error_text,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
+                ON DUPLICATE KEY UPDATE
+                    applied_revision_id = VALUES(applied_revision_id),
+                    local_claim_count = VALUES(local_claim_count),
+                    local_force_loaded_count = VALUES(local_force_loaded_count),
+                    status = VALUES(status),
+                    error_text = VALUES(error_text),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                """;
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, config.nodeId());
+            if (appliedRevisionId == null) {
+                statement.setNull(2, Types.BIGINT);
+            } else {
+                statement.setLong(2, appliedRevisionId);
+            }
+            statement.setInt(3, Math.max(0, localClaimCount));
+            statement.setInt(4, Math.max(0, localForceLoadedCount));
+            statement.setString(5, truncate(status == null ? "UNKNOWN" : status, 24));
+            statement.setString(6, truncate(errorText, 8192));
+            statement.executeUpdate();
+        }
+    }
+
+    public static List<FtbChunkNodeState> listFtbChunkNodeStates(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        List<FtbChunkNodeState> result = new ArrayList<>();
+        String sql = """
+                SELECT
+                    node_id,
+                    applied_revision_id,
+                    local_claim_count,
+                    local_force_loaded_count,
+                    status,
+                    error_text,
+                    updated_at
+                FROM cluster_ftb_chunk_node_state
+                ORDER BY node_id
+                """;
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            while (resultSet.next()) {
+                long revisionValue = resultSet.getLong("applied_revision_id");
+                Long revisionId = resultSet.wasNull() ? null : revisionValue;
+                result.add(new FtbChunkNodeState(
+                        resultSet.getString("node_id"),
+                        revisionId,
+                        resultSet.getInt("local_claim_count"),
+                        resultSet.getInt("local_force_loaded_count"),
+                        resultSet.getString("status"),
+                        resultSet.getString("error_text"),
+                        instantOrNull(resultSet, "updated_at")
+                ));
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    public static void cleanupFtbChunkHistory(
+            ClusterConfig config,
+            int retentionDays
+    ) throws SQLException {
+        ensureSchema(config);
+        int days = Math.max(1, retentionDays);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        DELETE FROM cluster_ftb_chunk_events
+                        WHERE created_at < TIMESTAMPADD(DAY, -?, CURRENT_TIMESTAMP(3))
+                        """)) {
+                    statement.setInt(1, days);
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        DELETE FROM cluster_ftb_chunk_state
+                        WHERE claimed = 0
+                          AND updated_at < TIMESTAMPADD(DAY, -?, CURRENT_TIMESTAMP(3))
+                        """)) {
+                    statement.setInt(1, days);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    private static void acquireFtbChunkPublishLock(
+            Connection connection
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT GET_LOCK('cointcoregto_ftb_chunks_publish', 15)"
+        ); ResultSet resultSet = statement.executeQuery()) {
+            if (!resultSet.next() || resultSet.getInt(1) != 1) {
+                throw new SQLException("Unable to acquire FTB Chunks publish lock");
+            }
+        }
+    }
+
+    private static void releaseFtbChunkPublishLock(
+            Connection connection
+    ) {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT RELEASE_LOCK('cointcoregto_ftb_chunks_publish')"
+        )) {
+            statement.executeQuery().close();
+        } catch (SQLException ignored) {
+        }
+    }
+
+    private static void lockFtbChunkTables(
+            Connection connection
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT dimension_id
+                FROM cluster_ftb_chunk_dimensions
+                FOR UPDATE
+                """)) {
+            statement.executeQuery().close();
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT dimension_id, chunk_x, chunk_z
+                FROM cluster_ftb_chunk_state
+                FOR UPDATE
+                """)) {
+            statement.executeQuery().close();
+        }
+    }
+
+    private static Map<ClusterFtbChunksCodec.ChunkKey, FtbChunkStateRow>
+    loadFtbChunkStateRows(
+            Connection connection
+    ) throws SQLException {
+        Map<ClusterFtbChunksCodec.ChunkKey, FtbChunkStateRow> result =
+                new LinkedHashMap<>();
+        String sql = """
+                SELECT
+                    dimension_id,
+                    chunk_x,
+                    chunk_z,
+                    team_uuid,
+                    team_scope,
+                    team_name,
+                    claimed,
+                    force_loaded,
+                    owner_node,
+                    source_node,
+                    revision_id,
+                    updated_at
+                FROM cluster_ftb_chunk_state
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            while (resultSet.next()) {
+                ClusterFtbChunksCodec.ClaimState claim = readFtbChunkClaim(resultSet);
+                result.put(
+                        claim.key(),
+                        new FtbChunkStateRow(
+                                claim,
+                                resultSet.getBoolean("claimed"),
+                                resultSet.getString("owner_node"),
+                                resultSet.getString("source_node"),
+                                resultSet.getLong("revision_id"),
+                                instantOrNull(resultSet, "updated_at")
+                        )
+                );
+            }
+        }
+        return result;
+    }
+
+    private static ClusterFtbChunksCodec.ClaimState readFtbChunkClaim(
+            ResultSet resultSet
+    ) throws SQLException {
+        return new ClusterFtbChunksCodec.ClaimState(
+                resultSet.getString("dimension_id"),
+                resultSet.getInt("chunk_x"),
+                resultSet.getInt("chunk_z"),
+                UUID.fromString(resultSet.getString("team_uuid")),
+                resultSet.getString("team_scope"),
+                resultSet.getString("team_name"),
+                resultSet.getBoolean("claimed"),
+                resultSet.getBoolean("force_loaded")
+        );
+    }
+
+    private static String ftbChunkEventKind(
+            FtbChunkStateRow previous,
+            ClusterFtbChunksCodec.ClaimState current,
+            String owner
+    ) {
+        if (previous == null || !previous.claimed()) {
+            return "CLAIM";
+        }
+        if (!previous.claim().teamUuid().equals(current.teamUuid())
+                || !previous.claim().teamScope().equals(current.teamScope())) {
+            return "REASSIGN";
+        }
+        if (previous.claim().forceLoaded() != current.forceLoaded()) {
+            return current.forceLoaded() ? "FORCE" : "UNFORCE";
+        }
+        if (!previous.ownerNode().equalsIgnoreCase(owner)) {
+            return "OWNER";
+        }
+        if (!previous.claim().teamName().equals(current.teamName())) {
+            return "METADATA";
+        }
+        return null;
+    }
+
+    private static long insertFtbChunkEvent(
+            Connection connection,
+            ClusterFtbChunksCodec.ClaimState claim,
+            String ownerNode,
+            String sourceNode,
+            String eventKind
+    ) throws SQLException {
+        String sql = """
+                INSERT INTO cluster_ftb_chunk_events (
+                    dimension_id,
+                    chunk_x,
+                    chunk_z,
+                    team_uuid,
+                    team_scope,
+                    team_name,
+                    claimed,
+                    force_loaded,
+                    owner_node,
+                    source_node,
+                    event_kind,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(
+                sql,
+                Statement.RETURN_GENERATED_KEYS
+        )) {
+            bindFtbChunkClaim(statement, claim, ownerNode, sourceNode);
+            statement.setString(11, truncate(eventKind, 16));
+            statement.executeUpdate();
+            try (ResultSet keys = statement.getGeneratedKeys()) {
+                if (!keys.next()) {
+                    throw new SQLException("FTB Chunks event did not return revision id");
+                }
+                return keys.getLong(1);
+            }
+        }
+    }
+
+    private static void upsertFtbChunkState(
+            Connection connection,
+            ClusterFtbChunksCodec.ClaimState claim,
+            String ownerNode,
+            String sourceNode,
+            long revisionId
+    ) throws SQLException {
+        String sql = """
+                INSERT INTO cluster_ftb_chunk_state (
+                    dimension_id,
+                    chunk_x,
+                    chunk_z,
+                    team_uuid,
+                    team_scope,
+                    team_name,
+                    claimed,
+                    force_loaded,
+                    owner_node,
+                    source_node,
+                    revision_id,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
+                ON DUPLICATE KEY UPDATE
+                    team_uuid = VALUES(team_uuid),
+                    team_scope = VALUES(team_scope),
+                    team_name = VALUES(team_name),
+                    claimed = VALUES(claimed),
+                    force_loaded = VALUES(force_loaded),
+                    owner_node = VALUES(owner_node),
+                    source_node = VALUES(source_node),
+                    revision_id = VALUES(revision_id),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            bindFtbChunkClaim(statement, claim, ownerNode, sourceNode);
+            statement.setLong(11, revisionId);
+            statement.executeUpdate();
+        }
+    }
+
+    private static void bindFtbChunkClaim(
+            PreparedStatement statement,
+            ClusterFtbChunksCodec.ClaimState claim,
+            String ownerNode,
+            String sourceNode
+    ) throws SQLException {
+        statement.setString(1, claim.dimensionId());
+        statement.setInt(2, claim.chunkX());
+        statement.setInt(3, claim.chunkZ());
+        statement.setString(4, claim.teamUuid().toString());
+        statement.setString(5, truncate(claim.teamScope(), 16));
+        statement.setString(6, truncate(claim.teamName(), 255));
+        statement.setBoolean(7, claim.claimed());
+        statement.setBoolean(8, claim.forceLoaded());
+        statement.setString(9, truncate(ownerNode, 64));
+        statement.setString(10, truncate(sourceNode, 64));
+    }
+
+    private static void upsertFtbChunkDimension(
+            Connection connection,
+            String dimensionId,
+            String ownerNode,
+            Long revisionId
+    ) throws SQLException {
+        String sql = """
+                INSERT INTO cluster_ftb_chunk_dimensions (
+                    dimension_id,
+                    owner_node,
+                    last_revision_id,
+                    initialized_at,
+                    updated_at
+                ) VALUES (?, ?, ?, CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
+                ON DUPLICATE KEY UPDATE
+                    owner_node = VALUES(owner_node),
+                    last_revision_id = COALESCE(VALUES(last_revision_id), last_revision_id),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                """;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, dimensionId);
+            statement.setString(2, truncate(ownerNode, 64));
+            if (revisionId == null) {
+                statement.setNull(3, Types.BIGINT);
+            } else {
+                statement.setLong(3, revisionId);
+            }
+            statement.executeUpdate();
+        }
+    }
+
+    private static long latestFtbChunkRevision(
+            Connection connection
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT COALESCE(MAX(revision_id), 0) AS latest_revision
+                FROM cluster_ftb_chunk_events
+                """);
+             ResultSet resultSet = statement.executeQuery()) {
+            return resultSet.next() ? resultSet.getLong("latest_revision") : 0L;
+        }
+    }
+
+    private static String normalizedOwner(
+            String owner,
+            String fallback
+    ) {
+        String value = owner == null ? "" : owner.trim();
+        return value.isEmpty() ? fallback : value;
+    }
+
     public static PendingTransfer claimPendingTransfer(
             ClusterConfig config,
             UUID playerUuid
@@ -10246,6 +10839,96 @@ public final class ClusterDatabase {
                 DEFAULT CHARSET=utf8mb4
                 """);
 
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_ftb_chunk_dimensions (
+                    dimension_id VARCHAR(255) NOT NULL PRIMARY KEY,
+                    owner_node VARCHAR(64) NOT NULL,
+                    last_revision_id BIGINT NULL,
+                    initialized_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+                    INDEX idx_cluster_ftb_chunk_dimension_owner (owner_node),
+                    INDEX idx_cluster_ftb_chunk_dimension_revision (last_revision_id)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_ftb_chunk_events (
+                    revision_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    dimension_id VARCHAR(255) NOT NULL,
+                    chunk_x INT NOT NULL,
+                    chunk_z INT NOT NULL,
+                    team_uuid CHAR(36) NOT NULL,
+                    team_scope VARCHAR(16) NOT NULL,
+                    team_name VARCHAR(255) NOT NULL DEFAULT '',
+                    claimed TINYINT(1) NOT NULL,
+                    force_loaded TINYINT(1) NOT NULL,
+                    owner_node VARCHAR(64) NOT NULL,
+                    source_node VARCHAR(64) NOT NULL,
+                    event_kind VARCHAR(16) NOT NULL,
+                    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+                    INDEX idx_cluster_ftb_chunk_event_position (
+                        dimension_id,
+                        chunk_x,
+                        chunk_z,
+                        revision_id
+                    ),
+                    INDEX idx_cluster_ftb_chunk_event_team (
+                        team_uuid,
+                        revision_id
+                    ),
+                    INDEX idx_cluster_ftb_chunk_event_created (created_at)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_ftb_chunk_state (
+                    dimension_id VARCHAR(255) NOT NULL,
+                    chunk_x INT NOT NULL,
+                    chunk_z INT NOT NULL,
+                    team_uuid CHAR(36) NOT NULL,
+                    team_scope VARCHAR(16) NOT NULL,
+                    team_name VARCHAR(255) NOT NULL DEFAULT '',
+                    claimed TINYINT(1) NOT NULL,
+                    force_loaded TINYINT(1) NOT NULL,
+                    owner_node VARCHAR(64) NOT NULL,
+                    source_node VARCHAR(64) NOT NULL,
+                    revision_id BIGINT NOT NULL,
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+                    PRIMARY KEY (dimension_id, chunk_x, chunk_z),
+                    INDEX idx_cluster_ftb_chunk_state_team (team_uuid, claimed),
+                    INDEX idx_cluster_ftb_chunk_state_owner (owner_node, claimed),
+                    INDEX idx_cluster_ftb_chunk_state_revision (revision_id),
+                    INDEX idx_cluster_ftb_chunk_state_updated (updated_at)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
+            statement.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS cluster_ftb_chunk_node_state (
+                    node_id VARCHAR(64) NOT NULL PRIMARY KEY,
+                    applied_revision_id BIGINT NULL,
+                    local_claim_count INT NOT NULL DEFAULT 0,
+                    local_force_loaded_count INT NOT NULL DEFAULT 0,
+                    status VARCHAR(24) NOT NULL,
+                    error_text TEXT NULL,
+                    updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+                    INDEX idx_cluster_ftb_chunk_node_status (status, updated_at),
+                    INDEX idx_cluster_ftb_chunk_node_revision (applied_revision_id)
+                )
+                ENGINE=InnoDB
+                DEFAULT CHARSET=utf8mb4
+                """);
+
             statement.executeUpdate("""
                 CREATE TABLE IF NOT EXISTS pending_transfers (
                     transfer_id CHAR(36) NOT NULL PRIMARY KEY,
@@ -12273,6 +12956,50 @@ public final class ClusterDatabase {
             String localSha256,
             String status,
             String errorText,
+            Instant updatedAt
+    ) {
+    }
+
+    public record FtbChunkClusterSnapshot(
+            List<ClusterFtbChunksCodec.ClaimState> claims,
+            Set<String> initializedDimensions,
+            long latestRevisionId
+    ) {
+        public FtbChunkClusterSnapshot {
+            claims = List.copyOf(claims);
+            initializedDimensions = Set.copyOf(initializedDimensions);
+        }
+
+        public long forceLoadedCount() {
+            return claims.stream()
+                    .filter(ClusterFtbChunksCodec.ClaimState::forceLoaded)
+                    .count();
+        }
+    }
+
+    public record FtbChunkPublishResult(
+            long latestRevisionId,
+            int changedRows
+    ) {
+    }
+
+    public record FtbChunkNodeState(
+            String nodeId,
+            Long appliedRevisionId,
+            int localClaimCount,
+            int localForceLoadedCount,
+            String status,
+            String errorText,
+            Instant updatedAt
+    ) {
+    }
+
+    private record FtbChunkStateRow(
+            ClusterFtbChunksCodec.ClaimState claim,
+            boolean claimed,
+            String ownerNode,
+            String sourceNode,
+            long revisionId,
             Instant updatedAt
     ) {
     }
