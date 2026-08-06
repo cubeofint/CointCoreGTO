@@ -82,14 +82,14 @@ public class ExchangerMenu extends AbstractContainerMenu {
         addSlot(new TemplateSlot(
                 exchanger.getItems(),
                 ExchangerBlockEntity.SLOT_PRODUCT,
-                48,
-                44
+                56,
+                48
         ));
         addSlot(new TemplateSlot(
                 exchanger.getItems(),
                 ExchangerBlockEntity.SLOT_PRICE,
-                136,
-                44
+                164,
+                48
         ));
 
         addPlayerInventory(playerInventory);
@@ -355,8 +355,8 @@ public class ExchangerMenu extends AbstractContainerMenu {
                 addSlot(new Slot(
                         playerInventory,
                         column + row * 9 + 9,
-                        19 + column * 18,
-                        131 + row * 18
+                        37 + column * 18,
+                        159 + row * 18
                 ));
             }
         }
@@ -367,8 +367,8 @@ public class ExchangerMenu extends AbstractContainerMenu {
             addSlot(new Slot(
                     playerInventory,
                     column,
-                    19 + column * 18,
-                    187
+                    37 + column * 18,
+                    217
             ));
         }
     }

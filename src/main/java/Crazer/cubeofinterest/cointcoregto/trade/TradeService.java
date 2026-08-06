@@ -12,6 +12,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.SimpleMenuProvider;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
@@ -20,7 +21,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.nio.charset.StandardCharsets;
-import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -50,7 +50,7 @@ public final class TradeService {
 
     private static volatile MinecraftServer server;
     private static volatile ClusterConfig clusterConfig;
-    private static volatile TradeDatabase database;
+    private static volatile TradeStorage database;
     private static volatile String nodeId = "unknown";
     private static volatile String lastError = "";
     private static int tickCounter;
@@ -63,14 +63,23 @@ public final class TradeService {
         server = minecraftServer;
         try {
             clusterConfig = ClusterConfig.load();
-            nodeId = clusterConfig.nodeId();
-            database = new TradeDatabase(clusterConfig);
+            if (clusterConfig.enabled()) {
+                nodeId = clusterConfig.nodeId();
+                database = new TradeDatabase(clusterConfig);
+            } else {
+                nodeId = "local";
+                database = new LocalTradeStorage(
+                        minecraftServer.getWorldPath(LevelResource.ROOT)
+                                .resolve("data")
+                                .resolve("cointcoregto-local-trades.json")
+                );
+            }
             database.initialize();
             for (ServerPlayer player : minecraftServer.getPlayerList().getPlayers()) {
                 heartbeat(player, true);
             }
             lastError = "";
-            LOGGER.info("Cross-node trade service started on node {}", nodeId);
+            LOGGER.info("Trade service started on node {} using {} storage", nodeId, database.mode());
         } catch (Exception exception) {
             lastError = message(exception);
             database = null;
@@ -79,7 +88,7 @@ public final class TradeService {
     }
 
     public static synchronized void stop() {
-        TradeDatabase current = database;
+        TradeStorage current = database;
         MinecraftServer currentServer = server;
         if (current != null && currentServer != null) {
             for (ServerPlayer player : currentServer.getPlayerList().getPlayers()) {
@@ -109,6 +118,11 @@ public final class TradeService {
 
     public static String nodeId() {
         return nodeId;
+    }
+
+    public static String mode() {
+        TradeStorage current = database;
+        return current == null ? "unavailable" : current.mode();
     }
 
     public static void onJoin(ServerPlayer player) {
@@ -192,15 +206,15 @@ public final class TradeService {
         }
         try {
             heartbeat(initiator, true);
-            Optional<TradeDatabase.PlayerPresence> targetOptional = database.findOnlinePlayer(targetName);
+            Optional<TradeStorage.PlayerPresence> targetOptional = database.findOnlinePlayer(targetName);
             if (targetOptional.isEmpty()) {
-                return OperationResult.failure("Игрок не найден в сети кластера");
+                return OperationResult.failure("Игрок не найден в сети");
             }
-            TradeDatabase.PlayerPresence target = targetOptional.get();
+            TradeStorage.PlayerPresence target = targetOptional.get();
             if (target.uuid().equals(initiator.getUUID())) {
                 return OperationResult.failure("Нельзя обмениваться с самим собой");
             }
-            TradeDatabase.PlayerPresence source = new TradeDatabase.PlayerPresence(
+            TradeStorage.PlayerPresence source = new TradeStorage.PlayerPresence(
                     initiator.getUUID(), initiator.getGameProfile().getName(), nodeId,
                     ExchangerProgression.playerTier(initiator)
             );
@@ -299,7 +313,11 @@ public final class TradeService {
                 return OperationResult.failure("Игрок не участвует в этой сделке");
             }
             List<ItemStack> offer = mutableOffer(trade.offer(side));
-            offer.set(slot, sanitize(stack));
+            ItemStack sanitized = sanitize(stack);
+            if (sameStack(offer.get(slot), sanitized)) {
+                return OperationResult.success("Предложение не изменилось", tradeId);
+            }
+            offer.set(slot, sanitized);
             if (!database.updateOffer(tradeId, side, offer, trade.currency(side))) {
                 return OperationResult.failure("Не удалось обновить предложение");
             }
@@ -324,6 +342,9 @@ public final class TradeService {
             TradeSide side = trade.sideOf(player.getUUID());
             if (side == null) {
                 return OperationResult.failure("Игрок не участвует в сделке");
+            }
+            if (trade.currency(side) == amount) {
+                return OperationResult.success("Сумма не изменилась", tradeId);
             }
             if (!database.updateOffer(tradeId, side, trade.offer(side), amount)) {
                 return OperationResult.failure("Не удалось обновить сумму");
@@ -380,7 +401,7 @@ public final class TradeService {
             return Optional.empty();
         }
         try {
-            return database.findPlayerByName(name).map(TradeDatabase.PlayerPresence::uuid);
+            return database.findPlayerByName(name).map(TradeStorage.PlayerPresence::uuid);
         } catch (Exception exception) {
             return Optional.empty();
         }
@@ -601,7 +622,7 @@ public final class TradeService {
         clearRecoveryMarker(player, trade.tradeId());
     }
 
-    private static String validateTrade(TradeRecord trade) throws SQLException {
+    private static String validateTrade(TradeRecord trade) throws Exception {
         if (trade.initiatorUuid().equals(trade.targetUuid())) {
             return "Нельзя обмениваться с самим собой";
         }
@@ -609,8 +630,8 @@ public final class TradeService {
                 && trade.initiatorCurrency() == 0L && trade.targetCurrency() == 0L) {
             return "Нельзя подтвердить пустую сделку";
         }
-        TradeDatabase.PlayerPresence initiator = database.findPlayer(trade.initiatorUuid()).orElse(null);
-        TradeDatabase.PlayerPresence target = database.findPlayer(trade.targetUuid()).orElse(null);
+        TradeStorage.PlayerPresence initiator = database.findPlayer(trade.initiatorUuid()).orElse(null);
+        TradeStorage.PlayerPresence target = database.findPlayer(trade.targetUuid()).orElse(null);
         if (initiator == null || target == null) {
             return "Не удалось определить прогресс игроков";
         }
@@ -744,6 +765,17 @@ public final class TradeService {
             result.add(index < current.size() ? current.get(index).copy() : ItemStack.EMPTY);
         }
         return result;
+    }
+
+    private static boolean sameStack(ItemStack first, ItemStack second) {
+        if (first == null || first.isEmpty()) {
+            return second == null || second.isEmpty();
+        }
+        if (second == null || second.isEmpty()) {
+            return false;
+        }
+        return first.getCount() == second.getCount()
+                && ItemStack.isSameItemSameTags(first, second);
     }
 
     private static ItemStack sanitize(ItemStack stack) {

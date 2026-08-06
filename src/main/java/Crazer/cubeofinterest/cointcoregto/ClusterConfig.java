@@ -248,8 +248,8 @@ public final class ClusterConfig {
                 Boolean.parseBoolean(properties.getProperty("enabled", "false").trim()),
                 nodeId(properties),
                 redirectAddress(properties),
-                required(properties, "jdbc_url"),
-                required(properties, "username"),
+                databaseProperty(properties, "jdbc_url"),
+                databaseProperty(properties, "username"),
                 properties.getProperty("password", ""),
                 positiveInt(properties, "heartbeat_interval_ticks", 100),
                 positiveInt(properties, "node_timeout_seconds", 15),
@@ -584,6 +584,14 @@ public final class ClusterConfig {
             throw new IOException("Cluster config property is empty: " + key);
         }
         return value;
+    }
+
+    private static String databaseProperty(Properties properties, String key) throws IOException {
+        boolean enabled = Boolean.parseBoolean(properties.getProperty("enabled", "false").trim());
+        if (enabled) {
+            return required(properties, key);
+        }
+        return properties.getProperty(key, "").trim();
     }
 
     private static String nodeId(

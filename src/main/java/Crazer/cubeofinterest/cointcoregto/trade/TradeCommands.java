@@ -65,7 +65,7 @@ public final class TradeCommands {
                                 .executes(context -> {
                                     context.getSource().sendSuccess(
                                             () -> Component.literal(TradeService.available()
-                                                    ? "§aTrade service active on node " + TradeService.nodeId()
+                                                    ? "§aTrade service active on node " + TradeService.nodeId() + " (" + TradeService.mode() + ")"
                                                     : "§cTrade service unavailable: " + TradeService.lastError()),
                                             false
                                     );

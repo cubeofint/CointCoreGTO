@@ -17,7 +17,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 
-final class TradeDatabase {
+final class TradeDatabase extends TradeStorage {
     private static final String SHADED_DRIVER = "crazer.cubeofinterest.cointcoregto.shadow.mysql.cj.jdbc.Driver";
     private static final String DEV_DRIVER = "com.mysql.cj.jdbc.Driver";
     private static volatile boolean driverLoaded;
@@ -124,7 +124,7 @@ final class TradeDatabase {
         }
     }
 
-    Optional<PlayerPresence> findOnlinePlayer(String name) throws SQLException {
+    Optional<TradeStorage.PlayerPresence> findOnlinePlayer(String name) throws SQLException {
         try (Connection connection = open(); PreparedStatement statement = connection.prepareStatement("""
                 SELECT player_uuid, player_name, node_id, tier_index
                 FROM cluster_trade_players
@@ -139,7 +139,7 @@ final class TradeDatabase {
                 if (!resultSet.next()) {
                     return Optional.empty();
                 }
-                return Optional.of(new PlayerPresence(
+                return Optional.of(new TradeStorage.PlayerPresence(
                         UUID.fromString(resultSet.getString("player_uuid")),
                         resultSet.getString("player_name"),
                         resultSet.getString("node_id"),
@@ -149,7 +149,7 @@ final class TradeDatabase {
         }
     }
 
-    Optional<PlayerPresence> findPlayerByName(String name) throws SQLException {
+    Optional<TradeStorage.PlayerPresence> findPlayerByName(String name) throws SQLException {
         try (Connection connection = open(); PreparedStatement statement = connection.prepareStatement("""
                 SELECT player_uuid, player_name, node_id, tier_index
                 FROM cluster_trade_players
@@ -161,7 +161,7 @@ final class TradeDatabase {
                 if (!resultSet.next()) {
                     return Optional.empty();
                 }
-                return Optional.of(new PlayerPresence(
+                return Optional.of(new TradeStorage.PlayerPresence(
                         UUID.fromString(resultSet.getString("player_uuid")),
                         resultSet.getString("player_name"),
                         resultSet.getString("node_id"),
@@ -171,7 +171,7 @@ final class TradeDatabase {
         }
     }
 
-    Optional<PlayerPresence> findPlayer(UUID uuid) throws SQLException {
+    Optional<TradeStorage.PlayerPresence> findPlayer(UUID uuid) throws SQLException {
         try (Connection connection = open(); PreparedStatement statement = connection.prepareStatement("""
                 SELECT player_uuid, player_name, node_id, tier_index
                 FROM cluster_trade_players WHERE player_uuid = ? LIMIT 1
@@ -181,7 +181,7 @@ final class TradeDatabase {
                 if (!resultSet.next()) {
                     return Optional.empty();
                 }
-                return Optional.of(new PlayerPresence(
+                return Optional.of(new TradeStorage.PlayerPresence(
                         UUID.fromString(resultSet.getString("player_uuid")),
                         resultSet.getString("player_name"),
                         resultSet.getString("node_id"),
@@ -191,7 +191,7 @@ final class TradeDatabase {
         }
     }
 
-    UUID createInvite(PlayerPresence initiator, PlayerPresence target, int ttlSeconds) throws SQLException {
+    UUID createInvite(TradeStorage.PlayerPresence initiator, TradeStorage.PlayerPresence target, int ttlSeconds) throws SQLException {
         try (Connection connection = open()) {
             connection.setAutoCommit(false);
             try {
@@ -571,6 +571,9 @@ final class TradeDatabase {
         return value.length() <= maximum ? value : value.substring(0, maximum);
     }
 
-    record PlayerPresence(UUID uuid, String name, String nodeId, int tierIndex) {
+    @Override
+    String mode() {
+        return "mysql";
     }
+
 }

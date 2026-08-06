@@ -81,7 +81,11 @@ public final class TradeScreen extends AbstractContainerScreen<TradeMenu> {
             currencyBox.setValue(Long.toString(menu.localCurrency()));
             return;
         }
-        TradeNetwork.CHANNEL.sendToServer(new TradeSetCurrencyPacket(menu.tradeId(), Math.max(0L, amount)));
+        amount = Math.max(0L, amount);
+        if (amount == menu.localCurrency()) {
+            return;
+        }
+        TradeNetwork.CHANNEL.sendToServer(new TradeSetCurrencyPacket(menu.tradeId(), amount));
     }
 
     private void toggleReady() {

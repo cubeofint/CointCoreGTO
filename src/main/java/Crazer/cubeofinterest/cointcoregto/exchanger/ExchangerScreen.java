@@ -7,11 +7,24 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.Mth;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
     private static final int EMI_BOTTOM_RESERVED = 22;
+    private static final int GUI_WIDTH = 236;
+    private static final int GUI_HEIGHT = 244;
+    private static final int TEMPLATE_Y = 48;
+    private static final int PRODUCT_X = 56;
+    private static final int PRICE_X = 164;
+    private static final int INVENTORY_X = 37;
+    private static final int INVENTORY_Y = 159;
+    private static final int HOTBAR_Y = 217;
+
     private EditBox dealsBox;
     private Button buyButton;
     private Button switchModeButton;
@@ -25,15 +38,15 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
 
     public ExchangerScreen(ExchangerMenu menu, Inventory playerInventory, Component title) {
         super(menu, playerInventory, Component.literal("Обменник"));
-        this.imageWidth = 200;
-        this.imageHeight = 206;
+        this.imageWidth = GUI_WIDTH;
+        this.imageHeight = GUI_HEIGHT;
         this.buyerMode = menu.isBuyerMode();
     }
 
     @Override
     protected void init() {
-        this.imageWidth = 200;
-        this.imageHeight = 206;
+        this.imageWidth = GUI_WIDTH;
+        this.imageHeight = GUI_HEIGHT;
         super.init();
         this.topPos = Math.max(0, Math.min(
                 this.topPos,
@@ -42,9 +55,9 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
 
         this.dealsBox = new EditBox(
                 this.font,
-                this.leftPos + 44,
-                this.topPos + 91,
-                32,
+                this.leftPos + 54,
+                this.topPos + 96,
+                40,
                 18,
                 Component.literal("Сделок")
         );
@@ -56,20 +69,20 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         this.buyButton = Button.builder(
                 Component.literal("Купить"),
                 button -> buy()
-        ).bounds(this.leftPos + 80, this.topPos + 90, 52, 20).build();
+        ).bounds(this.leftPos + 99, this.topPos + 95, 56, 20).build();
         this.addRenderableWidget(this.buyButton);
 
         this.aeModeButton = Button.builder(
                 Component.literal("AE: выкл"),
                 button -> toggleAeMode()
-        ).bounds(this.leftPos + 136, this.topPos + 90, 54, 20).build();
+        ).bounds(this.leftPos + 159, this.topPos + 95, 62, 20).build();
         this.addRenderableWidget(this.aeModeButton);
 
         this.currencyPriceBox = new EditBox(
                 this.font,
-                this.leftPos + 91,
-                this.topPos + 89,
-                55,
+                this.leftPos + 116,
+                this.topPos + 94,
+                60,
                 18,
                 Component.literal("Монет за сделку")
         );
@@ -81,19 +94,19 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         this.saveCurrencyButton = Button.builder(
                 Component.literal("ОК"),
                 button -> saveCurrencyPrice()
-        ).bounds(this.leftPos + 150, this.topPos + 88, 40, 20).build();
+        ).bounds(this.leftPos + 181, this.topPos + 93, 40, 20).build();
         this.addRenderableWidget(this.saveCurrencyButton);
 
         this.requiredTierButton = Button.builder(
                 Component.literal("Без ограничения"),
                 button -> cycleRequiredTier(Screen.hasShiftDown() ? -1 : 1)
-        ).bounds(this.leftPos + 80, this.topPos + 105, 110, 18).build();
+        ).bounds(this.leftPos + 96, this.topPos + 117, 125, 18).build();
         this.addRenderableWidget(this.requiredTierButton);
 
         this.switchModeButton = Button.builder(
                 Component.literal("К покупателю"),
                 button -> switchMode()
-        ).bounds(this.leftPos + this.imageWidth - 96, this.topPos + 12, 86, 20).build();
+        ).bounds(this.leftPos + this.imageWidth - 116, this.topPos + 12, 102, 20).build();
         this.addRenderableWidget(this.switchModeButton);
 
         refreshModeWidgets();
@@ -160,9 +173,9 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
             this.switchModeButton.setMessage(Component.literal("К покупателю"));
         }
 
-        this.switchModeButton.setX(this.leftPos + this.imageWidth - 96);
+        this.switchModeButton.setX(this.leftPos + this.imageWidth - 116);
         this.switchModeButton.setY(this.topPos + 12);
-        this.switchModeButton.setWidth(86);
+        this.switchModeButton.setWidth(102);
         updateRequiredTierButton();
         updateBuyButtonState();
     }
@@ -340,47 +353,43 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         graphics.fill(x, y + 4, x + w, y + 36, 0xFF161B28);
         graphics.renderOutline(x, y, w, h, 0xFF5C6B86);
 
-        graphics.fill(x + 8, y + 40, x + w - 8, y + 113, 0xAA242A3A);
-        graphics.renderOutline(x + 8, y + 40, w - 16, 73, 0xFF39445C);
+        graphics.fill(x + 10, y + 40, x + w - 10, y + 140, 0xAA242A3A);
+        graphics.renderOutline(x + 10, y + 40, w - 20, 100, 0xFF39445C);
 
-        graphics.fill(x + 8, y + 117, x + w - 8, y + h - 3, 0xAA1E2432);
-        graphics.renderOutline(x + 8, y + 117, w - 16, h - 120, 0xFF39445C);
+        graphics.fill(x + 10, y + 144, x + w - 10, y + h - 4, 0xAA1E2432);
+        graphics.renderOutline(x + 10, y + 144, w - 20, h - 148, 0xFF39445C);
 
-        drawSlotFrame(graphics, x + 48, y + 44);
-        drawSlotFrame(graphics, x + 136, y + 44);
+        drawSlotFrame(graphics, x + PRODUCT_X, y + TEMPLATE_Y);
+        drawSlotFrame(graphics, x + PRICE_X, y + TEMPLATE_Y);
         drawExchangeArrow(graphics, x, y);
         drawPlayerInventorySlots(graphics, x, y);
     }
 
     private void drawExchangeArrow(GuiGraphics graphics, int x, int y) {
         int color = 0xFF62DCEB;
-        int centerY = y + 52;
-        graphics.fill(x + 71, centerY - 1, x + 124, centerY + 2, color);
-        graphics.fill(x + 121, centerY - 6, x + 124, centerY + 7, color);
-        graphics.fill(x + 124, centerY - 4, x + 127, centerY + 5, color);
-        graphics.fill(x + 127, centerY - 2, x + 130, centerY + 3, color);
+        int centerY = y + TEMPLATE_Y + 8;
+        graphics.fill(x + 86, centerY - 1, x + 150, centerY + 2, color);
+        graphics.fill(x + 147, centerY - 6, x + 150, centerY + 7, color);
+        graphics.fill(x + 150, centerY - 4, x + 153, centerY + 5, color);
+        graphics.fill(x + 153, centerY - 2, x + 156, centerY + 3, color);
     }
 
     private void drawPlayerInventorySlots(GuiGraphics graphics, int x, int y) {
-        int inventoryX = x + 19;
-        int inventoryY = y + 131;
         for (int row = 0; row < 3; row++) {
             for (int column = 0; column < 9; column++) {
                 drawSlotFrame(
                         graphics,
-                        inventoryX + column * 18,
-                        inventoryY + row * 18
+                        x + INVENTORY_X + column * 18,
+                        y + INVENTORY_Y + row * 18
                 );
             }
         }
 
-        int hotbarX = x + 19;
-        int hotbarY = y + 187;
         for (int column = 0; column < 9; column++) {
             drawSlotFrame(
                     graphics,
-                    hotbarX + column * 18,
-                    hotbarY
+                    x + INVENTORY_X + column * 18,
+                    y + HOTBAR_Y
             );
         }
     }
@@ -404,11 +413,10 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
             graphics.drawString(this.font, "Владелец", 14, 24, 0xFFD36A, false);
         }
 
-        graphics.drawString(this.font, "Товар", 44, 67, 0xD6DCEB, false);
-        graphics.drawString(this.font, "Цена", 132, 67, 0xD6DCEB, false);
+        graphics.drawString(this.font, "Продажа", PRODUCT_X - 2, 71, 0xD6DCEB, false);
+        graphics.drawString(this.font, "За", PRICE_X - 2, 71, 0xD6DCEB, false);
 
         if (this.buyerMode) {
-            graphics.drawString(this.font, "Сделок:", 10, 96, 0xD6DCEB, false);
             long availableItems = this.menu.getAvailableProductCount();
             int perDeal = Math.max(
                     1,
@@ -421,41 +429,76 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
                     this.font,
                     stockText,
                     this.imageWidth / 2,
-                    79,
+                    83,
                     availableItems > 0 ? 0x8FE59A : 0xF27D7D
             );
-            String currencyText;
-            int currencyColor;
-            if (this.menu.isViewerOwner()) {
-                currencyText = "Свой обменник: покупка запрещена";
-                currencyColor = 0xF27D7D;
-            } else if (this.menu.getProgressionStatus() == ExchangerProgression.Status.BELOW_REQUIRED) {
-                currencyText = "Нужно: " + this.menu.getRequiredTierName()
-                        + " | Ваша: " + this.menu.getViewerTierName();
-                currencyColor = 0xF27D7D;
-            } else if (this.menu.getProgressionStatus() == ExchangerProgression.Status.INVALID_REQUIRED_TIER) {
-                currencyText = "Ошибка минимальной эпохи";
-                currencyColor = 0xF27D7D;
-            } else {
-                long basePrice = this.menu.getCurrencyPricePerDeal();
-                long effectivePrice = this.menu.getEffectiveCurrencyPricePerDeal();
-                currencyText = basePrice > 0L
-                        ? "Монеты: " + CurrencyService.format(effectivePrice)
-                        : "Монеты: нет";
-                if (this.menu.getDiscountBasisPoints() > 0 && basePrice > 0L) {
-                    currencyText += " (-" + formatPercent(this.menu.getDiscountBasisPoints()) + "%)";
-                }
-                currencyText += " | Баланс: " + CurrencyService.format(this.menu.getViewerCurrencyBalance());
-                currencyColor = 0xFFD36A;
+
+            graphics.drawString(this.font, "Сделок:", 14, 101, 0xD6DCEB, false);
+
+            List<LineInfo> buyerLines = buildBuyerStatusLines();
+            int lineY = 121;
+            for (LineInfo line : buyerLines) {
+                graphics.drawCenteredString(this.font, line.text(), this.imageWidth / 2, lineY, line.color());
+                lineY += 11;
             }
-            graphics.drawCenteredString(this.font, currencyText, this.imageWidth / 2, 108, currencyColor);
         } else {
-            graphics.drawString(this.font, "Цена ресурсами — слот справа.", 12, 80, 0xD6DCEB, false);
-            graphics.drawString(this.font, "Монет/сделку:", 12, 94, 0xFFD36A, false);
-            graphics.drawString(this.font, "Мин. эпоха:", 12, 110, 0x8C93A6, false);
+            graphics.drawString(this.font, "Цена ресурсами — слот справа.", 14, 84, 0xD6DCEB, false);
+            graphics.drawString(this.font, "Монет/сделку:", 14, 99, 0xFFD36A, false);
+            graphics.drawString(this.font, "Мин. эпоха:", 14, 121, 0x8C93A6, false);
+            graphics.drawString(this.font, "Shift + клик по эпохе — назад", 14, 134, 0x6FB7BE, false);
         }
 
-        graphics.drawString(this.font, "Инвентарь", 19, 120, 0xD6DCEB, false);
+        graphics.drawString(this.font, "Инвентарь", INVENTORY_X, 147, 0xD6DCEB, false);
+    }
+
+    private List<LineInfo> buildBuyerStatusLines() {
+        List<LineInfo> lines = new ArrayList<>();
+        if (this.menu.isViewerOwner()) {
+            lines.add(new LineInfo("Свой обменник: покупка запрещена", 0xF27D7D));
+            return lines;
+        }
+
+        ExchangerProgression.Status status = this.menu.getProgressionStatus();
+        if (status == ExchangerProgression.Status.BELOW_REQUIRED) {
+            lines.add(new LineInfo("Нужно: " + this.menu.getRequiredTierName(), 0xF27D7D));
+            lines.add(new LineInfo("Ваша эпоха: " + this.menu.getViewerTierName(), 0xF27D7D));
+            return lines;
+        }
+        if (status == ExchangerProgression.Status.INVALID_REQUIRED_TIER) {
+            lines.add(new LineInfo("Ошибка минимальной эпохи", 0xF27D7D));
+            return lines;
+        }
+
+        long basePrice = this.menu.getCurrencyPricePerDeal();
+        long effectivePrice = this.menu.getEffectiveCurrencyPricePerDeal();
+        String priceLine = basePrice > 0L
+                ? "Монеты/сделка: " + CurrencyService.format(effectivePrice)
+                : "Монеты/сделка: нет";
+        if (this.menu.getDiscountBasisPoints() > 0 && basePrice > 0L) {
+            priceLine += "  (скидка " + formatPercent(this.menu.getDiscountBasisPoints()) + "%)";
+        }
+        lines.add(new LineInfo(trimToWidth(priceLine, 210), 0xFFD36A));
+
+        String balanceLine = "Баланс: " + CurrencyService.format(this.menu.getViewerCurrencyBalance());
+        lines.add(new LineInfo(trimToWidth(balanceLine, 210), 0xFFD36A));
+        return lines;
+    }
+
+    private String trimToWidth(String text, int maxWidth) {
+        if (this.font.width(text) <= maxWidth) {
+            return text;
+        }
+        String ellipsis = "...";
+        int allowed = Math.max(0, maxWidth - this.font.width(ellipsis));
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            String candidate = builder.toString() + text.charAt(i);
+            if (this.font.width(candidate) > allowed) {
+                break;
+            }
+            builder.append(text.charAt(i));
+        }
+        return builder + ellipsis;
     }
 
     private static String formatPercent(int basisPoints) {
@@ -504,5 +547,8 @@ public class ExchangerScreen extends AbstractContainerScreen<ExchangerMenu> {
         this.renderBackground(graphics);
         super.render(graphics, mouseX, mouseY, partialTick);
         this.renderTooltip(graphics, mouseX, mouseY);
+    }
+
+    private record LineInfo(String text, int color) {
     }
 }
