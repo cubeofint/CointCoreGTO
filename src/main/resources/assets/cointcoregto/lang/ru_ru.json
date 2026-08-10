@@ -8,5 +8,13 @@
   "cointcoregto.quest_share.local": "Пингануть квест в локальный чат",
   "cointcoregto.quest_share.global": "Пингануть квест в глобальный чат",
   "cointcoregto.quest_share.private": "Пингануть квест в личный чат",
-  "cointcoregto.quest_share.open": "Открыть квест"
+  "cointcoregto.quest_share.open": "Открыть квест",
+  "key.cointcoregto.open_battle_pass": "Открыть боевой пропуск",
+  "gui.cointcoregto.battlepass.short": "БП",
+  "gui.cointcoregto.battlepass.claim": "Забрать награду",
+  "gui.cointcoregto.battlepass.claimed": "Награда получена",
+  "gui.cointcoregto.battlepass.progress": "День %s из %s",
+  "gui.cointcoregto.battlepass.free": "Бесплатные награды",
+  "gui.cointcoregto.battlepass.disabled": "Боевой пропуск временно отключён",
+  "gui.cointcoregto.battlepass.hint": "Колесо мыши или стрелки — листать награды"
 }

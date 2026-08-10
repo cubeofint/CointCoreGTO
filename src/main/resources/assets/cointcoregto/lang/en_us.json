@@ -8,5 +8,13 @@
   "cointcoregto.quest_share.local": "Share quest in local chat",
   "cointcoregto.quest_share.global": "Share quest in global chat",
   "cointcoregto.quest_share.private": "Share quest in private chat",
-  "cointcoregto.quest_share.open": "Open quest"
+  "cointcoregto.quest_share.open": "Open quest",
+  "key.cointcoregto.open_battle_pass": "Open Battle Pass",
+  "gui.cointcoregto.battlepass.short": "BP",
+  "gui.cointcoregto.battlepass.claim": "Claim reward",
+  "gui.cointcoregto.battlepass.claimed": "Reward claimed",
+  "gui.cointcoregto.battlepass.progress": "Day %s of %s",
+  "gui.cointcoregto.battlepass.free": "Free rewards",
+  "gui.cointcoregto.battlepass.disabled": "Battle Pass is temporarily disabled",
+  "gui.cointcoregto.battlepass.hint": "Use the mouse wheel or arrows to browse rewards"
 }

@@ -63,3 +63,14 @@ side="SERVER"
 
 [[mixins]]
 config="cointcoregto.mixins.json"
+
+# Recipe bootstrap ordering for GTO 0.5.5 / GTOLib 1.0.
+# Only order CointCoreGTO before GTOCore. Do NOT add a separate GTCEu ordering
+# edge here: GTOCore itself already orders against GTCEu, and the extra edge
+# creates a three-mod dependency cycle in Forge's ModSorter.
+[[dependencies.cointcoregto]]
+modId="gtocore"
+mandatory=true
+versionRange="[0,)"
+ordering="BEFORE"
+side="BOTH"

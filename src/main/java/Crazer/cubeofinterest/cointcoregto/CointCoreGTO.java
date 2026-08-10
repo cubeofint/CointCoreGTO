@@ -492,6 +492,11 @@ public class CointCoreGTO {
     }
 
     public CointCoreGTO() {
+        // Register a HIGHEST-priority listener directly on GTOCore's own mod event bus.
+        // This does not touch GTRecipeTypes during mod construction; the actual recipe
+        // callback is installed immediately before GTOCore handles FMLCommonSetupEvent.
+        Crazer.cubeofinterest.cointcoregto.recipe.GtoEarlyRecipeBootstrap.installGtoCorePreCommonSetupHook();
+
         IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
 
         CointRadioBlocks.register(modEventBus);
