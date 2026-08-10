@@ -16,9 +16,6 @@ import net.minecraft.world.level.material.Fluid;
 import net.minecraftforge.fluids.FluidStack;
 import net.minecraftforge.fml.loading.FMLPaths;
 import net.minecraftforge.registries.ForgeRegistries;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -32,10 +29,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
 public final class GtoCustomRecipeLoader {
-    private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO:GTOCustomRecipes");
-
     public static final Path RECIPE_DIRECTORY = FMLPaths.CONFIGDIR.get()
             .resolve("cointcoregto")
             .resolve("gto_recipes");
@@ -70,11 +64,9 @@ public final class GtoCustomRecipeLoader {
         result.files = files.size();
 
         if (files.isEmpty()) {
-            LOGGER.info("[GTO-RECIPES] No custom recipe JSON files found in {}", RECIPE_DIRECTORY);
             return result.freeze();
         }
 
-        LOGGER.warn("[GTO-RECIPES] Loading {} custom recipe file(s) from {}", files.size(), RECIPE_DIRECTORY);
 
         for (Path file : files) {
             loadFile(file, result);
@@ -112,26 +104,17 @@ public final class GtoCustomRecipeLoader {
                 try {
                     if (!getBoolean(recipe, "enabled", true)) {
                         result.skipped++;
-                        LOGGER.info("[GTO-RECIPES] Skipped disabled recipe {}", label);
                         continue;
                     }
 
                     RegisteredRecipe registered = registerRecipe(recipe, label);
                     result.loaded++;
-                    LOGGER.warn(
-                            "[GTO-RECIPES] Registered {} -> {} ({})",
-                            label,
-                            registered.runtimeId(),
-                            registered.typeId()
-                    );
                 } catch (Throwable throwable) {
                     result.failed++;
-                    LOGGER.error("[GTO-RECIPES] Failed recipe {}: {}", label, unwrap(throwable).toString(), unwrap(throwable));
                 }
             }
         } catch (Throwable throwable) {
             result.failed++;
-            LOGGER.error("[GTO-RECIPES] Failed to read recipe file {}", displayPath, unwrap(throwable));
         }
     }
 
@@ -273,6 +256,12 @@ public final class GtoCustomRecipeLoader {
         }
         if (json.has("blast_furnace_temp")) {
             invokeExact(builder, "blastFurnaceTemp", new Class<?>[]{int.class}, json.get("blast_furnace_temp").getAsInt());
+        }
+        if (json.has("heat")) {
+            invokeExact(builder, "heat", new Class<?>[]{int.class}, json.get("heat").getAsInt());
+        }
+        if (json.has("temperature")) {
+            invokeExact(builder, "temperature", new Class<?>[]{int.class}, json.get("temperature").getAsInt());
         }
         if (json.has("mana_per_tick")) {
             invokeExact(builder, "MANAt", new Class<?>[]{long.class}, json.get("mana_per_tick").getAsLong());
@@ -568,6 +557,17 @@ public final class GtoCustomRecipeLoader {
         }
     }
 
+    public static boolean recipeTypeExists(ResourceLocation typeId) {
+        if (typeId == null) {
+            return false;
+        }
+        try {
+            return findRecipeType(typeId) != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static Object findRecipeType(ResourceLocation typeId) throws Exception {
         ClassLoader loader = GtoCustomRecipeLoader.class.getClassLoader();
         Class<?> gtRegistriesClass = Class.forName(
@@ -855,7 +855,6 @@ public final class GtoCustomRecipeLoader {
         try {
             Files.writeString(example, text, StandardCharsets.UTF_8);
         } catch (IOException exception) {
-            LOGGER.warn("[GTO-RECIPES] Could not create disabled example file {}", example, exception);
         }
     }
 }

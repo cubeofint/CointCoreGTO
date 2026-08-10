@@ -14,6 +14,9 @@ import Crazer.cubeofinterest.cointcoregto.trade.TradeConfig;
 import Crazer.cubeofinterest.cointcoregto.trade.TradeNetwork;
 import Crazer.cubeofinterest.cointcoregto.trade.TradeRegistry;
 import Crazer.cubeofinterest.cointcoregto.trade.TradeService;
+import Crazer.cubeofinterest.cointcoregto.recipe.editor.CointRecipeEditorRegistry;
+import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorClient;
+import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorNetwork;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
@@ -492,15 +495,13 @@ public class CointCoreGTO {
     }
 
     public CointCoreGTO() {
-        // Register a HIGHEST-priority listener directly on GTOCore's own mod event bus.
-        // This does not touch GTRecipeTypes during mod construction; the actual recipe
-        // callback is installed immediately before GTOCore handles FMLCommonSetupEvent.
         Crazer.cubeofinterest.cointcoregto.recipe.GtoEarlyRecipeBootstrap.installGtoCorePreCommonSetupHook();
 
         IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
 
         CointRadioBlocks.register(modEventBus);
         CointExchangerRegistry.register(modEventBus);
+        CointRecipeEditorRegistry.register(modEventBus);
         TradeRegistry.register(modEventBus);
 
         modEventBus.addListener(this::onClientSetup);
@@ -510,6 +511,7 @@ public class CointCoreGTO {
         CointCoreGTOEmoji.registerNetwork();
         CointRadioNetwork.register();
         CointExchangerNetwork.register();
+        RecipeEditorNetwork.register();
         TradeNetwork.register();
         CointCoreGTONetwork.register();
         ClusterTestModule.register();
@@ -525,6 +527,7 @@ public class CointCoreGTO {
     private void onClientSetup(FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
             CointExchangerClient.registerScreens();
+            RecipeEditorClient.registerScreens();
             TradeClient.registerScreens();
         });
     }

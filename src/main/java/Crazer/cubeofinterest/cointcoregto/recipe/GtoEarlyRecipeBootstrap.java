@@ -6,16 +6,23 @@ import net.minecraftforge.fml.ModContainer;
 import net.minecraftforge.fml.ModList;
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.minecraftforge.fml.javafmlmod.FMLModContainer;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 import java.lang.reflect.Field;
 import java.util.Optional;
 import java.util.function.Consumer;
 
-public final class GtoEarlyRecipeBootstrap {
-    private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO:GTORecipeBootstrap");
 
+
+
+
+
+
+
+
+
+
+
+
+public final class GtoEarlyRecipeBootstrap {
     private static boolean busHookInstallAttempted;
     private static boolean gtoCommonSetupSeen;
     private static boolean buildCallbackInstalled;
@@ -23,6 +30,13 @@ public final class GtoEarlyRecipeBootstrap {
 
     private GtoEarlyRecipeBootstrap() {
     }
+
+    
+
+
+
+
+
     public static synchronized void installGtoCorePreCommonSetupHook() {
         if (busHookInstallAttempted) {
             return;
@@ -34,16 +48,11 @@ public final class GtoEarlyRecipeBootstrap {
                     ModList.get().getModContainerById("gtocore");
 
             if (optionalContainer.isEmpty()) {
-                LOGGER.error("[GTO-RECIPES] GTOCore ModContainer was not found; custom recipes are disabled");
                 return;
             }
 
             ModContainer container = optionalContainer.get();
             if (!(container instanceof FMLModContainer fmlContainer)) {
-                LOGGER.error(
-                        "[GTO-RECIPES] GTOCore container is not an FMLModContainer: {}",
-                        container.getClass().getName()
-                );
                 return;
             }
 
@@ -53,9 +62,7 @@ public final class GtoEarlyRecipeBootstrap {
                     GtoEarlyRecipeBootstrap::beforeGtoCoreCommonSetup
             );
 
-            LOGGER.info("[GTO-RECIPES] Early GTOCore recipe hook installed");
         } catch (Throwable throwable) {
-            LOGGER.error("[GTO-RECIPES] Failed to install early GTOCore recipe hook", throwable);
         }
     }
 
@@ -68,9 +75,7 @@ public final class GtoEarlyRecipeBootstrap {
         try {
             installAssemblerBuildCallbackByField();
             buildCallbackInstalled = true;
-            LOGGER.info("[GTO-RECIPES] Recipe generation callback installed before GTOCore Data.init()");
         } catch (Throwable throwable) {
-            LOGGER.error("[GTO-RECIPES] Failed to install recipe generation callback", throwable);
         }
     }
 
@@ -125,7 +130,7 @@ public final class GtoEarlyRecipeBootstrap {
         }
 
         Consumer<Object> chainedCallback = triggerBuilder -> {
-            // Never replace GTOCore's own assembler handling.
+            
             if (previousOnSave != null) {
                 previousOnSave.accept(triggerBuilder);
             }
@@ -136,17 +141,15 @@ public final class GtoEarlyRecipeBootstrap {
             customRecipesLoadAttempted = true;
 
             try {
-                GtoCustomRecipeLoader.LoadResult result = GtoCustomRecipeLoader.loadAndRegisterAll();
-                LOGGER.warn(
-                        "[GTO-RECIPES] Custom recipe load complete: loaded={}, skipped={}, failed={}, files={}",
-                        result.loaded(),
-                        result.skipped(),
-                        result.failed(),
-                        result.files()
-                );
+                CraftingRecipeLoader.LoadResult crafting = CraftingRecipeLoader.loadIntoGTRecipeMap();
             } catch (Throwable throwable) {
-                // One broken custom recipe set must not take down GTO's stock recipe load.
-                LOGGER.error("[GTO-RECIPES] Custom recipe loader failed", throwable);
+                
+            }
+
+            try {
+                GtoCustomRecipeLoader.LoadResult result = GtoCustomRecipeLoader.loadAndRegisterAll();
+            } catch (Throwable throwable) {
+                
             }
         };
 
