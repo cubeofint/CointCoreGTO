@@ -41,8 +41,6 @@ public class CointTunerItem extends Item {
         tooltip.add(Component.literal("Тюнер радио").withStyle(ChatFormatting.GOLD));
         tooltip.add(Component.literal("Shift + ПКМ по радио: запомнить радио").withStyle(ChatFormatting.YELLOW));
         tooltip.add(Component.literal("ПКМ по динамику: связать динамик").withStyle(ChatFormatting.YELLOW));
-        tooltip.add(Component.literal("Создание: Shift + ПКМ по воздуху с компасом").withStyle(ChatFormatting.YELLOW));
-        tooltip.add(Component.literal("Нужно: компас + железный слиток + редстоун").withStyle(ChatFormatting.DARK_GRAY));
 
         BlockPos stored = getStoredRadioPos(stack);
 

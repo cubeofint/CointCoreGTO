@@ -33,10 +33,11 @@ public class CointSpeakerBlockItem extends BlockItem {
             List<Component> tooltip,
             TooltipFlag flag
     ) {
-        tooltip.add(Component.literal("Динамик для радио").withStyle(ChatFormatting.GOLD));
-        tooltip.add(Component.literal("Дублирует радиус связанного радио").withStyle(ChatFormatting.GRAY));
-        tooltip.add(Component.literal("ПКМ тюнером по динамику: связать с радио").withStyle(ChatFormatting.YELLOW));
-        tooltip.add(Component.literal("Создание: Shift + ПКМ по воздуху с нотным блоком").withStyle(ChatFormatting.YELLOW));
-        tooltip.add(Component.literal("Нужно: нотный блок + железный слиток + редстоун").withStyle(ChatFormatting.DARK_GRAY));
+        tooltip.add(Component.literal("Динамик для радио")
+                .withStyle(ChatFormatting.GOLD));
+        tooltip.add(Component.literal("Расширяет радиус вещания связанного радио")
+                .withStyle(ChatFormatting.GRAY));
+        tooltip.add(Component.literal("ПКМ тюнером: связать с запомненным радио")
+                .withStyle(ChatFormatting.YELLOW));
     }
 }

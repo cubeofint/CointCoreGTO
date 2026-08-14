@@ -97,18 +97,6 @@ public class ExchangerBlockItem extends BlockItem {
 
         tooltip.add(Component.empty());
 
-        tooltip.add(Component.empty());
-
-        tooltip.add(
-                Component.literal("Крафт временно недоступен")
-                        .withStyle(ChatFormatting.YELLOW)
-        );
-
-        tooltip.add(
-                Component.literal("Будет открыт после баланса экономики")
-                        .withStyle(ChatFormatting.DARK_GRAY)
-        );
-
         tooltip.add(Component.literal("Настройки доступны только владельцу и OP")
                 .withStyle(ChatFormatting.RED));
     }
