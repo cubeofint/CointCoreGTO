@@ -4,10 +4,21 @@
   "package": "Crazer.cubeofinterest.cointcoregto.mixin",
   "compatibilityLevel": "JAVA_17",
   "mixins": [
-    "ServerStatusPlayersMixin"
+    "ServerStatusPlayersMixin",
+    "ServerStatusDescriptionMixin",
+    "AdAstraLandPacketMixin",
+    "FtbEssentialsTeleportPosMixin",
+    "ClusterTransferPacketGuardMixin",
+    "ClusterDimensionTickGuardMixin",
+    "BlockedBlockLevelSetMixin",
+    "BlockedBlockPlacementMixin",
+    "Ae2SpatialStorageBlockGuardMixin"
   ],
   "client": [
-    "CointCoreGTOChatComponentMixin"
+    "CointCoreGTOChatComponentMixin",
+    "CointHideForgeServerListStatusMixin",
+    "BotaniaClientConfigMixin",
+    "QuestButtonMixin"
   ],
   "injectors": {
     "defaultRequire": 0
