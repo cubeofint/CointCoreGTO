@@ -1,5 +1,6 @@
 package Crazer.cubeofinterest.cointcoregto;
 
+import Crazer.cubeofinterest.cointcoregto.battlepass.network.BattlePassNetwork;
 import Crazer.cubeofinterest.cointcoregto.compat.radio.CointRadioBlocks;
 import Crazer.cubeofinterest.cointcoregto.compat.radio.CointRadioNetwork;
 import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerClient;
@@ -503,7 +504,7 @@ public class CointCoreGTO {
         CointExchangerRegistry.register(modEventBus);
         CointRecipeEditorRegistry.register(modEventBus);
         TradeRegistry.register(modEventBus);
-
+        BattlePassNetwork.register();
         modEventBus.addListener(this::onClientSetup);
 
         registerNetwork();

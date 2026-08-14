@@ -1,6 +1,7 @@
 package Crazer.cubeofinterest.cointcoregto.battlepass;
 
 import Crazer.cubeofinterest.cointcoregto.CointCoreGTO;
+import Crazer.cubeofinterest.cointcoregto.battlepass.network.BattlePassNetwork;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.minecraft.commands.CommandSourceStack;
@@ -30,6 +31,7 @@ public final class BattlePassEvents {
     public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             BattlePassService.touchPlayer(player);
+            BattlePassNetwork.sendAvailability(player);
         }
     }
 
@@ -46,13 +48,18 @@ public final class BattlePassEvents {
                         .requires(source -> source.hasPermission(2))
                         .executes(context -> {
                             BattlePassConfig.reload();
-                            for (ServerPlayer player : context.getSource().getServer().getPlayerList().getPlayers()) {
-                                BattlePassService.sendState(player, "Конфигурация Battle Pass обновлена.");
-                            }
+
+                            BattlePassNetwork.broadcastAvailability(
+                                    context.getSource().getServer()
+                            );
+
                             context.getSource().sendSuccess(
-                                    () -> Component.literal("Конфигурация Battle Pass перезагружена."),
+                                    () -> Component.literal(
+                                            "Конфигурация Battle Pass перезагружена."
+                                    ),
                                     true
                             );
+
                             return 1;
                         }))
                 .then(Commands.literal("setday")
