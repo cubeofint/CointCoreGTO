@@ -105,8 +105,11 @@ public class CointCoreGTO {
     private static final Logger TRADE_CHAT_LOGGER = LogManager.getLogger("CuBe:TradeChat");
     private static final Logger PRIVATE_CHAT_LOGGER = LogManager.getLogger("CuBe:PrivateChat");
     private static final Logger DISCORD_CHAT_LOGGER = LogManager.getLogger("CuBe:DiscordChat");
+    private static final Logger SPY_LOGGER = LogManager.getLogger("CuBe:Spy");
 
     private static final String NETWORK_PROTOCOL_VERSION = "1";
+    private static final String SPY_PERMISSION = "cointcoregto.spy";
+    private static final String SPY_PREFIX = "§5[SPY] §r";
     private static final SimpleChannel NETWORK_CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(MODID, "main"),
             () -> NETWORK_PROTOCOL_VERSION,
@@ -177,6 +180,7 @@ public class CointCoreGTO {
     private static final ForgeConfigSpec.ConfigValue<String> RESTART_KICK_MESSAGE;
 
     private static final Map<UUID, ChatView> CHAT_VIEWS = new HashMap<>();
+    private static final Set<UUID> SPY_ENABLED = ConcurrentHashMap.newKeySet();
     private static final Map<UUID, UUID> LAST_PRIVATE = new HashMap<>();
     private static final Map<UUID, Boolean> SHOW_TIME = new HashMap<>();
     private static final Map<UUID, Long> LAST_ITEM_SHARE_MILLIS = new ConcurrentHashMap<>();
@@ -703,6 +707,7 @@ public class CointCoreGTO {
         CLUSTER_RESTART_CONFIRMATION_CODE = null;
         RESTART_REASON = null;
         SENT_RESTART_WARNINGS.clear();
+        SPY_ENABLED.clear();
         CURRENT_SERVER = null;
     }
 
@@ -746,6 +751,7 @@ public class CointCoreGTO {
         saveLastLocations();
         CHAT_HISTORY.remove(player.getUUID());
         LAST_CHAT_VIEW_SWITCH_MILLIS.remove(player.getUUID());
+        SPY_ENABLED.remove(player.getUUID());
 
         CointCoreGTODiscordProxy.requestOnlineStatusUpdate();
     }
@@ -832,6 +838,39 @@ public class CointCoreGTO {
                                         })))
         );
 
+
+        event.getDispatcher().register(
+                Commands.literal("spy")
+                        .requires(CointCoreGTO::hasSpyCommandPermission)
+                        .executes(ctx -> {
+                            ServerPlayer player = ctx.getSource().getPlayerOrException();
+                            setSpyEnabled(player, !isSpyEnabled(player));
+                            return 1;
+                        })
+                        .then(Commands.literal("on")
+                                .executes(ctx -> {
+                                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                                    setSpyEnabled(player, true);
+                                    return 1;
+                                }))
+                        .then(Commands.literal("off")
+                                .executes(ctx -> {
+                                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                                    setSpyEnabled(player, false);
+                                    return 1;
+                                }))
+                        .then(Commands.literal("status")
+                                .executes(ctx -> {
+                                    ServerPlayer player = ctx.getSource().getPlayerOrException();
+                                    player.displayClientMessage(
+                                            Component.literal(isSpyEnabled(player)
+                                                    ? "§5[SPY] §aРежим прослушивания включён."
+                                                    : "§5[SPY] §7Режим прослушивания выключен."),
+                                            true
+                                    );
+                                    return 1;
+                                }))
+        );
 
         event.getDispatcher().register(
                 Commands.literal("chat")
@@ -2325,6 +2364,135 @@ public class CointCoreGTO {
         }
     }
 
+    private static boolean hasSpyCommandPermission(CommandSourceStack source) {
+        if (!(source.getEntity() instanceof ServerPlayer player)) {
+            return false;
+        }
+        return source.hasPermission(2) || hasLuckPermsPermissionOnly(player, SPY_PERMISSION);
+    }
+
+    private static boolean hasSpyPermission(ServerPlayer player) {
+        if (player == null) {
+            return false;
+        }
+        return player.createCommandSourceStack().hasPermission(2)
+                || hasLuckPermsPermissionOnly(player, SPY_PERMISSION);
+    }
+
+    private static boolean hasLuckPermsPermissionOnly(ServerPlayer player, String permission) {
+        if (player == null || permission == null || permission.isBlank()) {
+            return false;
+        }
+
+        try {
+            LuckPerms luckPerms = LuckPermsProvider.get();
+            User user = luckPerms.getPlayerAdapter(ServerPlayer.class).getUser(player);
+            return user.getCachedData().getPermissionData().checkPermission(permission).asBoolean();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isSpyEnabled(ServerPlayer player) {
+        if (player == null || !SPY_ENABLED.contains(player.getUUID())) {
+            return false;
+        }
+
+        if (!hasSpyPermission(player)) {
+            SPY_ENABLED.remove(player.getUUID());
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void setSpyEnabled(ServerPlayer player, boolean enabled) {
+        if (player == null) {
+            return;
+        }
+
+        if (!hasSpyPermission(player)) {
+            SPY_ENABLED.remove(player.getUUID());
+            player.displayClientMessage(Component.literal(
+                    "§cДля SPY нужен OP уровня 2+ или LuckPerms-права §fcointcoregto.spy§c."), true);
+            return;
+        }
+
+        if (enabled) {
+            SPY_ENABLED.add(player.getUUID());
+            player.displayClientMessage(Component.literal("§5[SPY] §aВключён. Вы видите локальный, глобальный, торговый и личный чат."), true);
+            SPY_LOGGER.info("{} enabled chat spy", player.getGameProfile().getName());
+        } else {
+            SPY_ENABLED.remove(player.getUUID());
+            player.displayClientMessage(Component.literal("§5[SPY] §7Выключен."), true);
+            SPY_LOGGER.info("{} disabled chat spy", player.getGameProfile().getName());
+        }
+    }
+
+    private static void sendSpyMessage(ServerPlayer spy, Component message) {
+        if (!isSpyEnabled(spy) || message == null) {
+            return;
+        }
+
+        spy.sendSystemMessage(
+                Component.literal(SPY_PREFIX).append(message.copy())
+        );
+    }
+
+    private static boolean isNormalLocalRecipient(ServerPlayer sender, ServerPlayer target, double radiusSquared) {
+        if (sender == null || target == null) {
+            return false;
+        }
+        return target.level().dimension() == sender.level().dimension()
+                && target.distanceToSqr(sender) <= radiusSquared;
+    }
+
+    private static void sendLocalSpyCopies(ServerPlayer sender, double radiusSquared, java.util.function.Function<ServerPlayer, Component> messageFactory) {
+        if (sender == null || messageFactory == null) {
+            return;
+        }
+
+        for (ServerPlayer spy : sender.server.getPlayerList().getPlayers()) {
+            if (!isSpyEnabled(spy) || isNormalLocalRecipient(sender, spy, radiusSquared)) {
+                continue;
+            }
+
+            Component message = messageFactory.apply(spy);
+            if (message != null) {
+                sendSpyMessage(spy, message);
+            }
+        }
+    }
+
+    private static void sendPrivateSpyCopies(ServerPlayer sender, ServerPlayer target, java.util.function.Function<ServerPlayer, Component> messageFactory) {
+        if (sender == null || target == null || messageFactory == null) {
+            return;
+        }
+
+        for (ServerPlayer spy : sender.server.getPlayerList().getPlayers()) {
+            if (!isSpyEnabled(spy)) {
+                continue;
+            }
+
+            if (spy.getUUID().equals(sender.getUUID()) || spy.getUUID().equals(target.getUUID())) {
+                continue;
+            }
+
+            Component message = messageFactory.apply(spy);
+            if (message != null) {
+                sendSpyMessage(spy, message);
+            }
+        }
+    }
+
+    private static void sendPrivateParticipantMessage(ServerPlayer player, Component message) {
+        if (isSpyEnabled(player)) {
+            sendSpyMessage(player, message);
+        } else {
+            player.sendSystemMessage(message);
+        }
+    }
+
     private static void rememberChatMessage(ServerPlayer target, ChatView view, String formattedMessage) {
         rememberChatMessage(target, view, formattedMessage, Component.literal(formattedMessage == null ? "" : formattedMessage));
     }
@@ -2352,6 +2520,11 @@ public class CointCoreGTO {
 
     private static void sendFilteredChatMessage(ServerPlayer target, ChatView view, String formattedMessage, Component liveMessage) {
         rememberChatMessage(target, view, formattedMessage, liveMessage);
+
+        if (isSpyEnabled(target)) {
+            sendSpyMessage(target, liveMessage);
+            return;
+        }
 
         if (canReceive(target, view)) {
             target.sendSystemMessage(liveMessage);
@@ -2491,6 +2664,15 @@ public class CointCoreGTO {
             receivers++;
         }
 
+        sendLocalSpyCopies(
+                player,
+                radiusSquared,
+                spy -> {
+                    String fullPrefix = timePrefix(spy) + withoutTimePrefix;
+                    return CointCoreGTOItemPreview.buildMessage(player, fullPrefix, message);
+                }
+        );
+
         if (receivers <= 1) {
             player.displayClientMessage(Component.literal("§7Рядом никого нет. Для глобального чата используйте §e!сообщение §7или §e/g сообщение§7."), true);
         }
@@ -2620,8 +2802,22 @@ public class CointCoreGTO {
         rememberChatMessage(sender, ChatView.PRIVATE, toSender, senderLiveMessage);
         rememberChatMessage(target, ChatView.PRIVATE, toTarget, targetLiveMessage);
 
-        sender.sendSystemMessage(senderLiveMessage);
-        target.sendSystemMessage(targetLiveMessage);
+        sendPrivateParticipantMessage(sender, senderLiveMessage);
+        sendPrivateParticipantMessage(target, targetLiveMessage);
+
+        String spyPrefix = color(PRIVATE_PREFIX.get())
+                + "§d" + senderName
+                + " §7-> §d" + targetName
+                + "§7: §f";
+        sendPrivateSpyCopies(
+                sender,
+                target,
+                spy -> CointCoreGTOItemPreview.buildMessage(
+                        sender,
+                        timePrefix(spy) + spyPrefix,
+                        message
+                )
+        );
 
         LAST_PRIVATE.put(sender.getUUID(), target.getUUID());
         LAST_PRIVATE.put(target.getUUID(), sender.getUUID());
@@ -2757,6 +2953,17 @@ public class CointCoreGTO {
             receivers++;
         }
 
+        sendLocalSpyCopies(
+                player,
+                radiusSquared,
+                spy -> {
+                    String fullPrefix = timePrefix(spy) + withoutTimePrefix;
+                    CointCoreGTOItemShare.sendIconHintToPlayer(spy, stack, fullPrefix, iconItemText);
+                    return Component.literal(fullPrefix + "    ")
+                            .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText));
+                }
+        );
+
         if (receivers <= 1) {
             player.displayClientMessage(Component.literal("§7Рядом никого нет. Для глобального чата используйте §e/g §7или выберите §6[G]§7."), true);
         }
@@ -2858,8 +3065,20 @@ public class CointCoreGTO {
 
         rememberChatMessage(sender, ChatView.PRIVATE, senderPrefix + plainItemText, senderMessage);
         rememberChatMessage(target, ChatView.PRIVATE, targetPrefix + plainItemText, targetMessage);
-        sender.sendSystemMessage(senderMessage);
-        target.sendSystemMessage(targetMessage);
+        sendPrivateParticipantMessage(sender, senderMessage);
+        sendPrivateParticipantMessage(target, targetMessage);
+
+        String spyPrefix = color(PRIVATE_PREFIX.get())
+                + "§d" + senderName
+                + " §7-> §d" + targetName
+                + "§7: §f";
+        sendPrivateSpyCopies(
+                sender,
+                target,
+                spy -> Component.literal(timePrefix(spy) + spyPrefix + "    ")
+                        .append(CointCoreGTOItemPreview.buildItemComponent(stack, cleanItemText))
+        );
+
         LAST_PRIVATE.put(sender.getUUID(), target.getUUID());
         LAST_PRIVATE.put(target.getUUID(), sender.getUUID());
         PRIVATE_CHAT_LOGGER.info(senderName + " -> " + targetName + ": " + stripColor(plainItemText));
@@ -2977,6 +3196,13 @@ public class CointCoreGTO {
             receivers++;
         }
 
+        sendLocalSpyCopies(
+                player,
+                radiusSquared,
+                spy -> Component.literal(timePrefix(spy) + withoutTimePrefix + "    ")
+                        .append(buildQuestComponent(questCode, questTitle))
+        );
+
         if (receivers <= 1) {
             player.displayClientMessage(Component.literal("§7Рядом никого нет. Для глобального чата используйте §e/g §7или выберите §6[G]§7."), true);
         }
@@ -3045,8 +3271,20 @@ public class CointCoreGTO {
 
         rememberChatMessage(sender, ChatView.PRIVATE, senderPrefix + "    " + questText, senderMessage);
         rememberChatMessage(target, ChatView.PRIVATE, targetPrefix + "    " + questText, targetMessage);
-        sender.sendSystemMessage(senderMessage);
-        target.sendSystemMessage(targetMessage);
+        sendPrivateParticipantMessage(sender, senderMessage);
+        sendPrivateParticipantMessage(target, targetMessage);
+
+        String spyPrefix = color(PRIVATE_PREFIX.get())
+                + "§d" + senderName
+                + " §7-> §d" + targetName
+                + "§7: §f";
+        sendPrivateSpyCopies(
+                sender,
+                target,
+                spy -> Component.literal(timePrefix(spy) + spyPrefix + "    ")
+                        .append(buildQuestComponent(questCode, questTitle))
+        );
+
         LAST_PRIVATE.put(sender.getUUID(), target.getUUID());
         LAST_PRIVATE.put(target.getUUID(), sender.getUUID());
         PRIVATE_CHAT_LOGGER.info(senderName + " -> " + targetName + ": " + stripColor(questText));
