@@ -3,19 +3,26 @@ package Crazer.cubeofinterest.cointcoregto.recipe.editor;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import dev.emi.emi.api.stack.EmiIngredient;
 import dev.emi.emi.api.stack.EmiStack;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+import net.minecraft.nbt.TagParser;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.Slot;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraftforge.registries.ForgeRegistries;
 
@@ -40,6 +47,7 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
     private final int[] itemChances = new int[RecipeEditorMenu.GHOST_SLOT_COUNT];
     private final int[] itemTierChanceBoosts = new int[RecipeEditorMenu.GHOST_SLOT_COUNT];
     private final boolean[] itemNotConsumable = new boolean[RecipeEditorMenu.INPUT_SLOT_COUNT];
+    private final String[] itemInputTags = new String[RecipeEditorMenu.INPUT_SLOT_COUNT];
 
     private final ResourceLocation[] fluidIds = new ResourceLocation[FLUID_SLOT_COUNT];
     private final long[] fluidAmounts = new long[FLUID_SLOT_COUNT];
@@ -63,11 +71,16 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
     private Button notConsumableButton;
     private Button saveButton;
     private Button clearButton;
+    private Button serverFilesButton;
 
     private int selectedGhostSlot = 0;
     private int selectedFluidSlot = 0;
     private boolean fluidSelection = false;
     private boolean updatingSelectionControls;
+    private String editingRelativePath = "";
+    private JsonObject preservedRecipeFields;
+    private String[] suspendedTextValues;
+    private boolean restoreSuspendedState;
     private String statusText = "";
     private boolean statusSuccess;
 
@@ -160,12 +173,56 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
                 .build();
         addRenderableWidget(clearButton);
 
+        serverFilesButton = Button.builder(Component.literal("Рецепты сервера"), button -> openServerBrowser())
+                .bounds(leftPos + 331, topPos + 213, 139, 20)
+                .build();
+        addRenderableWidget(serverFilesButton);
+
+        boolean restored = restoreSuspendedTextValues();
         refreshSelectedControls();
 
-        if (!RecipeEditorMenu.DEFAULT_RECIPE_TYPE.equals(menu.getInitialRecipeType())) {
+        if (!restored
+                && statusText.isBlank()
+                && !RecipeEditorMenu.DEFAULT_RECIPE_TYPE.equals(menu.getInitialRecipeType())) {
             statusSuccess = true;
             statusText = "Recipe type автоматически выбран по механизму: " + menu.getInitialRecipeType();
         }
+    }
+
+    private void openServerBrowser() {
+        suspendedTextValues = new String[]{
+                idBox.getValue(),
+                typeBox.getValue(),
+                durationBox.getValue(),
+                eutBox.getValue(),
+                circuitBox.getValue(),
+                priorityBox.getValue(),
+                blastBox.getValue(),
+                heatBox.getValue(),
+                manaBox.getValue(),
+                temperatureBox.getValue()
+        };
+        restoreSuspendedState = true;
+        Minecraft.getInstance().setScreen(new RecipeEditorServerBrowserScreen(this, false));
+    }
+
+    private boolean restoreSuspendedTextValues() {
+        if (!restoreSuspendedState || suspendedTextValues == null || suspendedTextValues.length != 10) {
+            return false;
+        }
+        idBox.setValue(suspendedTextValues[0]);
+        typeBox.setValue(suspendedTextValues[1]);
+        durationBox.setValue(suspendedTextValues[2]);
+        eutBox.setValue(suspendedTextValues[3]);
+        circuitBox.setValue(suspendedTextValues[4]);
+        priorityBox.setValue(suspendedTextValues[5]);
+        blastBox.setValue(suspendedTextValues[6]);
+        heatBox.setValue(suspendedTextValues[7]);
+        manaBox.setValue(suspendedTextValues[8]);
+        temperatureBox.setValue(suspendedTextValues[9]);
+        restoreSuspendedState = false;
+        suspendedTextValues = null;
+        return true;
     }
 
     private EditBox addBox(
@@ -261,9 +318,15 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
         try {
             JsonObject recipe = buildRecipeJson();
             String json = GSON.toJson(recipe);
-            RecipeEditorNetwork.CHANNEL.sendToServer(new RecipeEditorSavePacket(json));
+            RecipeEditorNetwork.CHANNEL.sendToServer(new RecipeEditorSavePacket(
+                    json,
+                    false,
+                    editingRelativePath
+            ));
             statusSuccess = true;
-            statusText = "Отправлено на сохранение...";
+            statusText = editingRelativePath.isBlank()
+                    ? "Отправлено на сохранение..."
+                    : "Отправлено обновление серверного файла...";
         } catch (IllegalArgumentException exception) {
             statusSuccess = false;
             statusText = exception.getMessage();
@@ -282,7 +345,8 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
             throw new IllegalArgumentException("Укажи тип рецепта");
         }
 
-        JsonObject recipe = new JsonObject();
+        JsonObject recipe = preservedRecipeFields == null ? new JsonObject() : preservedRecipeFields.deepCopy();
+        removeManagedFields(recipe);
         recipe.addProperty("enabled", true);
         recipe.addProperty("type", type);
         recipe.addProperty("id", id);
@@ -326,7 +390,7 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
         JsonArray itemInputs = new JsonArray();
         for (int slot = 0; slot < RecipeEditorMenu.INPUT_SLOT_COUNT; slot++) {
             ItemStack stack = menu.getGhostItem(slot);
-            if (!stack.isEmpty()) {
+            if (itemInputTags[slot] != null || !stack.isEmpty()) {
                 itemInputs.add(itemEntry(stack, slot, true));
             }
         }
@@ -376,22 +440,28 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
     }
 
     private JsonObject itemEntry(ItemStack stack, int slot, boolean input) {
-        ResourceLocation itemId = ForgeRegistries.ITEMS.getKey(stack.getItem());
-        if (itemId == null) {
-            throw new IllegalArgumentException("Не удалось определить ID предмета в слоте " + (slot + 1));
-        }
-
         int count = itemCounts[slot];
         if (count <= 0) {
             throw new IllegalArgumentException("Count в item-слоте " + (slot + 1) + " должен быть > 0");
         }
 
         JsonObject entry = new JsonObject();
-        entry.addProperty("item", itemId.toString());
-        entry.addProperty("count", count);
-        if (stack.hasTag() && stack.getTag() != null) {
-            entry.addProperty("nbt", stack.getTag().toString());
+        if (input && slot < itemInputTags.length && itemInputTags[slot] != null) {
+            entry.addProperty("tag", itemInputTags[slot]);
+        } else {
+            if (stack == null || stack.isEmpty()) {
+                throw new IllegalArgumentException("Пустой item slot " + (slot + 1));
+            }
+            ResourceLocation itemId = ForgeRegistries.ITEMS.getKey(stack.getItem());
+            if (itemId == null) {
+                throw new IllegalArgumentException("Не удалось определить ID предмета в слоте " + (slot + 1));
+            }
+            entry.addProperty("item", itemId.toString());
+            if (stack.hasTag() && stack.getTag() != null) {
+                entry.addProperty("nbt", stack.getTag().toString());
+            }
         }
+        entry.addProperty("count", count);
 
         int chance = clamp(itemChances[slot], 0, 10_000);
         if (input && itemNotConsumable[slot]) {
@@ -432,6 +502,224 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
         return entry;
     }
 
+    public boolean loadServerRecipe(String relativePath, String rawJson) {
+        try {
+            JsonObject recipe = JsonParser.parseString(rawJson).getAsJsonObject();
+            String type = requiredString(recipe, "type");
+            if ("minecraft:crafting_shaped".equals(type) || "minecraft:crafting_shapeless".equals(type)) {
+                throw new IllegalArgumentException("Это верстачный рецепт; открой его через Crafting Recipe Editor");
+            }
+
+            JsonArray itemInputs = optionalArray(recipe, "item_inputs");
+            JsonArray itemOutputs = optionalArray(recipe, "item_outputs");
+            JsonArray fluidInputs = optionalArray(recipe, "fluid_inputs");
+            JsonArray fluidOutputs = optionalArray(recipe, "fluid_outputs");
+
+            if (itemInputs.size() > RecipeEditorMenu.INPUT_SLOT_COUNT) {
+                throw new IllegalArgumentException("В рецепте " + itemInputs.size() + " item inputs, GUI вмещает только "
+                        + RecipeEditorMenu.INPUT_SLOT_COUNT);
+            }
+            int outputCapacity = RecipeEditorMenu.GHOST_SLOT_COUNT - RecipeEditorMenu.INPUT_SLOT_COUNT;
+            if (itemOutputs.size() > outputCapacity) {
+                throw new IllegalArgumentException("В рецепте " + itemOutputs.size() + " item outputs, GUI вмещает только "
+                        + outputCapacity);
+            }
+            if (fluidInputs.size() > FLUID_INPUT_SLOT_COUNT || fluidOutputs.size() > FLUID_OUTPUT_SLOT_COUNT) {
+                throw new IllegalArgumentException("Слишком много fluid inputs/outputs для GUI");
+            }
+
+            clearRecipeData();
+            preservedRecipeFields = recipe.deepCopy();
+
+            idBox.setValue(requiredString(recipe, "id"));
+            typeBox.setValue(type);
+            durationBox.setValue(Integer.toString(requiredInt(recipe, "duration", 200)));
+            eutBox.setValue(Long.toString(optionalLong(recipe, "eut", 0L)));
+            circuitBox.setValue(Integer.toString(optionalInt(recipe, "circuit", 0)));
+            priorityBox.setValue(Integer.toString(optionalInt(recipe, "priority", 0)));
+            blastBox.setValue(Integer.toString(optionalInt(recipe, "blast_furnace_temp", 0)));
+            heatBox.setValue(Integer.toString(optionalInt(recipe, "heat", 0)));
+            manaBox.setValue(Long.toString(optionalLong(recipe, "mana_per_tick", 0L)));
+            temperatureBox.setValue(Integer.toString(optionalInt(recipe, "temperature", 0)));
+
+            for (int i = 0; i < itemInputs.size(); i++) {
+                loadItemEntry(i, itemInputs.get(i).getAsJsonObject(), true);
+            }
+            for (int i = 0; i < itemOutputs.size(); i++) {
+                loadItemEntry(RecipeEditorMenu.INPUT_SLOT_COUNT + i, itemOutputs.get(i).getAsJsonObject(), false);
+            }
+            for (int i = 0; i < fluidInputs.size(); i++) {
+                loadFluidEntry(i, fluidInputs.get(i).getAsJsonObject(), true);
+            }
+            for (int i = 0; i < fluidOutputs.size(); i++) {
+                loadFluidEntry(FLUID_INPUT_SLOT_COUNT + i, fluidOutputs.get(i).getAsJsonObject(), false);
+            }
+
+            selectedGhostSlot = 0;
+            selectedFluidSlot = 0;
+            fluidSelection = false;
+            editingRelativePath = relativePath == null ? "" : relativePath;
+            refreshSelectedControls();
+            statusSuccess = true;
+            statusText = "Открыт серверный файл: " + editingRelativePath;
+            return true;
+        } catch (Throwable throwable) {
+            statusSuccess = false;
+            statusText = throwable.getMessage() == null ? throwable.getClass().getSimpleName() : throwable.getMessage();
+            return false;
+        }
+    }
+
+    private void loadItemEntry(int slot, JsonObject entry, boolean input) {
+        if (entry == null) {
+            throw new IllegalArgumentException("Пустая item entry");
+        }
+
+        ItemStack display = ItemStack.EMPTY;
+        if (input && entry.has("tag")) {
+            String tag = entry.get("tag").getAsString();
+            itemInputTags[slot] = tag;
+            JsonObject ingredientJson = new JsonObject();
+            ingredientJson.addProperty("tag", tag);
+            try {
+                ItemStack[] options = Ingredient.fromJson(ingredientJson).getItems();
+                if (options.length > 0) {
+                    display = options[0].copy();
+                    display.setCount(1);
+                }
+            } catch (Throwable ignored) {
+            }
+        } else {
+            String itemId = requiredString(entry, "item");
+            display = stackFromItemId(itemId);
+            if (entry.has("nbt")) {
+                String rawNbt = entry.get("nbt").getAsString();
+                if (!rawNbt.isBlank()) {
+                    try {
+                        display.setTag(TagParser.parseTag(rawNbt));
+                    } catch (CommandSyntaxException exception) {
+                        throw new IllegalArgumentException(
+                                "Некорректный NBT для " + itemId + ": " + exception.getMessage(),
+                                exception
+                        );
+                    }
+                }
+            }
+        }
+
+        menu.setGhostItem(slot, display);
+        RecipeEditorNetwork.CHANNEL.sendToServer(new RecipeEditorGhostUpdatePacket(slot, display));
+
+        itemCounts[slot] = Math.max(1, optionalInt(entry, "count", 1));
+        itemChances[slot] = clamp(optionalInt(entry, "chance", 10_000), 0, 10_000);
+        itemTierChanceBoosts[slot] = optionalInt(entry, "tier_chance_boost", 0);
+        if (input) {
+            itemNotConsumable[slot] = entry.has("not_consumable") && entry.get("not_consumable").getAsBoolean();
+            if (itemNotConsumable[slot]) {
+                itemChances[slot] = 10_000;
+            }
+        }
+    }
+
+    private void loadFluidEntry(int slot, JsonObject entry, boolean input) {
+        String rawFluidId = requiredString(entry, "fluid");
+        ResourceLocation fluidId = ResourceLocation.tryParse(rawFluidId);
+        if (fluidId == null) {
+            throw new IllegalArgumentException("Некорректный ID жидкости: " + rawFluidId);
+        }
+        if (ForgeRegistries.FLUIDS.getValue(fluidId) == null) {
+            throw new IllegalArgumentException("Неизвестная жидкость: " + fluidId);
+        }
+        fluidIds[slot] = fluidId;
+        fluidAmounts[slot] = Math.max(1L, optionalLong(entry, "amount", 1L));
+        fluidChances[slot] = clamp(optionalInt(entry, "chance", 10_000), 0, 10_000);
+        fluidTierChanceBoosts[slot] = optionalInt(entry, "tier_chance_boost", 0);
+        if (input) {
+            fluidNotConsumable[slot] = entry.has("not_consumable") && entry.get("not_consumable").getAsBoolean();
+            if (fluidNotConsumable[slot]) {
+                fluidChances[slot] = 10_000;
+            }
+        }
+    }
+
+    private ItemStack stackFromItemId(String rawId) {
+        ResourceLocation id = ResourceLocation.tryParse(rawId);
+        if (id == null) {
+            throw new IllegalArgumentException("Некорректный ID предмета: " + rawId);
+        }
+        Item item = ForgeRegistries.ITEMS.getValue(id);
+        if (item == null) {
+            throw new IllegalArgumentException("Неизвестный предмет: " + id);
+        }
+        return new ItemStack(item, 1);
+    }
+
+    private void clearRecipeData() {
+        Arrays.fill(itemCounts, 1);
+        Arrays.fill(itemChances, 10_000);
+        Arrays.fill(itemTierChanceBoosts, 0);
+        Arrays.fill(itemNotConsumable, false);
+        Arrays.fill(itemInputTags, null);
+        Arrays.fill(fluidIds, null);
+        Arrays.fill(fluidAmounts, 1_000L);
+        Arrays.fill(fluidChances, 10_000);
+        Arrays.fill(fluidTierChanceBoosts, 0);
+        Arrays.fill(fluidNotConsumable, false);
+
+        for (int slot = 0; slot < RecipeEditorMenu.GHOST_SLOT_COUNT; slot++) {
+            menu.setGhostItem(slot, ItemStack.EMPTY);
+            RecipeEditorNetwork.CHANNEL.sendToServer(new RecipeEditorGhostUpdatePacket(slot, ItemStack.EMPTY));
+        }
+    }
+
+    private static void removeManagedFields(JsonObject recipe) {
+        String[] fields = {
+                "enabled", "type", "id", "duration", "eut", "circuit", "priority",
+                "blast_furnace_temp", "heat", "mana_per_tick", "temperature",
+                "item_inputs", "item_outputs", "fluid_inputs", "fluid_outputs"
+        };
+        for (String field : fields) {
+            recipe.remove(field);
+        }
+    }
+
+    private static JsonArray optionalArray(JsonObject object, String field) {
+        if (!object.has(field)) {
+            return new JsonArray();
+        }
+        JsonElement element = object.get(field);
+        if (!element.isJsonArray()) {
+            throw new IllegalArgumentException(field + " должен быть массивом");
+        }
+        return element.getAsJsonArray();
+    }
+
+    private static String requiredString(JsonObject object, String field) {
+        if (object == null || !object.has(field)) {
+            throw new IllegalArgumentException("В JSON нет поля " + field);
+        }
+        String value = object.get(field).getAsString().trim();
+        if (value.isEmpty()) {
+            throw new IllegalArgumentException("Поле " + field + " пустое");
+        }
+        return value;
+    }
+
+    private static int requiredInt(JsonObject object, String field, int fallback) {
+        if (object == null || !object.has(field)) {
+            return fallback;
+        }
+        return object.get(field).getAsInt();
+    }
+
+    private static int optionalInt(JsonObject object, String field, int fallback) {
+        return object != null && object.has(field) ? object.get(field).getAsInt() : fallback;
+    }
+
+    private static long optionalLong(JsonObject object, String field, long fallback) {
+        return object != null && object.has(field) ? object.get(field).getAsLong() : fallback;
+    }
+
     private void clearEditor() {
         idBox.setValue("cointcoregto:my_recipe");
         typeBox.setValue(menu.getInitialRecipeType());
@@ -444,20 +732,9 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
         manaBox.setValue("0");
         temperatureBox.setValue("0");
 
-        Arrays.fill(itemCounts, 1);
-        Arrays.fill(itemChances, 10_000);
-        Arrays.fill(itemTierChanceBoosts, 0);
-        Arrays.fill(itemNotConsumable, false);
-        Arrays.fill(fluidIds, null);
-        Arrays.fill(fluidAmounts, 1_000L);
-        Arrays.fill(fluidChances, 10_000);
-        Arrays.fill(fluidTierChanceBoosts, 0);
-        Arrays.fill(fluidNotConsumable, false);
-
-        for (int slot = 0; slot < RecipeEditorMenu.GHOST_SLOT_COUNT; slot++) {
-            menu.setGhostItem(slot, ItemStack.EMPTY);
-            RecipeEditorNetwork.CHANNEL.sendToServer(new RecipeEditorGhostUpdatePacket(slot, ItemStack.EMPTY));
-        }
+        editingRelativePath = "";
+        preservedRecipeFields = null;
+        clearRecipeData();
 
         selectedGhostSlot = 0;
         selectedFluidSlot = 0;
@@ -496,6 +773,9 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
         RecipeEditorNetwork.CHANNEL.sendToServer(new RecipeEditorGhostUpdatePacket(index, template));
 
         itemCounts[index] = normalizeItemAmount(amount);
+        if (RecipeEditorMenu.isInputGhostSlot(index)) {
+            itemInputTags[index] = null;
+        }
         selectedGhostSlot = index;
         fluidSelection = false;
         refreshSelectedControls();
@@ -551,9 +831,24 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
         return true;
     }
 
-    public void onSaveResult(boolean success, String message) {
+    public void onSaveResult(boolean success, String message, String relativePath) {
         this.statusSuccess = success;
         this.statusText = message == null ? "" : message;
+        if (success && relativePath != null && !relativePath.isBlank()) {
+            this.editingRelativePath = relativePath;
+        }
+    }
+
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        // Do not let AbstractContainerScreen close the GUI on the inventory
+        // key (E by default) while the user is typing in an EditBox.
+        if (getFocused() instanceof EditBox
+                && minecraft != null
+                && minecraft.options.keyInventory.matches(keyCode, scanCode)) {
+            return true;
+        }
+        return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
     @Override
@@ -583,6 +878,9 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
         if (ghostSlot >= 0) {
             selectedGhostSlot = ghostSlot;
             fluidSelection = false;
+            if (RecipeEditorMenu.isInputGhostSlot(ghostSlot)) {
+                itemInputTags[ghostSlot] = null;
+            }
             refreshSelectedControls();
         }
 
@@ -792,9 +1090,12 @@ public final class RecipeEditorScreen extends AbstractContainerScreen<RecipeEdit
                     : selectedFluidSlot - FLUID_INPUT_SLOT_COUNT + 1)
                     + (id == null ? " (empty)" : ": " + id);
         }
-        return RecipeEditorMenu.isInputGhostSlot(selectedGhostSlot)
-                ? "Selected item IN " + (selectedGhostSlot + 1)
-                : "Selected item OUT " + (selectedGhostSlot - RecipeEditorMenu.INPUT_SLOT_COUNT + 1);
+        if (RecipeEditorMenu.isInputGhostSlot(selectedGhostSlot)) {
+            String tag = itemInputTags[selectedGhostSlot];
+            return "Selected item IN " + (selectedGhostSlot + 1)
+                    + (tag == null ? "" : " [tag: " + tag + "]");
+        }
+        return "Selected item OUT " + (selectedGhostSlot - RecipeEditorMenu.INPUT_SLOT_COUNT + 1);
     }
 
     private String[] getParameterHelp(int mouseX, int mouseY) {

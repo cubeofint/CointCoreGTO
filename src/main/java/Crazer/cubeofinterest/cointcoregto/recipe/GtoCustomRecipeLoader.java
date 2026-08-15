@@ -16,6 +16,8 @@ import net.minecraft.world.level.material.Fluid;
 import net.minecraftforge.fluids.FluidStack;
 import net.minecraftforge.fml.loading.FMLPaths;
 import net.minecraftforge.registries.ForgeRegistries;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -30,6 +32,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 public final class GtoCustomRecipeLoader {
+    private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO:GtoCustomRecipeLoader");
     public static final Path RECIPE_DIRECTORY = FMLPaths.CONFIGDIR.get()
             .resolve("cointcoregto")
             .resolve("gto_recipes");
@@ -37,11 +40,84 @@ public final class GtoCustomRecipeLoader {
     private static final String EXAMPLE_FILE_NAME = "example.json.disabled";
 
     private static final Map<MethodKey, Method> METHOD_CACHE = new HashMap<>();
+    private static final List<RegisteredRecipe> CLIENT_SYNCED_RECIPES = new ArrayList<>();
 
     private GtoCustomRecipeLoader() {
     }
 
     public record LoadResult(int loaded, int skipped, int failed, int files) {
+    }
+
+    /** Result of mirroring server-owned GT/GTO JSON into the client GTCEu recipe maps. */
+    public record ClientSyncResult(int loaded, int skipped, int failed, int files) {
+    }
+
+    /**
+     * Client-side mirror used only for recipe viewers. Machine execution remains
+     * authoritative on the server. The same parser/builder path is intentionally
+     * used so EMI sees exactly the recipe shape that GTCEu sees.
+     */
+    public static synchronized ClientSyncResult registerClientSyncedFiles(List<String> jsonFiles) {
+        clearClientSyncedRecipes();
+
+        int loaded = 0;
+        int skipped = 0;
+        int failed = 0;
+        int files = jsonFiles == null ? 0 : jsonFiles.size();
+        if (jsonFiles == null || jsonFiles.isEmpty()) {
+            return new ClientSyncResult(0, 0, 0, files);
+        }
+
+        for (int fileIndex = 0; fileIndex < jsonFiles.size(); fileIndex++) {
+            String json = jsonFiles.get(fileIndex);
+            String labelBase = "server-sync#" + (fileIndex + 1);
+            try {
+                JsonElement root = JsonParser.parseString(json);
+                List<JsonObject> recipes = extractRecipes(root, labelBase);
+                for (int recipeIndex = 0; recipeIndex < recipes.size(); recipeIndex++) {
+                    JsonObject recipe = recipes.get(recipeIndex);
+                    String label = labelBase + "/" + (recipeIndex + 1);
+                    try {
+                        if (!getBoolean(recipe, "enabled", true)) {
+                            skipped++;
+                            continue;
+                        }
+                        RegisteredRecipe registered = registerRecipe(recipe, label, true);
+                        CLIENT_SYNCED_RECIPES.add(registered);
+                        loaded++;
+                    } catch (Throwable throwable) {
+                        failed++;
+                        LOGGER.warn("Unable to mirror synced GT/GTO recipe {} on the client", label, throwable);
+                    }
+                }
+            } catch (Throwable throwable) {
+                failed++;
+                LOGGER.warn("Unable to parse synced GT/GTO recipe file {} on the client", labelBase, throwable);
+            }
+        }
+        return new ClientSyncResult(loaded, skipped, failed, files);
+    }
+
+    /** Removes the recipes mirrored for the previous multiplayer connection. */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static synchronized void clearClientSyncedRecipes() {
+        for (RegisteredRecipe registered : CLIENT_SYNCED_RECIPES) {
+            try {
+                Field recipesField = registered.recipeType().getClass().getField("recipes");
+                Object recipesObject = recipesField.get(registered.recipeType());
+                if (recipesObject instanceof Map map) {
+                    map.remove(registered.runtimeId());
+                }
+            } catch (Throwable ignored) {
+            }
+
+            // GTCEu versions differ here. If a symmetric category-removal method
+            // exists, use it; otherwise map removal is still enough to prevent
+            // machine-side lookup from retaining the old client mirror.
+            tryInvokeOneArgIfPresent(registered.recipeType(), "removeFromMainCategory", registered.recipeObject());
+            tryInvokeOneArgIfPresent(registered.recipeType(), "removeRecipe", registered.recipeObject());
+        }
+        CLIENT_SYNCED_RECIPES.clear();
     }
 
     private static final class MutableResult {
@@ -107,7 +183,7 @@ public final class GtoCustomRecipeLoader {
                         continue;
                     }
 
-                    RegisteredRecipe registered = registerRecipe(recipe, label);
+                    RegisteredRecipe registered = registerRecipe(recipe, label, false);
                     result.loaded++;
                 } catch (Throwable throwable) {
                     result.failed++;
@@ -156,11 +232,11 @@ public final class GtoCustomRecipeLoader {
         }
     }
 
-    private record RegisteredRecipe(Object runtimeId, ResourceLocation typeId) {
+    private record RegisteredRecipe(Object runtimeId, ResourceLocation typeId, Object recipeType, Object recipeObject) {
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
-    private static RegisteredRecipe registerRecipe(JsonObject json, String label) throws Exception {
+    private static RegisteredRecipe registerRecipe(JsonObject json, String label, boolean replaceExisting) throws Exception {
         ResourceLocation typeId = requireResourceLocation(json, "type", label);
         String configuredId = requireString(json, "id", label);
         String builderId = normalizeBuilderId(configuredId, label);
@@ -206,9 +282,14 @@ public final class GtoCustomRecipeLoader {
 
         Map recipesMap = (Map) recipesObject;
         if (recipesMap.containsKey(runtimeId)) {
-            throw new IllegalStateException(
-                    "Duplicate runtime recipe id '" + runtimeId + "' in type '" + typeId + "'"
-            );
+            if (!replaceExisting) {
+                throw new IllegalStateException(
+                        "Duplicate runtime recipe id '" + runtimeId + "' in type '" + typeId + "'"
+                );
+            }
+            Object previous = recipesMap.remove(runtimeId);
+            tryInvokeOneArgIfPresent(recipeType, "removeFromMainCategory", previous);
+            tryInvokeOneArgIfPresent(recipeType, "removeRecipe", previous);
         }
 
         recipesMap.put(runtimeId, builtRecipe);
@@ -234,7 +315,7 @@ public final class GtoCustomRecipeLoader {
             );
         }
 
-        return new RegisteredRecipe(runtimeId, typeId);
+        return new RegisteredRecipe(runtimeId, typeId, recipeType, builtRecipe);
     }
 
     private static void configureRecipe(Object builder, JsonObject json, String label) throws Exception {
@@ -650,6 +731,17 @@ public final class GtoCustomRecipeLoader {
                 throw error;
             }
             throw new RuntimeException(cause == null ? exception : cause);
+        }
+    }
+
+    private static void tryInvokeOneArgIfPresent(Object target, String name, Object argument) {
+        if (target == null || argument == null) {
+            return;
+        }
+        try {
+            Method method = findCompatibleOneArgMethod(target.getClass(), name, argument.getClass());
+            invoke(target, method, argument);
+        } catch (Throwable ignored) {
         }
     }
 

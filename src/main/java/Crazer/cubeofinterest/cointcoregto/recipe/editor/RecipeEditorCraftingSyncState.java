@@ -1,5 +1,6 @@
 package Crazer.cubeofinterest.cointcoregto.recipe.editor;
 
+import Crazer.cubeofinterest.cointcoregto.recipe.CraftingRecipeLoader;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -65,10 +66,18 @@ public final class RecipeEditorCraftingSyncState {
                 return null;
             }
             JsonObject root = element.getAsJsonObject();
-            if (!root.has("id")) {
+            if (root.has("enabled") && !root.get("enabled").getAsBoolean()) {
                 return null;
             }
-            return new ResourceLocation(root.get("id").getAsString());
+            if (!root.has("id") || !root.has("type")) {
+                return null;
+            }
+            ResourceLocation type = ResourceLocation.tryParse(root.get("type").getAsString());
+            ResourceLocation id = ResourceLocation.tryParse(root.get("id").getAsString());
+            if (type == null || id == null || !CraftingRecipeLoader.isSupportedType(type)) {
+                return null;
+            }
+            return id;
         } catch (Throwable ignored) {
             return null;
         }

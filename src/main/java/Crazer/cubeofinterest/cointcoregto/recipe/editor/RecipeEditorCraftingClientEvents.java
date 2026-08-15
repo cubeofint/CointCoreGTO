@@ -1,6 +1,7 @@
 package Crazer.cubeofinterest.cointcoregto.recipe.editor;
 
 import Crazer.cubeofinterest.cointcoregto.CointCoreGTO;
+import Crazer.cubeofinterest.cointcoregto.recipe.GtoCustomRecipeLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientPlayerNetworkEvent;
@@ -24,6 +25,8 @@ public final class RecipeEditorCraftingClientEvents {
         // Do not rely only on the server's very early PlayerLoggedInEvent packet.
         // Request the authoritative list again after the client has a live world.
         RecipeEditorCraftingSyncState.clear();
+        RecipeEditorGtoSyncState.clear();
+        GtoCustomRecipeLoader.clearClientSyncedRecipes();
         RecipeEditorClient.resetCraftingSyncLifecycle();
         requestTicks = REQUEST_DELAY_TICKS;
         requested = false;
@@ -32,6 +35,8 @@ public final class RecipeEditorCraftingClientEvents {
     @SubscribeEvent
     public static void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
         RecipeEditorCraftingSyncState.clear();
+        RecipeEditorGtoSyncState.clear();
+        GtoCustomRecipeLoader.clearClientSyncedRecipes();
         RecipeEditorClient.resetCraftingSyncLifecycle();
         requestTicks = -1;
         requested = false;

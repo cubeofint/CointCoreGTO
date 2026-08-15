@@ -1,18 +1,31 @@
 package Crazer.cubeofinterest.cointcoregto.recipe.editor;
 
+import Crazer.cubeofinterest.cointcoregto.recipe.GtoCustomRecipeLoader;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.MenuScreens;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.lang.reflect.Method;
+import java.util.Set;
+
 public final class RecipeEditorClient {
     private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO:RecipeSyncClient");
+    private static final int MAX_EMI_RELOAD_ATTEMPTS = 3;
 
     private static boolean emiReloadPending;
     private static int emiReloadWaitTicks;
+    private static int emiReloadAttempts;
+    private static boolean emiVerificationPending;
+    private static int emiVerificationTicks;
+
     private static int lastSyncedCraftingCount;
+    private static int lastSyncedGtoFileCount;
+    private static int lastMirroredGtoRecipes;
+    private static int lastMirroredGtoFailures;
 
     private RecipeEditorClient() {
     }
@@ -49,9 +62,9 @@ public final class RecipeEditorClient {
             }
 
             if (minecraft.screen instanceof RecipeEditorScreen screen) {
-                screen.onSaveResult(packet.success(), message);
+                screen.onSaveResult(packet.success(), message, packet.relativePath());
             } else if (minecraft.screen instanceof CraftingRecipeEditorScreen screen) {
-                screen.onSaveResult(packet.success(), message);
+                screen.onSaveResult(packet.success(), message, packet.relativePath());
             }
 
             if (minecraft.player != null) {
@@ -64,6 +77,42 @@ public final class RecipeEditorClient {
         });
     }
 
+    public static void handleServerFilesList(RecipeEditorServerFilesListPacket packet) {
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> {
+            if (minecraft.screen instanceof RecipeEditorServerBrowserScreen screen) {
+                screen.onList(packet);
+            }
+        });
+    }
+
+    public static void handleServerFileContent(RecipeEditorServerFileContentPacket packet) {
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> {
+            if (minecraft.screen instanceof RecipeEditorServerBrowserScreen screen) {
+                screen.onContent(packet);
+            }
+        });
+    }
+
+    public static void handleServerFileDeleteResult(RecipeEditorServerFileDeleteResultPacket packet) {
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> {
+            if (packet.success()) {
+                try {
+                    RecipeEditorFileService.deleteClientCopy(packet.crafting(), packet.relativePath());
+                } catch (Exception exception) {
+                    LOGGER.warn("Server recipe was deleted, but local mirror cleanup failed for {}",
+                            packet.relativePath(),
+                            exception);
+                }
+            }
+            if (minecraft.screen instanceof RecipeEditorServerBrowserScreen screen) {
+                screen.onDeleteResult(packet);
+            }
+        });
+    }
+
     public static void handleCraftingSync(RecipeEditorCraftingSyncPacket packet) {
         Minecraft minecraft = Minecraft.getInstance();
         minecraft.execute(() -> {
@@ -72,48 +121,168 @@ public final class RecipeEditorClient {
                 case ENTRY -> RecipeEditorCraftingSyncState.accept(packet.json());
                 case APPLY -> {
                     lastSyncedCraftingCount = RecipeEditorCraftingSyncState.apply();
-                    emiReloadPending = true;
-                    emiReloadWaitTicks = 0;
-                    LOGGER.info("Received {} server crafting recipe JSON files; waiting for EMI to become ready",
-                            lastSyncedCraftingCount);
+                    LOGGER.info("Received {} server crafting recipe JSON files", lastSyncedCraftingCount);
+                    scheduleEmiReload();
                 }
             }
         });
     }
 
+    public static void handleGtoSync(RecipeEditorGtoSyncPacket packet) {
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> {
+            switch (packet.action()) {
+                case RESET -> RecipeEditorGtoSyncState.begin();
+                case ENTRY -> RecipeEditorGtoSyncState.accept(packet.json());
+                case APPLY -> {
+                    lastSyncedGtoFileCount = RecipeEditorGtoSyncState.apply();
+                    GtoCustomRecipeLoader.ClientSyncResult result =
+                            GtoCustomRecipeLoader.registerClientSyncedFiles(RecipeEditorGtoSyncState.activeJson());
+                    lastMirroredGtoRecipes = result.loaded();
+                    lastMirroredGtoFailures = result.failed();
+                    LOGGER.info(
+                            "Mirrored server GT/GTO recipes into client GTCEu maps: files={}, loaded={}, skipped={}, failed={}",
+                            result.files(),
+                            result.loaded(),
+                            result.skipped(),
+                            result.failed()
+                    );
+                    scheduleEmiReload();
+                }
+            }
+        });
+    }
+
+    private static void scheduleEmiReload() {
+        emiReloadPending = true;
+        emiReloadWaitTicks = 0;
+        emiVerificationPending = false;
+        emiVerificationTicks = 0;
+    }
+
     public static void resetCraftingSyncLifecycle() {
         emiReloadPending = false;
         emiReloadWaitTicks = 0;
+        emiReloadAttempts = 0;
+        emiVerificationPending = false;
+        emiVerificationTicks = 0;
         lastSyncedCraftingCount = 0;
+        lastSyncedGtoFileCount = 0;
+        lastMirroredGtoRecipes = 0;
+        lastMirroredGtoFailures = 0;
     }
 
     /** Called from the client tick event after the player/world exist. */
     public static void tickCraftingSyncLifecycle() {
-        if (!emiReloadPending) {
-            return;
-        }
-
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player == null || minecraft.level == null || minecraft.getConnection() == null) {
             return;
         }
 
-        emiReloadWaitTicks++;
-        int status = emiStatus();
+        if (emiReloadPending) {
+            emiReloadWaitTicks++;
+            int status = emiStatus();
 
-        // EMI status: 2 = loaded, 1 = loading, 0 = not started, -1 = failed.
-        // If it is currently loading, let that reload finish first and then run one
-        // authoritative reload using the server-synced recipe state.
-        if (status == 1) {
+            // EMI 1.1.x: 1 = reloading, 2 = loaded. Do not restart it while its
+            // current worker is still baking recipes.
+            if (status == 1) {
+                return;
+            }
+
+            if (status == 2 || emiReloadWaitTicks >= 60) {
+                emiReloadPending = false;
+                emiReloadAttempts++;
+                LOGGER.info(
+                        "Reloading EMI after server recipe sync: craftingFiles={}, gtoFiles={}, gtoRecipes={}, gtoFailed={}, attempt={}, status={}",
+                        lastSyncedCraftingCount,
+                        lastSyncedGtoFileCount,
+                        lastMirroredGtoRecipes,
+                        lastMirroredGtoFailures,
+                        emiReloadAttempts,
+                        status
+                );
+                reloadEmi();
+                emiVerificationPending = true;
+                emiVerificationTicks = 0;
+            }
             return;
         }
 
-        if (status == 2 || emiReloadWaitTicks >= 40) {
-            emiReloadPending = false;
-            LOGGER.info("Reloading EMI with {} server crafting recipes (EMI status={})",
-                    lastSyncedCraftingCount,
-                    status);
-            reloadEmi();
+        if (!emiVerificationPending) {
+            return;
+        }
+
+        emiVerificationTicks++;
+        int status = emiStatus();
+        if (status == 1 || emiVerificationTicks < 5) {
+            return;
+        }
+
+        if (status == Integer.MIN_VALUE) {
+            // EMI is not installed.
+            emiVerificationPending = false;
+            return;
+        }
+
+        if (status != 2) {
+            if (emiReloadAttempts < MAX_EMI_RELOAD_ATTEMPTS && emiVerificationTicks >= 60) {
+                LOGGER.warn("EMI did not reach loaded state after recipe sync (status={}); retrying", status);
+                emiVerificationPending = false;
+                emiReloadPending = true;
+                emiReloadWaitTicks = 0;
+            }
+            return;
+        }
+
+        Set<ResourceLocation> expected = RecipeEditorCraftingSyncState.shadowedRecipeIds();
+        int present = countCraftingRecipesPresentInEmi(expected);
+        LOGGER.info(
+                "EMI sync verification: crafting={}/{}, GT/GTO client recipes={}, GT/GTO failures={}",
+                present,
+                expected.size(),
+                lastMirroredGtoRecipes,
+                lastMirroredGtoFailures
+        );
+
+        if (present < expected.size() && emiReloadAttempts < MAX_EMI_RELOAD_ATTEMPTS) {
+            LOGGER.warn(
+                    "EMI is missing {} synced crafting recipes after reload; retrying",
+                    expected.size() - present
+            );
+            emiVerificationPending = false;
+            emiReloadPending = true;
+            emiReloadWaitTicks = 0;
+            return;
+        }
+
+        emiVerificationPending = false;
+    }
+
+    private static int countCraftingRecipesPresentInEmi(Set<ResourceLocation> ids) {
+        if (ids.isEmpty()) {
+            return 0;
+        }
+        try {
+            Class<?> apiClass = Class.forName("dev.emi.emi.api.EmiApi");
+            Object recipeManager = apiClass.getMethod("getRecipeManager").invoke(null);
+            if (recipeManager == null) {
+                return 0;
+            }
+            Class<?> managerInterface = Class.forName("dev.emi.emi.api.recipe.EmiRecipeManager");
+            Method getRecipe = managerInterface.getMethod("getRecipe", ResourceLocation.class);
+            int present = 0;
+            for (ResourceLocation id : ids) {
+                Object recipe = getRecipe.invoke(recipeManager, id);
+                if (recipe != null) {
+                    present++;
+                }
+            }
+            return present;
+        } catch (ClassNotFoundException ignored) {
+            return 0;
+        } catch (Throwable throwable) {
+            LOGGER.warn("Unable to verify synced crafting recipes in EMI", throwable);
+            return 0;
         }
     }
 
@@ -137,7 +306,7 @@ public final class RecipeEditorClient {
         } catch (ClassNotFoundException ignored) {
             // EMI is optional.
         } catch (Throwable throwable) {
-            LOGGER.error("Unable to reload EMI after server crafting sync", throwable);
+            LOGGER.error("Unable to reload EMI after server recipe sync", throwable);
         }
     }
 }

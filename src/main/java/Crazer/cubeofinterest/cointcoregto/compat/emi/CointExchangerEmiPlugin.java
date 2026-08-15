@@ -172,8 +172,8 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
                     continue;
                 }
 
-                ResourceLocation id = new ResourceLocation(requiredString(root, "id"));
-                ResourceLocation type = new ResourceLocation(requiredString(root, "type"));
+                ResourceLocation id = requiredResourceLocation(root, "id");
+                ResourceLocation type = requiredResourceLocation(root, "type");
                 if (!CraftingRecipeLoader.isSupportedType(type)) {
                     rejected++;
                     LOGGER.warn("Ignoring synced recipe {} because type {} is not supported by crafting EMI sync", id, type);
@@ -190,7 +190,7 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
         for (Map.Entry<ResourceLocation, JsonObject> entry : recipes.entrySet()) {
             try {
                 JsonObject root = entry.getValue();
-                ResourceLocation type = new ResourceLocation(requiredString(root, "type"));
+                ResourceLocation type = requiredResourceLocation(root, "type");
                 List<EmiIngredient> inputs = CraftingRecipeLoader.CRAFTING_SHAPED.equals(type)
                         ? parseShapedInputs(root)
                         : parseShapelessInputs(root);
@@ -198,7 +198,7 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
                 registry.addRecipe(new EmiCraftingRecipe(
                         inputs,
                         output,
-                        syncedEmiId(entry.getKey()),
+                        entry.getKey(),
                         CraftingRecipeLoader.CRAFTING_SHAPELESS.equals(type)
                 ));
                 registered++;
@@ -210,13 +210,6 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
 
         LOGGER.info("EMI server crafting sync: received={}, parsed={}, registered={}, rejected={}",
                 syncedJson.size(), recipes.size(), registered, rejected);
-    }
-
-    private static ResourceLocation syncedEmiId(ResourceLocation originalId) {
-        return new ResourceLocation(
-                "cointcoregto",
-                "server_synced_crafting/" + originalId.getNamespace() + "/" + originalId.getPath()
-        );
     }
 
     private static List<EmiIngredient> parseShapedInputs(JsonObject root) {
@@ -279,7 +272,10 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
         }
 
         if (hasItem) {
-            ResourceLocation id = new ResourceLocation(object.get("item").getAsString());
+            ResourceLocation id = ResourceLocation.tryParse(object.get("item").getAsString());
+            if (id == null) {
+                throw new IllegalArgumentException("Invalid crafting item id " + object.get("item").getAsString());
+            }
             Item item = ForgeRegistries.ITEMS.getValue(id);
             if (item == null) {
                 throw new IllegalArgumentException("Unknown crafting item " + id);
@@ -287,13 +283,16 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
             return EmiStack.of(item);
         }
 
-        ResourceLocation id = new ResourceLocation(object.get("tag").getAsString());
+        ResourceLocation id = ResourceLocation.tryParse(object.get("tag").getAsString());
+        if (id == null) {
+            throw new IllegalArgumentException("Invalid crafting tag id " + object.get("tag").getAsString());
+        }
         return EmiIngredient.of(TagKey.create(Registries.ITEM, id));
     }
 
     private static EmiStack parseCraftingOutput(JsonObject root) {
         JsonObject result = requiredObject(root, "result");
-        ResourceLocation id = new ResourceLocation(requiredString(result, "item"));
+        ResourceLocation id = requiredResourceLocation(result, "item");
         Item item = ForgeRegistries.ITEMS.getValue(id);
         if (item == null) {
             throw new IllegalArgumentException("Unknown crafting result " + id);
@@ -329,6 +328,15 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
             throw new IllegalArgumentException("Empty string " + name);
         }
         return value;
+    }
+
+    private static ResourceLocation requiredResourceLocation(JsonObject root, String name) {
+        String value = requiredString(root, name);
+        ResourceLocation id = ResourceLocation.tryParse(value);
+        if (id == null) {
+            throw new IllegalArgumentException("Invalid ResourceLocation in " + name + ": " + value);
+        }
+        return id;
     }
 
     private static ItemDrop toItemDrop(EmiIngredient ingredient) {

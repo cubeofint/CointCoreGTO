@@ -6,7 +6,7 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class RecipeEditorNetwork {
-    private static final String PROTOCOL = "3";
+    private static final String PROTOCOL = "5";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(CointCoreGTO.MODID, "recipe_editor"),
@@ -50,10 +50,52 @@ public final class RecipeEditorNetwork {
                 .consumerMainThread(RecipeEditorCraftingSyncPacket::handle)
                 .add();
 
-        CHANNEL.messageBuilder(RecipeEditorCraftingSyncRequestPacket.class, id)
+        CHANNEL.messageBuilder(RecipeEditorGtoSyncPacket.class, id++)
+                .encoder(RecipeEditorGtoSyncPacket::encode)
+                .decoder(RecipeEditorGtoSyncPacket::decode)
+                .consumerMainThread(RecipeEditorGtoSyncPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RecipeEditorCraftingSyncRequestPacket.class, id++)
                 .encoder(RecipeEditorCraftingSyncRequestPacket::encode)
                 .decoder(RecipeEditorCraftingSyncRequestPacket::decode)
                 .consumerMainThread(RecipeEditorCraftingSyncRequestPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RecipeEditorServerFilesRequestPacket.class, id++)
+                .encoder(RecipeEditorServerFilesRequestPacket::encode)
+                .decoder(RecipeEditorServerFilesRequestPacket::decode)
+                .consumerMainThread(RecipeEditorServerFilesRequestPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RecipeEditorServerFilesListPacket.class, id++)
+                .encoder(RecipeEditorServerFilesListPacket::encode)
+                .decoder(RecipeEditorServerFilesListPacket::decode)
+                .consumerMainThread(RecipeEditorServerFilesListPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RecipeEditorServerFileReadPacket.class, id++)
+                .encoder(RecipeEditorServerFileReadPacket::encode)
+                .decoder(RecipeEditorServerFileReadPacket::decode)
+                .consumerMainThread(RecipeEditorServerFileReadPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RecipeEditorServerFileContentPacket.class, id++)
+                .encoder(RecipeEditorServerFileContentPacket::encode)
+                .decoder(RecipeEditorServerFileContentPacket::decode)
+                .consumerMainThread(RecipeEditorServerFileContentPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RecipeEditorServerFileDeletePacket.class, id++)
+                .encoder(RecipeEditorServerFileDeletePacket::encode)
+                .decoder(RecipeEditorServerFileDeletePacket::decode)
+                .consumerMainThread(RecipeEditorServerFileDeletePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RecipeEditorServerFileDeleteResultPacket.class, id)
+                .encoder(RecipeEditorServerFileDeleteResultPacket::encode)
+                .decoder(RecipeEditorServerFileDeleteResultPacket::decode)
+                .consumerMainThread(RecipeEditorServerFileDeleteResultPacket::handle)
                 .add();
 
         registered = true;

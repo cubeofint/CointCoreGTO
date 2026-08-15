@@ -8,10 +8,8 @@ import java.util.function.Supplier;
 
 /**
  * Client -> server request used after the client has actually entered the world.
- *
- * The server also sends recipes on PlayerLoggedInEvent, but that packet can arrive
- * while EMI is still doing its first reload. This request gives us a deterministic
- * second sync once the client connection/world are ready.
+ * The server replies with both crafting and GT/GTO recipe sets. Keeping this
+ * request client-driven avoids racing EMI's initial reload.
  */
 public record RecipeEditorCraftingSyncRequestPacket() {
     public static void encode(RecipeEditorCraftingSyncRequestPacket packet, FriendlyByteBuf buffer) {
@@ -31,6 +29,7 @@ public record RecipeEditorCraftingSyncRequestPacket() {
             ServerPlayer player = context.getSender();
             if (player != null) {
                 RecipeEditorCraftingSyncService.sendTo(player);
+                RecipeEditorGtoSyncService.sendTo(player);
             }
         });
         context.setPacketHandled(true);

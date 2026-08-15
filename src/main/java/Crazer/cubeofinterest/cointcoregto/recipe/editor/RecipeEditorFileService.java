@@ -53,6 +53,19 @@ public final class RecipeEditorFileService {
     }
 
     public static SaveResult saveServerCopy(String rawJson) {
+        return saveServerCopy(rawJson, null, "");
+    }
+
+    /**
+     * Saves a recipe. When sourceRelativePath is present the selected server
+     * file is updated in-place, so opening a recipe from the remote browser and
+     * pressing Save does not create a duplicate under editor/<namespace>/.
+     */
+    public static SaveResult saveServerCopy(
+            String rawJson,
+            Boolean sourceCrafting,
+            String sourceRelativePath
+    ) {
         try {
             JsonObject root = parseRoot(rawJson);
             ResourceLocation type = resourceLocation(requiredString(root, "type"), "type");
@@ -64,20 +77,37 @@ public final class RecipeEditorFileService {
 
             ResourceLocation recipeId = resourceLocation(recipe.get("id").getAsString(), "id");
             String normalized = GSON.toJson(recipe) + System.lineSeparator();
-            Path relativePath = relativePath(recipeId);
-            Path baseDirectory = crafting
-                    ? CraftingRecipeLoader.RECIPE_DIRECTORY
-                    : GtoCustomRecipeLoader.RECIPE_DIRECTORY;
-            Path target = safeResolve(baseDirectory, relativePath);
 
-            Files.createDirectories(target.getParent());
+            boolean updateExisting = sourceRelativePath != null && !sourceRelativePath.isBlank();
+            Path relativePath;
+            Path target;
+
+            if (updateExisting) {
+                if (sourceCrafting == null || sourceCrafting.booleanValue() != crafting) {
+                    throw new IllegalArgumentException("Нельзя сохранить рецепт в папку другого типа");
+                }
+                target = RecipeEditorServerFileService.resolveExisting(crafting, sourceRelativePath);
+                Path baseDirectory = crafting
+                        ? CraftingRecipeLoader.RECIPE_DIRECTORY.toAbsolutePath().normalize()
+                        : GtoCustomRecipeLoader.RECIPE_DIRECTORY.toAbsolutePath().normalize();
+                relativePath = baseDirectory.relativize(target);
+            } else {
+                relativePath = relativePath(recipeId);
+                Path baseDirectory = crafting
+                        ? CraftingRecipeLoader.RECIPE_DIRECTORY
+                        : GtoCustomRecipeLoader.RECIPE_DIRECTORY;
+                target = safeResolve(baseDirectory, relativePath);
+                Files.createDirectories(target.getParent());
+            }
+
             Files.writeString(target, normalized, StandardCharsets.UTF_8);
 
+            String verb = updateExisting ? "обновлён" : "сохранён";
             return new SaveResult(
                     true,
                     crafting
-                            ? "Верстачный рецепт сохранён. CointCoreGTO загрузит его напрямую после полного рестарта; KubeJS не используется."
-                            : "GT/GTO рецепт сохранён. Нужен полный перезапуск клиента и сервера.",
+                            ? "Верстачный рецепт " + verb + ". Изменения RecipeManager применятся после полного рестарта сервера."
+                            : "GT/GTO рецепт " + verb + ". Нужен полный перезапуск клиента и сервера.",
                     normalizeSeparators(relativePath.toString()),
                     normalized
             );
@@ -103,6 +133,17 @@ public final class RecipeEditorFileService {
         Path target = safeResolve(base, relative);
         Files.createDirectories(target.getParent());
         Files.writeString(target, normalizedJson, StandardCharsets.UTF_8);
+    }
+
+    public static void deleteClientCopy(boolean crafting, String relativePath) throws IOException {
+        if (relativePath == null || relativePath.isBlank()) {
+            return;
+        }
+
+        Path base = crafting ? CLIENT_CRAFTING_RECIPE_DIRECTORY : CLIENT_GT_RECIPE_DIRECTORY;
+        Path relative = Path.of(relativePath.replace('/', java.io.File.separatorChar));
+        Path target = safeResolve(base, relative);
+        Files.deleteIfExists(target);
     }
 
     public static String clientDisplayPath(String relativePath, String normalizedJson) {
@@ -425,11 +466,11 @@ public final class RecipeEditorFileService {
     }
 
     private static ResourceLocation resourceLocation(String value, String field) {
-        try {
-            return new ResourceLocation(value);
-        } catch (RuntimeException exception) {
+        ResourceLocation id = ResourceLocation.tryParse(value);
+        if (id == null) {
             throw new IllegalArgumentException("Некорректный ResourceLocation в " + field + ": " + value);
         }
+        return id;
     }
 
     private static Path relativePath(ResourceLocation id) {

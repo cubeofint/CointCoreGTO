@@ -1,20 +1,13 @@
 package Crazer.cubeofinterest.cointcoregto.recipe.editor;
 
-import Crazer.cubeofinterest.cointcoregto.CointCoreGTO;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
-
-@Mod.EventBusSubscriber(modid = CointCoreGTO.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
+/**
+ * Intentionally no early PlayerLoggedInEvent sync.
+ *
+ * The client requests both crafting and GT/GTO recipe sets after its world and
+ * RecipeManager are live. This avoids racing EMI's initial reload and avoids
+ * sending the same GT/GTO recipes twice during one login.
+ */
 public final class RecipeEditorCraftingSyncEvents {
     private RecipeEditorCraftingSyncEvents() {
-    }
-
-    @SubscribeEvent
-    public static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
-        if (event.getEntity() instanceof ServerPlayer player) {
-            RecipeEditorCraftingSyncService.sendTo(player);
-        }
     }
 }
