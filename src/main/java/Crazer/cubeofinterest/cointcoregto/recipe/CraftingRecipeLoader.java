@@ -20,8 +20,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 public final class CraftingRecipeLoader {
@@ -44,6 +46,39 @@ public final class CraftingRecipeLoader {
     }
 
     public record LoadResult(int loaded, int skipped, int failed, int files) {
+    }
+
+    public static Set<ResourceLocation> discoverConfiguredRecipeIds() {
+        Set<ResourceLocation> ids = new LinkedHashSet<>();
+        try {
+            Files.createDirectories(RECIPE_DIRECTORY);
+            try (Stream<Path> stream = Files.walk(RECIPE_DIRECTORY)) {
+                for (Path file : stream
+                        .filter(Files::isRegularFile)
+                        .filter(path -> path.getFileName().toString().toLowerCase(java.util.Locale.ROOT).endsWith(".json"))
+                        .sorted()
+                        .toList()) {
+                    try {
+                        JsonElement element = JsonParser.parseString(Files.readString(file, StandardCharsets.UTF_8));
+                        if (!element.isJsonObject()) {
+                            continue;
+                        }
+                        JsonObject root = element.getAsJsonObject();
+                        if (!root.has("id") || !root.has("type")) {
+                            continue;
+                        }
+                        ResourceLocation type = new ResourceLocation(root.get("type").getAsString());
+                        if (!isSupportedType(type)) {
+                            continue;
+                        }
+                        ids.add(new ResourceLocation(root.get("id").getAsString()));
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return ids;
     }
 
     public static synchronized LoadResult loadIntoGTRecipeMap() {

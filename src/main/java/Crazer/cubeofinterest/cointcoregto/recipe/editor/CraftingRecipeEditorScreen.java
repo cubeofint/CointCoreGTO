@@ -377,7 +377,7 @@ public final class CraftingRecipeEditorScreen extends AbstractContainerScreen<Cr
             return new String[]{"OUTPUT + Count", "Результат крафта. Count 1..64; колесо над output меняет количество."};
         }
         if (inside(x, y, 116, 148, 112, 24)) {
-            return new String[]{"Сохранить рецепт", "Файл: config/cointcoregto/crafting_recipes/editor/. Вступит после полного рестарта."};
+            return new String[]{"Сохранить рецепт", "Файл хранится на сервере. После рестарта рецепт автоматически придет в EMI."};
         }
         return null;
     }

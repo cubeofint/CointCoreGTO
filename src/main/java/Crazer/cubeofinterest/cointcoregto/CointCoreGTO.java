@@ -673,6 +673,7 @@ public class CointCoreGTO {
     @SubscribeEvent
     public void onServerStarted(ServerStartedEvent event) {
         CURRENT_SERVER = event.getServer();
+        loadMutes();
         loadTempBans();
         loadLastLocations();
         loadWarns();
@@ -686,6 +687,7 @@ public class CointCoreGTO {
 
     @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
+        saveMutes();
         saveTempBans();
         saveLastLocations();
         saveWarns();
@@ -714,6 +716,10 @@ public class CointCoreGTO {
         if (isTempBanned(player)) {
             disconnectTempBannedPlayer(player);
             return;
+        }
+
+        if (isMuted(player)) {
+            sendMutedMessage(player);
         }
 
         saveLastLocation(player);
@@ -899,87 +905,9 @@ public class CointCoreGTO {
                                 }))
         );
 
-        event.getDispatcher().register(
-                Commands.literal("mute")
-                        .requires(source -> hasCommandPermission(source, "cointcoregto.mute"))
-                        .then(Commands.argument("target", EntityArgument.player())
-                                .then(Commands.argument("time", StringArgumentType.word())
-                                        .executes(ctx -> {
-                                            ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                            String time = StringArgumentType.getString(ctx, "time");
-                                            long duration = parsePunishmentTime(time);
+        registerMuteCommand(event, "mute");
 
-                                            if (duration <= 0L) {
-                                                ctx.getSource().sendFailure(Component.literal("Использование: /mute <ник> <10s/5m/2h/1d> [причина]"));
-                                                return 0;
-                                            }
-
-                                            mutePlayer(target, duration, "");
-                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "MUTE", getCommandSourceName(ctx.getSource()), duration, "");
-
-                                            ctx.getSource().sendSuccess(
-                                                    () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time),
-                                                    false
-                                            );
-                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил мут на §e" + time + "§f.");
-                                            target.sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
-                                            return 1;
-                                        })
-                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
-                                                .executes(ctx -> {
-                                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                                    String time = StringArgumentType.getString(ctx, "time");
-                                                    String reason = StringArgumentType.getString(ctx, "reason");
-                                                    long duration = parsePunishmentTime(time);
-
-                                                    if (duration <= 0L) {
-                                                        ctx.getSource().sendFailure(Component.literal("Использование: /mute <ник> <10s/5m/2h/1d> [причина]"));
-                                                        return 0;
-                                                    }
-
-                                                    mutePlayer(target, duration, reason);
-                                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "MUTE", getCommandSourceName(ctx.getSource()), duration, reason);
-
-                                                    ctx.getSource().sendSuccess(
-                                                            () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time + ". Причина: " + reason),
-                                                            false
-                                                    );
-                                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил мут на §e" + time + "§f. Причина: §7" + reason);
-                                                    target.sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
-                                                    target.sendSystemMessage(Component.literal("§cПричина: §f" + reason));
-                                                    return 1;
-                                                })
-                                        )
-                                )
-                        )
-        );
-
-        event.getDispatcher().register(
-                Commands.literal("unmute")
-                        .requires(source -> hasCommandPermission(source, "cointcoregto.mute"))
-                        .then(Commands.argument("target", EntityArgument.player())
-                                .executes(ctx -> {
-                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-
-                                    if (!MUTED_PLAYERS.containsKey(target.getUUID())) {
-                                        ctx.getSource().sendFailure(Component.literal("Игрок не замучен."));
-                                        return 0;
-                                    }
-
-                                    unmutePlayer(target);
-                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "UNMUTE", getCommandSourceName(ctx.getSource()), 0L, "");
-
-                                    ctx.getSource().sendSuccess(
-                                            () -> Component.literal("Мут снят с игрока " + target.getGameProfile().getName()),
-                                            false
-                                    );
-                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§a[Модерация] §fС игрока §e" + target.getGameProfile().getName() + " §fснят мут.");
-                                    target.sendSystemMessage(Component.literal("§aС тебя сняли мут"));
-                                    return 1;
-                                })
-                        )
-        );
-
+        registerUnmuteCommand(event, "unmute");
 
         event.getDispatcher().register(
                 Commands.literal("unban")
@@ -1009,59 +937,7 @@ public class CointCoreGTO {
         );
 
 
-        event.getDispatcher().register(
-                Commands.literal("tempban")
-                        .requires(source -> hasCommandPermission(source, "cointcoregto.tempban"))
-                        .then(Commands.argument("target", EntityArgument.player())
-                                .then(Commands.argument("time", StringArgumentType.word())
-                                        .executes(ctx -> {
-                                            ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                            String time = StringArgumentType.getString(ctx, "time");
-                                            long duration = parsePunishmentTime(time);
-
-                                            if (duration <= 0L) {
-                                                ctx.getSource().sendFailure(Component.literal("Использование: /tempban <ник> <10s/5m/2h/1d> [причина]"));
-                                                return 0;
-                                            }
-
-                                            tempBanPlayer(target, duration, "");
-                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "TEMPBAN", getCommandSourceName(ctx.getSource()), duration, "");
-
-                                            ctx.getSource().sendSuccess(
-                                                    () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time),
-                                                    false
-                                            );
-                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил временный бан на §e" + time + "§f.");
-                                            disconnectTempBannedPlayer(target);
-                                            return 1;
-                                        })
-                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
-                                                .executes(ctx -> {
-                                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                                    String time = StringArgumentType.getString(ctx, "time");
-                                                    String reason = StringArgumentType.getString(ctx, "reason");
-                                                    long duration = parsePunishmentTime(time);
-
-                                                    if (duration <= 0L) {
-                                                        ctx.getSource().sendFailure(Component.literal("Использование: /tempban <ник> <10s/5m/2h/1d> [причина]"));
-                                                        return 0;
-                                                    }
-
-                                                    tempBanPlayer(target, duration, reason);
-                                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "TEMPBAN", getCommandSourceName(ctx.getSource()), duration, reason);
-
-                                                    ctx.getSource().sendSuccess(
-                                                            () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time + ". Причина: " + reason),
-                                                            false
-                                                    );
-                                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил временный бан на §e" + time + "§f. Причина: §7" + reason);
-                                                    disconnectTempBannedPlayer(target);
-                                                    return 1;
-                                                })
-                                        )
-                                )
-                        )
-        );
+        registerTempBanCommand(event, "tempban");
 
         event.getDispatcher().register(
                 Commands.literal("untempban")
@@ -1092,46 +968,7 @@ public class CointCoreGTO {
         );
 
 
-        event.getDispatcher().register(
-                Commands.literal("warn")
-                        .requires(source -> hasCommandPermission(source, "cointcoregto.warn"))
-                        .then(Commands.argument("target", EntityArgument.player())
-                                .executes(ctx -> {
-                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-
-                                    warnPlayer(target, "");
-                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "WARN", getCommandSourceName(ctx.getSource()), 0L, "");
-
-                                    int count = getWarnCount(target.getUUID());
-                                    ctx.getSource().sendSuccess(
-                                            () -> Component.literal("Игрок " + target.getGameProfile().getName() + " получил предупреждение. Всего варнов: " + count),
-                                            false
-                                    );
-                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§e[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил предупреждение. Всего варнов: §e" + count + "§f.");
-                                    target.sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
-                                    return 1;
-                                })
-                                .then(Commands.argument("reason", StringArgumentType.greedyString())
-                                        .executes(ctx -> {
-                                            ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                            String reason = StringArgumentType.getString(ctx, "reason");
-
-                                            warnPlayer(target, reason);
-                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "WARN", getCommandSourceName(ctx.getSource()), 0L, reason);
-
-                                            int count = getWarnCount(target.getUUID());
-                                            ctx.getSource().sendSuccess(
-                                                    () -> Component.literal("Игрок " + target.getGameProfile().getName() + " получил предупреждение. Всего варнов: " + count + ". Причина: " + reason),
-                                                    false
-                                            );
-                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§e[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил предупреждение. Всего варнов: §e" + count + "§f. Причина: §7" + reason);
-                                            target.sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
-                                            target.sendSystemMessage(Component.literal("§cПричина: §f" + reason));
-                                            return 1;
-                                        })
-                                )
-                        )
-        );
+        registerWarnCommand(event, "warn");
 
         event.getDispatcher().register(
                 Commands.literal("warns")
@@ -1254,140 +1091,11 @@ public class CointCoreGTO {
         );
 
 
-        event.getDispatcher().register(
-                Commands.literal("cmute")
-                        .requires(source -> hasCommandPermission(source, "cointcoregto.mute"))
-                        .then(Commands.argument("target", EntityArgument.player())
-                                .then(Commands.argument("time", StringArgumentType.word())
-                                        .executes(ctx -> {
-                                            ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                            String time = StringArgumentType.getString(ctx, "time");
-                                            long duration = parsePunishmentTime(time);
+        registerMuteCommand(event, "cmute");
 
-                                            if (duration <= 0L) {
-                                                ctx.getSource().sendFailure(Component.literal("Использование: /cmute <ник> <10s/5m/2h/1d> [причина]"));
-                                                return 0;
-                                            }
+        registerUnmuteCommand(event, "cunmute");
 
-                                            mutePlayer(target, duration, "");
-                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "MUTE", getCommandSourceName(ctx.getSource()), duration, "");
-
-                                            ctx.getSource().sendSuccess(
-                                                    () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time),
-                                                    false
-                                            );
-                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил мут на §e" + time + "§f.");
-                                            target.sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
-                                            return 1;
-                                        })
-                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
-                                                .executes(ctx -> {
-                                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                                    String time = StringArgumentType.getString(ctx, "time");
-                                                    String reason = StringArgumentType.getString(ctx, "reason");
-                                                    long duration = parsePunishmentTime(time);
-
-                                                    if (duration <= 0L) {
-                                                        ctx.getSource().sendFailure(Component.literal("Использование: /cmute <ник> <10s/5m/2h/1d> [причина]"));
-                                                        return 0;
-                                                    }
-
-                                                    mutePlayer(target, duration, reason);
-                                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "MUTE", getCommandSourceName(ctx.getSource()), duration, reason);
-
-                                                    ctx.getSource().sendSuccess(
-                                                            () -> Component.literal("Игрок " + target.getGameProfile().getName() + " замучен на " + time + ". Причина: " + reason),
-                                                            false
-                                                    );
-                                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил мут на §e" + time + "§f. Причина: §7" + reason);
-                                                    target.sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
-                                                    target.sendSystemMessage(Component.literal("§cПричина: §f" + reason));
-                                                    return 1;
-                                                })
-                                        )
-                                )
-                        )
-        );
-
-        event.getDispatcher().register(
-                Commands.literal("cunmute")
-                        .requires(source -> hasCommandPermission(source, "cointcoregto.mute"))
-                        .then(Commands.argument("target", EntityArgument.player())
-                                .executes(ctx -> {
-                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-
-                                    if (!MUTED_PLAYERS.containsKey(target.getUUID())) {
-                                        ctx.getSource().sendFailure(Component.literal("Игрок не замучен."));
-                                        return 0;
-                                    }
-
-                                    unmutePlayer(target);
-                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "UNMUTE", getCommandSourceName(ctx.getSource()), 0L, "");
-
-                                    ctx.getSource().sendSuccess(
-                                            () -> Component.literal("Мут снят с игрока " + target.getGameProfile().getName()),
-                                            false
-                                    );
-                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.MUTE, "§a[Модерация] §fС игрока §e" + target.getGameProfile().getName() + " §fснят мут.");
-                                    target.sendSystemMessage(Component.literal("§aС тебя сняли мут"));
-                                    return 1;
-                                })
-                        )
-        );
-
-        event.getDispatcher().register(
-                Commands.literal("ctempban")
-                        .requires(source -> hasCommandPermission(source, "cointcoregto.tempban"))
-                        .then(Commands.argument("target", EntityArgument.player())
-                                .then(Commands.argument("time", StringArgumentType.word())
-                                        .executes(ctx -> {
-                                            ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                            String time = StringArgumentType.getString(ctx, "time");
-                                            long duration = parsePunishmentTime(time);
-
-                                            if (duration <= 0L) {
-                                                ctx.getSource().sendFailure(Component.literal("Использование: /ctempban <ник> <10s/5m/2h/1d> [причина]"));
-                                                return 0;
-                                            }
-
-                                            tempBanPlayer(target, duration, "");
-                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "TEMPBAN", getCommandSourceName(ctx.getSource()), duration, "");
-
-                                            ctx.getSource().sendSuccess(
-                                                    () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time),
-                                                    false
-                                            );
-                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил временный бан на §e" + time + "§f.");
-                                            disconnectTempBannedPlayer(target);
-                                            return 1;
-                                        })
-                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
-                                                .executes(ctx -> {
-                                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                                    String time = StringArgumentType.getString(ctx, "time");
-                                                    String reason = StringArgumentType.getString(ctx, "reason");
-                                                    long duration = parsePunishmentTime(time);
-
-                                                    if (duration <= 0L) {
-                                                        ctx.getSource().sendFailure(Component.literal("Использование: /ctempban <ник> <10s/5m/2h/1d> [причина]"));
-                                                        return 0;
-                                                    }
-
-                                                    tempBanPlayer(target, duration, reason);
-                                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "TEMPBAN", getCommandSourceName(ctx.getSource()), duration, reason);
-
-                                                    ctx.getSource().sendSuccess(
-                                                            () -> Component.literal("Игрок " + target.getGameProfile().getName() + " забанен на " + time + ". Причина: " + reason),
-                                                            false
-                                                    );
-                                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.BAN, "§c[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил временный бан на §e" + time + "§f. Причина: §7" + reason);
-                                                    disconnectTempBannedPlayer(target);
-                                                    return 1;
-                                                })
-                                        )
-                                )
-                        )
-        );
+        registerTempBanCommand(event, "ctempban");
 
         event.getDispatcher().register(
                 Commands.literal("cuntempban")
@@ -1417,46 +1125,7 @@ public class CointCoreGTO {
                         )
         );
 
-        event.getDispatcher().register(
-                Commands.literal("cwarn")
-                        .requires(source -> hasCommandPermission(source, "cointcoregto.warn"))
-                        .then(Commands.argument("target", EntityArgument.player())
-                                .executes(ctx -> {
-                                    ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-
-                                    warnPlayer(target, "");
-                                    recordPunishment(target.getUUID(), target.getGameProfile().getName(), "WARN", getCommandSourceName(ctx.getSource()), 0L, "");
-
-                                    int count = getWarnCount(target.getUUID());
-                                    ctx.getSource().sendSuccess(
-                                            () -> Component.literal("Игрок " + target.getGameProfile().getName() + " получил предупреждение. Всего варнов: " + count),
-                                            false
-                                    );
-                                    announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§e[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил предупреждение. Всего варнов: §e" + count + "§f.");
-                                    target.sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
-                                    return 1;
-                                })
-                                .then(Commands.argument("reason", StringArgumentType.greedyString())
-                                        .executes(ctx -> {
-                                            ServerPlayer target = EntityArgument.getPlayer(ctx, "target");
-                                            String reason = StringArgumentType.getString(ctx, "reason");
-
-                                            warnPlayer(target, reason);
-                                            recordPunishment(target.getUUID(), target.getGameProfile().getName(), "WARN", getCommandSourceName(ctx.getSource()), 0L, reason);
-
-                                            int count = getWarnCount(target.getUUID());
-                                            ctx.getSource().sendSuccess(
-                                                    () -> Component.literal("Игрок " + target.getGameProfile().getName() + " получил предупреждение. Всего варнов: " + count + ". Причина: " + reason),
-                                                    false
-                                            );
-                                            announcePunishment(ctx.getSource().getServer(), PunishmentAnnounceType.WARN, "§e[Модерация] §fИгрок §e" + target.getGameProfile().getName() + " §fполучил предупреждение. Всего варнов: §e" + count + "§f. Причина: §7" + reason);
-                                            target.sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
-                                            target.sendSystemMessage(Component.literal("§cПричина: §f" + reason));
-                                            return 1;
-                                        })
-                                )
-                        )
-        );
+        registerWarnCommand(event, "cwarn");
 
         event.getDispatcher().register(
                 Commands.literal("cwarns")
@@ -1806,6 +1475,243 @@ public class CointCoreGTO {
                                     return 1;
                                 }))
         );
+    }
+
+    private static void registerMuteCommand(RegisterCommandsEvent event, String commandName) {
+        event.getDispatcher().register(
+                Commands.literal(commandName)
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.mute"))
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
+                                .then(Commands.argument("time", StringArgumentType.word())
+                                        .executes(ctx -> executeMuteCommand(
+                                                ctx.getSource(),
+                                                commandName,
+                                                StringArgumentType.getString(ctx, "target"),
+                                                StringArgumentType.getString(ctx, "time"),
+                                                ""
+                                        ))
+                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                                .executes(ctx -> executeMuteCommand(
+                                                        ctx.getSource(),
+                                                        commandName,
+                                                        StringArgumentType.getString(ctx, "target"),
+                                                        StringArgumentType.getString(ctx, "time"),
+                                                        StringArgumentType.getString(ctx, "reason")
+                                                ))
+                                        )
+                                )
+                        )
+        );
+    }
+
+    private static int executeMuteCommand(
+            CommandSourceStack source,
+            String commandName,
+            String targetInput,
+            String time,
+            String reason
+    ) {
+        long duration = parsePunishmentTime(time);
+        if (duration <= 0L) {
+            source.sendFailure(Component.literal("Использование: /" + commandName + " <ник> <10s/5m/2h/1d> [причина]"));
+            return 0;
+        }
+
+        PunishmentTarget target = resolvePunishmentTarget(source.getServer(), targetInput);
+        if (target == null) {
+            source.sendFailure(Component.literal("Игрок не найден в известных данных сервера: " + targetInput));
+            return 0;
+        }
+
+        mutePlayer(target.uuid(), target.name(), duration, reason);
+        recordPunishment(target.uuid(), target.name(), "MUTE", getCommandSourceName(source), duration, reason);
+
+        String reasonSuffix = reason == null || reason.isBlank() ? "" : ". Причина: " + reason;
+        source.sendSuccess(
+                () -> Component.literal("Игрок " + target.name() + " замучен на " + time + reasonSuffix),
+                false
+        );
+
+        String announce = "§c[Модерация] §fИгрок §e" + target.name()
+                + " §fполучил мут на §e" + time + "§f.";
+        if (reason != null && !reason.isBlank()) {
+            announce += " Причина: §7" + reason;
+        }
+        announcePunishment(source.getServer(), PunishmentAnnounceType.MUTE, announce);
+
+        if (target.onlinePlayer() != null) {
+            target.onlinePlayer().sendSystemMessage(Component.literal("§cТы получил мут на §e" + time));
+            if (reason != null && !reason.isBlank()) {
+                target.onlinePlayer().sendSystemMessage(Component.literal("§cПричина: §f" + reason));
+            }
+        }
+
+        return 1;
+    }
+
+    private static void registerUnmuteCommand(RegisterCommandsEvent event, String commandName) {
+        event.getDispatcher().register(
+                Commands.literal(commandName)
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.mute"))
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
+                                .executes(ctx -> {
+                                    CommandSourceStack source = ctx.getSource();
+                                    String targetInput = StringArgumentType.getString(ctx, "target");
+                                    PunishmentTarget target = resolvePunishmentTarget(source.getServer(), targetInput);
+
+                                    if (target == null) {
+                                        source.sendFailure(Component.literal("Игрок не найден в известных данных сервера: " + targetInput));
+                                        return 0;
+                                    }
+
+                                    if (!unmutePlayer(target.uuid())) {
+                                        source.sendFailure(Component.literal("Игрок не замучен."));
+                                        return 0;
+                                    }
+
+                                    recordPunishment(target.uuid(), target.name(), "UNMUTE", getCommandSourceName(source), 0L, "");
+                                    source.sendSuccess(
+                                            () -> Component.literal("Мут снят с игрока " + target.name()),
+                                            false
+                                    );
+                                    announcePunishment(source.getServer(), PunishmentAnnounceType.MUTE,
+                                            "§a[Модерация] §fС игрока §e" + target.name() + " §fснят мут.");
+
+                                    if (target.onlinePlayer() != null) {
+                                        target.onlinePlayer().sendSystemMessage(Component.literal("§aС тебя сняли мут"));
+                                    }
+                                    return 1;
+                                })
+                        )
+        );
+    }
+
+    private static void registerTempBanCommand(RegisterCommandsEvent event, String commandName) {
+        event.getDispatcher().register(
+                Commands.literal(commandName)
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.tempban"))
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
+                                .then(Commands.argument("time", StringArgumentType.word())
+                                        .executes(ctx -> executeTempBanCommand(
+                                                ctx.getSource(),
+                                                commandName,
+                                                StringArgumentType.getString(ctx, "target"),
+                                                StringArgumentType.getString(ctx, "time"),
+                                                ""
+                                        ))
+                                        .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                                .executes(ctx -> executeTempBanCommand(
+                                                        ctx.getSource(),
+                                                        commandName,
+                                                        StringArgumentType.getString(ctx, "target"),
+                                                        StringArgumentType.getString(ctx, "time"),
+                                                        StringArgumentType.getString(ctx, "reason")
+                                                ))
+                                        )
+                                )
+                        )
+        );
+    }
+
+    private static int executeTempBanCommand(
+            CommandSourceStack source,
+            String commandName,
+            String targetInput,
+            String time,
+            String reason
+    ) {
+        long duration = parsePunishmentTime(time);
+        if (duration <= 0L) {
+            source.sendFailure(Component.literal("Использование: /" + commandName + " <ник> <10s/5m/2h/1d> [причина]"));
+            return 0;
+        }
+
+        PunishmentTarget target = resolvePunishmentTarget(source.getServer(), targetInput);
+        if (target == null) {
+            source.sendFailure(Component.literal("Игрок не найден в известных данных сервера: " + targetInput));
+            return 0;
+        }
+
+        tempBanPlayer(target.uuid(), target.name(), duration, reason);
+        recordPunishment(target.uuid(), target.name(), "TEMPBAN", getCommandSourceName(source), duration, reason);
+
+        String reasonSuffix = reason == null || reason.isBlank() ? "" : ". Причина: " + reason;
+        source.sendSuccess(
+                () -> Component.literal("Игрок " + target.name() + " забанен на " + time + reasonSuffix),
+                false
+        );
+
+        String announce = "§c[Модерация] §fИгрок §e" + target.name()
+                + " §fполучил временный бан на §e" + time + "§f.";
+        if (reason != null && !reason.isBlank()) {
+            announce += " Причина: §7" + reason;
+        }
+        announcePunishment(source.getServer(), PunishmentAnnounceType.BAN, announce);
+
+        if (target.onlinePlayer() != null) {
+            disconnectTempBannedPlayer(target.onlinePlayer());
+        }
+
+        return 1;
+    }
+
+    private static void registerWarnCommand(RegisterCommandsEvent event, String commandName) {
+        event.getDispatcher().register(
+                Commands.literal(commandName)
+                        .requires(source -> hasCommandPermission(source, "cointcoregto.warn"))
+                        .then(Commands.argument("target", StringArgumentType.word())
+                                .suggests((ctx, builder) -> suggestKnownPlayerNames(builder))
+                                .executes(ctx -> executeWarnCommand(
+                                        ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "target"),
+                                        ""
+                                ))
+                                .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                        .executes(ctx -> executeWarnCommand(
+                                                ctx.getSource(),
+                                                StringArgumentType.getString(ctx, "target"),
+                                                StringArgumentType.getString(ctx, "reason")
+                                        ))
+                                )
+                        )
+        );
+    }
+
+    private static int executeWarnCommand(CommandSourceStack source, String targetInput, String reason) {
+        PunishmentTarget target = resolvePunishmentTarget(source.getServer(), targetInput);
+        if (target == null) {
+            source.sendFailure(Component.literal("Игрок не найден в известных данных сервера: " + targetInput));
+            return 0;
+        }
+
+        warnPlayer(target.uuid(), target.name(), reason);
+        recordPunishment(target.uuid(), target.name(), "WARN", getCommandSourceName(source), 0L, reason);
+
+        int count = getWarnCount(target.uuid());
+        String reasonSuffix = reason == null || reason.isBlank() ? "" : ". Причина: " + reason;
+        source.sendSuccess(
+                () -> Component.literal("Игрок " + target.name() + " получил предупреждение. Всего варнов: " + count + reasonSuffix),
+                false
+        );
+
+        String announce = "§e[Модерация] §fИгрок §e" + target.name()
+                + " §fполучил предупреждение. Всего варнов: §e" + count + "§f.";
+        if (reason != null && !reason.isBlank()) {
+            announce += " Причина: §7" + reason;
+        }
+        announcePunishment(source.getServer(), PunishmentAnnounceType.WARN, announce);
+
+        if (target.onlinePlayer() != null) {
+            target.onlinePlayer().sendSystemMessage(Component.literal("§cТы получил предупреждение. Всего варнов: §e" + count));
+            if (reason != null && !reason.isBlank()) {
+                target.onlinePlayer().sendSystemMessage(Component.literal("§cПричина: §f" + reason));
+            }
+        }
+
+        return 1;
     }
 
 
@@ -3233,23 +3139,41 @@ public class CointCoreGTO {
         }
     }
 
-    private static void mutePlayer(ServerPlayer player, long durationMillis, String reason) {
+    private static void mutePlayer(UUID uuid, String name, long durationMillis, String reason) {
+        if (uuid == null) {
+            return;
+        }
+
         long untilMillis = System.currentTimeMillis() + durationMillis;
         MUTED_PLAYERS.put(
-                player.getUUID(),
-                new MuteData(player.getGameProfile().getName(), untilMillis, reason == null ? "" : reason)
+                uuid,
+                new MuteData(name == null ? "" : name, untilMillis, reason == null ? "" : reason)
         );
+        saveMutes();
     }
 
-    private static void unmutePlayer(ServerPlayer player) {
-        MUTED_PLAYERS.remove(player.getUUID());
+    private static boolean unmutePlayer(UUID uuid) {
+        if (uuid == null) {
+            return false;
+        }
+
+        MuteData removed = MUTED_PLAYERS.remove(uuid);
+        if (removed != null) {
+            saveMutes();
+            return true;
+        }
+        return false;
     }
 
-    private static void tempBanPlayer(ServerPlayer player, long durationMillis, String reason) {
+    private static void tempBanPlayer(UUID uuid, String name, long durationMillis, String reason) {
+        if (uuid == null) {
+            return;
+        }
+
         long untilMillis = System.currentTimeMillis() + durationMillis;
         TEMP_BANNED_PLAYERS.put(
-                player.getUUID(),
-                new TempBanData(player.getGameProfile().getName(), untilMillis, reason == null ? "" : reason)
+                uuid,
+                new TempBanData(name == null ? "" : name, untilMillis, reason == null ? "" : reason)
         );
         saveTempBans();
     }
@@ -3306,6 +3230,79 @@ public class CointCoreGTO {
         ));
     }
 
+
+    private static Path mutesPath() {
+        return FMLPaths.CONFIGDIR.get().resolve("cubechat-mutes.txt");
+    }
+
+    private static void loadMutes() {
+        MUTED_PLAYERS.clear();
+
+        Path path = mutesPath();
+        if (!Files.exists(path)) {
+            return;
+        }
+
+        try {
+            long now = System.currentTimeMillis();
+
+            for (String line : Files.readAllLines(path, StandardCharsets.UTF_8)) {
+                if (line == null || line.isBlank()) {
+                    continue;
+                }
+
+                String[] parts = line.split("\\t", 4);
+                if (parts.length < 4) {
+                    continue;
+                }
+
+                UUID uuid = UUID.fromString(parts[0]);
+                long untilMillis = Long.parseLong(parts[1]);
+                if (now >= untilMillis) {
+                    continue;
+                }
+
+                String name = decodeBase64(parts[2]);
+                String reason = decodeBase64(parts[3]);
+                MUTED_PLAYERS.put(uuid, new MuteData(name, untilMillis, reason));
+            }
+        } catch (Throwable e) {
+            System.out.println("[CointCoreGTO] Failed to load mutes: " + e.getMessage());
+        }
+    }
+
+    private static void saveMutes() {
+        Path path = mutesPath();
+
+        try {
+            Files.createDirectories(path.getParent());
+
+            long now = System.currentTimeMillis();
+            ArrayList<String> lines = new ArrayList<>();
+            ArrayList<UUID> expired = new ArrayList<>();
+
+            for (Map.Entry<UUID, MuteData> entry : MUTED_PLAYERS.entrySet()) {
+                MuteData data = entry.getValue();
+                if (now >= data.untilMillis()) {
+                    expired.add(entry.getKey());
+                    continue;
+                }
+
+                lines.add(entry.getKey()
+                        + "\t" + data.untilMillis()
+                        + "\t" + encodeBase64(data.name())
+                        + "\t" + encodeBase64(data.reason()));
+            }
+
+            for (UUID uuid : expired) {
+                MUTED_PLAYERS.remove(uuid);
+            }
+
+            Files.write(path, lines, StandardCharsets.UTF_8);
+        } catch (Throwable e) {
+            System.out.println("[CointCoreGTO] Failed to save mutes: " + e.getMessage());
+        }
+    }
 
     private static Path tempBansPath() {
         return FMLPaths.CONFIGDIR.get().resolve("cubechat-tempbans.txt");
@@ -3540,9 +3537,13 @@ public class CointCoreGTO {
         return FMLPaths.CONFIGDIR.get().resolve("cubechat-warns.txt");
     }
 
-    private static void warnPlayer(ServerPlayer player, String reason) {
-        ArrayList<WarnData> warns = WARNED_PLAYERS.computeIfAbsent(player.getUUID(), uuid -> new ArrayList<>());
-        warns.add(new WarnData(player.getGameProfile().getName(), System.currentTimeMillis(), reason == null ? "" : reason));
+    private static void warnPlayer(UUID uuid, String name, String reason) {
+        if (uuid == null) {
+            return;
+        }
+
+        ArrayList<WarnData> warns = WARNED_PLAYERS.computeIfAbsent(uuid, key -> new ArrayList<>());
+        warns.add(new WarnData(name == null ? "" : name, System.currentTimeMillis(), reason == null ? "" : reason));
         saveWarns();
     }
 
@@ -3586,6 +3587,38 @@ public class CointCoreGTO {
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             if (player.getGameProfile().getName().equalsIgnoreCase(name)) {
                 return player.getUUID();
+            }
+        }
+
+        for (Map.Entry<UUID, MuteData> entry : MUTED_PLAYERS.entrySet()) {
+            if (entry.getValue().name().equalsIgnoreCase(name)) {
+                return entry.getKey();
+            }
+        }
+
+        for (Map.Entry<UUID, TempBanData> entry : TEMP_BANNED_PLAYERS.entrySet()) {
+            if (entry.getValue().name().equalsIgnoreCase(name)) {
+                return entry.getKey();
+            }
+        }
+
+        for (Map.Entry<UUID, LastLocationData> entry : LAST_LOCATIONS.entrySet()) {
+            if (entry.getValue().name().equalsIgnoreCase(name)) {
+                return entry.getKey();
+            }
+        }
+
+        for (Map.Entry<UUID, ArrayList<WarnData>> entry : WARNED_PLAYERS.entrySet()) {
+            ArrayList<WarnData> warns = entry.getValue();
+            if (!warns.isEmpty() && warns.get(0).name().equalsIgnoreCase(name)) {
+                return entry.getKey();
+            }
+        }
+
+        for (Map.Entry<UUID, ArrayList<PunishmentHistoryData>> entry : PUNISHMENT_HISTORY.entrySet()) {
+            ArrayList<PunishmentHistoryData> history = entry.getValue();
+            if (!history.isEmpty() && history.get(history.size() - 1).name().equalsIgnoreCase(name)) {
+                return entry.getKey();
             }
         }
 
@@ -3635,6 +3668,59 @@ public class CointCoreGTO {
         }
 
         return null;
+    }
+
+
+    private static PunishmentTarget resolvePunishmentTarget(MinecraftServer server, String inputName) {
+        if (server == null || inputName == null || inputName.isBlank()) {
+            return null;
+        }
+
+        String requestedName = inputName.trim();
+        UUID uuid = findKnownUuidByName(server, requestedName);
+        if (uuid == null) {
+            return null;
+        }
+
+        ServerPlayer onlinePlayer = server.getPlayerList().getPlayer(uuid);
+        String resolvedName = requestedName;
+
+        if (onlinePlayer != null) {
+            resolvedName = onlinePlayer.getGameProfile().getName();
+        } else {
+            MuteData mute = MUTED_PLAYERS.get(uuid);
+            if (mute != null && mute.name() != null && !mute.name().isBlank()) {
+                resolvedName = mute.name();
+            }
+
+            TempBanData tempBan = TEMP_BANNED_PLAYERS.get(uuid);
+            if (tempBan != null && tempBan.name() != null && !tempBan.name().isBlank()) {
+                resolvedName = tempBan.name();
+            }
+
+            LastLocationData lastLocation = LAST_LOCATIONS.get(uuid);
+            if (lastLocation != null && lastLocation.name() != null && !lastLocation.name().isBlank()) {
+                resolvedName = lastLocation.name();
+            }
+
+            ArrayList<WarnData> warns = WARNED_PLAYERS.get(uuid);
+            if (warns != null && !warns.isEmpty()) {
+                String storedName = warns.get(0).name();
+                if (storedName != null && !storedName.isBlank()) {
+                    resolvedName = storedName;
+                }
+            }
+
+            ArrayList<PunishmentHistoryData> history = PUNISHMENT_HISTORY.get(uuid);
+            if (history != null && !history.isEmpty()) {
+                String storedName = history.get(history.size() - 1).name();
+                if (storedName != null && !storedName.isBlank()) {
+                    resolvedName = storedName;
+                }
+            }
+        }
+
+        return new PunishmentTarget(uuid, resolvedName, onlinePlayer);
     }
 
     private static boolean teleportToFtbHome(ServerPlayer admin, String homeName, String targetName) {
@@ -3861,6 +3947,10 @@ public class CointCoreGTO {
             }
         }
 
+        for (MuteData data : MUTED_PLAYERS.values()) {
+            suggestIfMatches(builder, suggestedNames, data.name(), remaining);
+        }
+
         for (TempBanData data : TEMP_BANNED_PLAYERS.values()) {
             suggestIfMatches(builder, suggestedNames, data.name(), remaining);
         }
@@ -3872,6 +3962,12 @@ public class CointCoreGTO {
         for (ArrayList<WarnData> warns : WARNED_PLAYERS.values()) {
             if (!warns.isEmpty()) {
                 suggestIfMatches(builder, suggestedNames, warns.get(0).name(), remaining);
+            }
+        }
+
+        for (ArrayList<PunishmentHistoryData> history : PUNISHMENT_HISTORY.values()) {
+            if (!history.isEmpty()) {
+                suggestIfMatches(builder, suggestedNames, history.get(history.size() - 1).name(), remaining);
             }
         }
 
@@ -4082,6 +4178,7 @@ public class CointCoreGTO {
 
         if (System.currentTimeMillis() >= data.untilMillis()) {
             MUTED_PLAYERS.remove(player.getUUID());
+            saveMutes();
             return false;
         }
 
@@ -4526,6 +4623,9 @@ public class CointCoreGTO {
     }
 
     private record ChatHistoryMessage(long order, ChatView view, String message, Component component) {
+    }
+
+    private record PunishmentTarget(UUID uuid, String name, ServerPlayer onlinePlayer) {
     }
 
     private record MuteData(String name, long untilMillis, String reason) {

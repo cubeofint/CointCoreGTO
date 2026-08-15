@@ -30,10 +30,7 @@ public final class RecipeEditorMachineUseHandler {
 
             if (!event.getLevel().isClientSide && event.getEntity() instanceof ServerPlayer player) {
                 if (!RecipeEditorItem.canEdit(player)) {
-                    player.sendSystemMessage(
-                            Component.literal("Recipe Editor доступен только в Creative или игрокам с правами OP.")
-                                    .withStyle(ChatFormatting.RED)
-                    );
+                    player.sendSystemMessage(RecipeEditorItem.accessDeniedMessage());
                     return;
                 }
                 RecipeEditorItem.openCraftingEditor(player);
@@ -65,10 +62,7 @@ public final class RecipeEditorMachineUseHandler {
         }
 
         if (!RecipeEditorItem.canEdit(player)) {
-            player.sendSystemMessage(
-                    Component.literal("Recipe Editor доступен только в Creative или игрокам с правами OP.")
-                            .withStyle(ChatFormatting.RED)
-            );
+            player.sendSystemMessage(RecipeEditorItem.accessDeniedMessage());
             return;
         }
 

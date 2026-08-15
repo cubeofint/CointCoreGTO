@@ -42,6 +42,16 @@ public final class RecipeEditorFileService {
         }
     }
 
+    public static boolean isCraftingRecipeJson(String rawJson) {
+        try {
+            JsonObject root = parseRoot(rawJson);
+            ResourceLocation type = resourceLocation(requiredString(root, "type"), "type");
+            return CraftingRecipeLoader.isSupportedType(type);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     public static SaveResult saveServerCopy(String rawJson) {
         try {
             JsonObject root = parseRoot(rawJson);

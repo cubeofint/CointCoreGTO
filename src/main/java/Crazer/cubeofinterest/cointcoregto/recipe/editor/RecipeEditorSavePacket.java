@@ -1,7 +1,6 @@
 package Crazer.cubeofinterest.cointcoregto.recipe.editor;
 
 import net.minecraft.network.FriendlyByteBuf;
-import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.network.NetworkEvent;
 import net.minecraftforge.network.PacketDistributor;
@@ -28,7 +27,7 @@ public record RecipeEditorSavePacket(String json) {
             }
 
             if (!RecipeEditorItem.canEdit(player)) {
-                player.sendSystemMessage(Component.literal("Recipe Editor доступен только в Creative или игрокам с правами OP."));
+                player.sendSystemMessage(RecipeEditorItem.accessDeniedMessage());
                 RecipeEditorNetwork.CHANNEL.send(
                         PacketDistributor.PLAYER.with(() -> player),
                         new RecipeEditorSaveResultPacket(false, "Недостаточно прав", "", "")

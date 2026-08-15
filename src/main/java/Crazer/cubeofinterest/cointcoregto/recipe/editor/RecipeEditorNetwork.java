@@ -6,7 +6,7 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class RecipeEditorNetwork {
-    private static final String PROTOCOL = "1";
+    private static final String PROTOCOL = "3";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(CointCoreGTO.MODID, "recipe_editor"),
@@ -38,10 +38,22 @@ public final class RecipeEditorNetwork {
                 .consumerMainThread(RecipeEditorSaveResultPacket::handle)
                 .add();
 
-        CHANNEL.messageBuilder(RecipeEditorGhostUpdatePacket.class, id)
+        CHANNEL.messageBuilder(RecipeEditorGhostUpdatePacket.class, id++)
                 .encoder(RecipeEditorGhostUpdatePacket::encode)
                 .decoder(RecipeEditorGhostUpdatePacket::decode)
                 .consumerMainThread(RecipeEditorGhostUpdatePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RecipeEditorCraftingSyncPacket.class, id++)
+                .encoder(RecipeEditorCraftingSyncPacket::encode)
+                .decoder(RecipeEditorCraftingSyncPacket::decode)
+                .consumerMainThread(RecipeEditorCraftingSyncPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RecipeEditorCraftingSyncRequestPacket.class, id)
+                .encoder(RecipeEditorCraftingSyncRequestPacket::encode)
+                .decoder(RecipeEditorCraftingSyncRequestPacket::decode)
+                .consumerMainThread(RecipeEditorCraftingSyncRequestPacket::handle)
                 .add();
 
         registered = true;
