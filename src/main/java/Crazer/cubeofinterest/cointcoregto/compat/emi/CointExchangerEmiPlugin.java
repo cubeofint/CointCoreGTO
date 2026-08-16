@@ -3,9 +3,11 @@ package Crazer.cubeofinterest.cointcoregto.compat.emi;
 import Crazer.cubeofinterest.cointcoregto.exchanger.ExchangerBlockEntity;
 import Crazer.cubeofinterest.cointcoregto.exchanger.ExchangerScreen;
 import Crazer.cubeofinterest.cointcoregto.recipe.CraftingRecipeLoader;
+import Crazer.cubeofinterest.cointcoregto.recipe.GtoCustomRecipeLoader;
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.CraftingRecipeEditorMenu;
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.CraftingRecipeEditorScreen;
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorCraftingSyncState;
+import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorGtoSyncState;
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorMenu;
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorScreen;
 import dev.emi.emi.api.EmiDragDropHandler;
@@ -13,6 +15,8 @@ import dev.emi.emi.api.EmiEntrypoint;
 import dev.emi.emi.api.EmiPlugin;
 import dev.emi.emi.api.EmiRegistry;
 import dev.emi.emi.api.recipe.EmiCraftingRecipe;
+import dev.emi.emi.api.recipe.EmiRecipe;
+import dev.emi.emi.api.recipe.EmiRecipeCategory;
 import dev.emi.emi.api.stack.EmiIngredient;
 import dev.emi.emi.api.stack.EmiStack;
 import dev.emi.emi.api.widget.Bounds;
@@ -20,6 +24,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import net.minecraft.client.Minecraft;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.TagKey;
@@ -30,6 +35,9 @@ import net.minecraftforge.registries.ForgeRegistries;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -41,6 +49,18 @@ import java.util.Set;
 @EmiEntrypoint
 public final class CointExchangerEmiPlugin implements EmiPlugin {
     private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO:EMI");
+
+
+    private static final class SyncedCraftingEmiRecipe extends EmiCraftingRecipe {
+        private SyncedCraftingEmiRecipe(
+                List<EmiIngredient> inputs,
+                EmiStack output,
+                ResourceLocation id,
+                boolean shapeless
+        ) {
+            super(inputs, output, id, shapeless);
+        }
+    }
 
     @Override
     public void register(EmiRegistry registry) {
@@ -82,7 +102,7 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
         registry.addDragDropHandler(
                 RecipeEditorScreen.class,
                 new EmiDragDropHandler.BoundsBased<RecipeEditorScreen>((screen, addTarget) -> {
-                    
+
                     for (int index = 0; index < RecipeEditorMenu.GHOST_SLOT_COUNT; index++) {
                         final int slotIndex = index;
                         addTarget.accept(
@@ -101,7 +121,7 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
                         );
                     }
 
-                    
+
                     for (int index = 0; index < RecipeEditorScreen.FLUID_SLOT_COUNT; index++) {
                         final int fluidIndex = index;
                         addTarget.accept(
@@ -146,15 +166,10 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
         );
 
         registerSyncedCraftingRecipes(registry);
+        registerSyncedGtoRecipes(registry);
     }
 
     private static void registerSyncedCraftingRecipes(EmiRegistry registry) {
-        Set<ResourceLocation> shadowed = new LinkedHashSet<>(CraftingRecipeLoader.discoverConfiguredRecipeIds());
-        shadowed.addAll(RecipeEditorCraftingSyncState.shadowedRecipeIds());
-        for (ResourceLocation id : shadowed) {
-            registry.removeRecipes(id);
-        }
-
         List<String> syncedJson = RecipeEditorCraftingSyncState.activeJson();
         Map<ResourceLocation, JsonObject> recipes = new LinkedHashMap<>();
         int rejected = 0;
@@ -186,8 +201,43 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
             }
         }
 
-        int registered = 0;
+
+        if (isIntegratedSingleplayer()) {
+            LOGGER.info(
+                    "EMI server crafting sync: received={}, parsed={}, singleplayerNative=true, nativePresent={}, registered=0, rejected={}",
+                    syncedJson.size(),
+                    recipes.size(),
+                    recipes.size(),
+                    rejected
+            );
+            return;
+        }
+
+
+        Map<ResourceLocation, JsonObject> missingOnClient = new LinkedHashMap<>();
+        Set<ResourceLocation> shadowed = new LinkedHashSet<>();
+        int nativePresent = 0;
         for (Map.Entry<ResourceLocation, JsonObject> entry : recipes.entrySet()) {
+            if (localCraftingRuntimeContains(entry.getKey())) {
+                nativePresent++;
+            } else {
+                missingOnClient.put(entry.getKey(), entry.getValue());
+                shadowed.add(entry.getKey());
+            }
+        }
+
+
+        if (!shadowed.isEmpty()) {
+            registry.removeRecipes(recipe ->
+                    recipe != null
+                            && recipe.getId() != null
+                            && shadowed.contains(recipe.getId())
+                            && !(recipe instanceof SyncedCraftingEmiRecipe)
+            );
+        }
+
+        int registered = 0;
+        for (Map.Entry<ResourceLocation, JsonObject> entry : missingOnClient.entrySet()) {
             try {
                 JsonObject root = entry.getValue();
                 ResourceLocation type = requiredResourceLocation(root, "type");
@@ -195,7 +245,7 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
                         ? parseShapedInputs(root)
                         : parseShapelessInputs(root);
                 EmiStack output = parseCraftingOutput(root);
-                registry.addRecipe(new EmiCraftingRecipe(
+                registry.addRecipe(new SyncedCraftingEmiRecipe(
                         inputs,
                         output,
                         entry.getKey(),
@@ -208,8 +258,338 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
             }
         }
 
-        LOGGER.info("EMI server crafting sync: received={}, parsed={}, registered={}, rejected={}",
-                syncedJson.size(), recipes.size(), registered, rejected);
+        LOGGER.info(
+                "EMI server crafting sync: received={}, parsed={}, nativePresent={}, registered={}, rejected={}",
+                syncedJson.size(),
+                recipes.size(),
+                nativePresent,
+                registered,
+                rejected
+        );
+    }
+
+    private static boolean isIntegratedSingleplayer() {
+        try {
+            return Minecraft.getInstance().getSingleplayerServer() != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    @SuppressWarnings("rawtypes")
+    private static boolean localCraftingRuntimeContains(ResourceLocation id) {
+
+
+        try {
+            Minecraft minecraft = Minecraft.getInstance();
+
+            if (minecraft.level != null
+                    && minecraft.level.getRecipeManager().byKey(id).isPresent()) {
+                return true;
+            }
+
+
+            var integratedServer = minecraft.getSingleplayerServer();
+            if (integratedServer != null
+                    && integratedServer.getRecipeManager().byKey(id).isPresent()) {
+                return true;
+            }
+        } catch (Throwable throwable) {
+            LOGGER.debug("Unable to check live RecipeManager for {}", id, throwable);
+        }
+
+
+        try {
+            Class<?> gtRecipesClass = Class.forName(
+                    "com.gregtechceu.gtceu.common.data.GTRecipes",
+                    false,
+                    CointExchangerEmiPlugin.class.getClassLoader()
+            );
+            Field recipeMapField = gtRecipesClass.getField("RECIPE_MAP");
+            Object rawMap = recipeMapField.get(null);
+            if (rawMap instanceof Map recipeMap) {
+                if (recipeMap.containsKey(id) || recipeMap.containsKey(id.toString())) {
+                    return true;
+                }
+                for (Object key : recipeMap.keySet()) {
+                    if (key != null && id.toString().equals(key.toString())) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable throwable) {
+            LOGGER.debug("Unable to check GTRecipes.RECIPE_MAP fallback for {}", id, throwable);
+        }
+
+        return false;
+    }
+
+    private static void registerSyncedGtoRecipes(EmiRegistry registry) {
+        List<String> syncedJson = RecipeEditorGtoSyncState.activeJson();
+        if (syncedJson.isEmpty()) {
+            return;
+        }
+
+        Map<ResourceLocation, JsonObject> recipes = new LinkedHashMap<>();
+        int rejected = 0;
+
+        for (int fileIndex = 0; fileIndex < syncedJson.size(); fileIndex++) {
+            String json = syncedJson.get(fileIndex);
+            try {
+                JsonElement root = JsonParser.parseString(json);
+                rejected += collectGtoRecipeObjects(root, recipes, "server-sync#" + (fileIndex + 1));
+            } catch (Throwable throwable) {
+                rejected++;
+                LOGGER.warn("Unable to parse server-synced GT/GTO recipe file #{} for EMI", fileIndex + 1, throwable);
+            }
+        }
+
+        if (recipes.isEmpty()) {
+            LOGGER.info("EMI server GT/GTO sync: files={}, parsed=0, queued=0, rejected={}",
+                    syncedJson.size(), rejected);
+            return;
+        }
+
+
+        final int fileCount = syncedJson.size();
+        final int parsedCount = recipes.size();
+        final int parseRejected = rejected;
+        final Map<ResourceLocation, JsonObject> deferredRecipes = new LinkedHashMap<>(recipes);
+
+        registry.addDeferredRecipes(addRecipe -> {
+            int registered = 0;
+            int nativePresent = 0;
+            int failed = 0;
+
+            for (Map.Entry<ResourceLocation, JsonObject> entry : deferredRecipes.entrySet()) {
+                ResourceLocation recipeId = entry.getKey();
+                JsonObject json = entry.getValue();
+                try {
+                    ResourceLocation typeId = requiredResourceLocation(json, "type");
+                    Object recipeType = GtoCustomRecipeLoader.findRecipeTypeForViewer(typeId);
+                    if (recipeType == null) {
+                        throw new IllegalStateException("GTCEu recipe type is unavailable: " + typeId);
+                    }
+
+                    Object gtRecipe = GtoCustomRecipeLoader.buildRecipeForViewer(
+                            json,
+                            "emi-server-sync:" + recipeId
+                    );
+
+
+                    if (GtoCustomRecipeLoader.isRecipeAlreadyRegisteredForViewer(recipeType, gtRecipe)) {
+                        nativePresent++;
+                        continue;
+                    }
+
+                    EmiRecipeCategory category = findNativeGtoCategory(typeId, recipeType);
+                    if (category == null) {
+                        throw new IllegalStateException(
+                                "Native GTCEu EMI category was not found for recipe type " + typeId
+                        );
+                    }
+
+                    EmiRecipe nativeRecipe = createNativeGtoEmiRecipe(gtRecipe, category);
+                    addRecipe.accept(nativeRecipe);
+                    registered++;
+                } catch (Throwable throwable) {
+                    failed++;
+                    LOGGER.warn(
+                            "Unable to attach server-synced GT/GTO recipe {} to its native GTCEu EMI machine category",
+                            recipeId,
+                            throwable
+                    );
+                }
+            }
+
+            LOGGER.info(
+                    "EMI native GT/GTO sync: files={}, parsed={}, nativePresent={}, registered={}, rejected={}",
+                    fileCount,
+                    parsedCount,
+                    nativePresent,
+                    registered,
+                    parseRejected + failed
+            );
+        });
+
+        LOGGER.info(
+                "Queued {} server GT/GTO recipes for native GTCEu EMI categories (files={}, rejected={})",
+                recipes.size(),
+                syncedJson.size(),
+                rejected
+        );
+    }
+
+
+    private static int collectGtoRecipeObjects(
+            JsonElement root,
+            Map<ResourceLocation, JsonObject> recipes,
+            String label
+    ) {
+        int rejected = 0;
+        if (root.isJsonArray()) {
+            JsonArray array = root.getAsJsonArray();
+            for (int i = 0; i < array.size(); i++) {
+                JsonElement element = array.get(i);
+                if (!element.isJsonObject()) {
+                    rejected++;
+                    LOGGER.warn("Ignoring GT/GTO entry {}#{} because it is not an object", label, i + 1);
+                    continue;
+                }
+                rejected += collectSingleGtoRecipe(element.getAsJsonObject(), recipes, label + "#" + (i + 1));
+            }
+            return rejected;
+        }
+
+        if (!root.isJsonObject()) {
+            LOGGER.warn("Ignoring GT/GTO file {} because root is neither object nor array", label);
+            return 1;
+        }
+
+        JsonObject object = root.getAsJsonObject();
+        if (object.has("recipes")) {
+            if (!object.get("recipes").isJsonArray()) {
+                LOGGER.warn("Ignoring GT/GTO file {} because 'recipes' is not an array", label);
+                return 1;
+            }
+            JsonArray array = object.getAsJsonArray("recipes");
+            for (int i = 0; i < array.size(); i++) {
+                JsonElement element = array.get(i);
+                if (!element.isJsonObject()) {
+                    rejected++;
+                    continue;
+                }
+                rejected += collectSingleGtoRecipe(element.getAsJsonObject(), recipes, label + "#" + (i + 1));
+            }
+            return rejected;
+        }
+
+        return collectSingleGtoRecipe(object, recipes, label);
+    }
+
+    private static int collectSingleGtoRecipe(
+            JsonObject recipe,
+            Map<ResourceLocation, JsonObject> recipes,
+            String label
+    ) {
+        try {
+            if (recipe.has("enabled") && !recipe.get("enabled").getAsBoolean()) {
+                return 0;
+            }
+            ResourceLocation id = requiredResourceLocation(recipe, "id");
+            requiredResourceLocation(recipe, "type");
+            recipes.put(id, recipe);
+            return 0;
+        } catch (Throwable throwable) {
+            LOGGER.warn("Ignoring invalid GT/GTO recipe {} in EMI sync", label, throwable);
+            return 1;
+        }
+    }
+
+
+    private static EmiRecipeCategory findNativeGtoCategory(
+            ResourceLocation typeId,
+            Object recipeType
+    ) throws Exception {
+        Class<?> emiRecipesClass = Class.forName(
+                "dev.emi.emi.registry.EmiRecipes",
+                false,
+                CointExchangerEmiPlugin.class.getClassLoader()
+        );
+        Field categoriesField = emiRecipesClass.getField("categories");
+        Object rawCategories = categoriesField.get(null);
+        if (!(rawCategories instanceof List<?> categories)) {
+            throw new IllegalStateException("EMI category registry is unavailable");
+        }
+
+
+        for (Object value : categories) {
+            if (value instanceof EmiRecipeCategory category && typeId.equals(category.getId())) {
+                return category;
+            }
+        }
+
+
+        for (Object value : categories) {
+            if (!(value instanceof EmiRecipeCategory category)) {
+                continue;
+            }
+            String className = category.getClass().getName();
+            if (!className.contains("GTRecipe") && !className.contains("RecipeEMI")) {
+                continue;
+            }
+            if (instanceReferences(category, recipeType)) {
+                return category;
+            }
+        }
+        return null;
+    }
+
+    private static boolean instanceReferences(Object owner, Object expected) {
+        for (Class<?> type = owner.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers())) {
+                    continue;
+                }
+                try {
+                    if (!field.canAccess(owner) && !field.trySetAccessible()) {
+                        continue;
+                    }
+                    Object value = field.get(owner);
+                    if (value == expected || (value != null && value.equals(expected))) {
+                        return true;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return false;
+    }
+
+
+    private static EmiRecipe createNativeGtoEmiRecipe(
+            Object gtRecipe,
+            EmiRecipeCategory category
+    ) throws Exception {
+        ClassLoader loader = CointExchangerEmiPlugin.class.getClassLoader();
+        String[] candidates = {
+                "com.gregtechceu.gtceu.integration.recipeviewer.emi.recipe.GTEmiRecipe",
+                "com.gregtechceu.gtceu.integration.emi.recipe.GTEmiRecipe"
+        };
+
+        Throwable lastFailure = null;
+        for (String className : candidates) {
+            Class<?> wrapperClass;
+            try {
+                wrapperClass = Class.forName(className, false, loader);
+            } catch (ClassNotFoundException exception) {
+                lastFailure = exception;
+                continue;
+            }
+
+            for (Constructor<?> constructor : wrapperClass.getDeclaredConstructors()) {
+                Class<?>[] parameters = constructor.getParameterTypes();
+                if (parameters.length != 2
+                        || !parameters[0].isInstance(gtRecipe)
+                        || !parameters[1].isInstance(category)) {
+                    continue;
+                }
+                if (!constructor.canAccess(null) && !constructor.trySetAccessible()) {
+                    continue;
+                }
+                Object value = constructor.newInstance(gtRecipe, category);
+                if (value instanceof EmiRecipe emiRecipe) {
+                    return emiRecipe;
+                }
+                throw new IllegalStateException(className + " does not implement EmiRecipe");
+            }
+
+            lastFailure = new NoSuchMethodException(
+                    "No compatible (GTRecipe, EmiRecipeCategory) constructor in " + className
+            );
+        }
+
+        throw new IllegalStateException("GTCEu native GTEmiRecipe wrapper was not found", lastFailure);
     }
 
     private static List<EmiIngredient> parseShapedInputs(JsonObject root) {
@@ -370,8 +750,7 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
                 continue;
             }
 
-            
-            
+
             long amount = emiStack.getAmount();
             if (amount <= 0L) {
                 amount = 1000L;

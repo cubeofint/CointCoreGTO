@@ -1,6 +1,5 @@
 package Crazer.cubeofinterest.cointcoregto.recipe.editor;
 
-import Crazer.cubeofinterest.cointcoregto.recipe.GtoCustomRecipeLoader;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.MenuScreens;
@@ -24,8 +23,6 @@ public final class RecipeEditorClient {
 
     private static int lastSyncedCraftingCount;
     private static int lastSyncedGtoFileCount;
-    private static int lastMirroredGtoRecipes;
-    private static int lastMirroredGtoFailures;
 
     private RecipeEditorClient() {
     }
@@ -136,16 +133,11 @@ public final class RecipeEditorClient {
                 case ENTRY -> RecipeEditorGtoSyncState.accept(packet.json());
                 case APPLY -> {
                     lastSyncedGtoFileCount = RecipeEditorGtoSyncState.apply();
-                    GtoCustomRecipeLoader.ClientSyncResult result =
-                            GtoCustomRecipeLoader.registerClientSyncedFiles(RecipeEditorGtoSyncState.activeJson());
-                    lastMirroredGtoRecipes = result.loaded();
-                    lastMirroredGtoFailures = result.failed();
+
+
                     LOGGER.info(
-                            "Mirrored server GT/GTO recipes into client GTCEu maps: files={}, loaded={}, skipped={}, failed={}",
-                            result.files(),
-                            result.loaded(),
-                            result.skipped(),
-                            result.failed()
+                            "Received {} server GT/GTO recipe JSON files; they will be attached to native GTCEu EMI categories",
+                            lastSyncedGtoFileCount
                     );
                     scheduleEmiReload();
                 }
@@ -154,10 +146,29 @@ public final class RecipeEditorClient {
     }
 
     private static void scheduleEmiReload() {
+
+
+        if (isIntegratedSingleplayer()) {
+            emiReloadPending = false;
+            emiReloadWaitTicks = 0;
+            emiVerificationPending = false;
+            emiVerificationTicks = 0;
+            LOGGER.info("Integrated server detected; skipping forced EMI server-recipe reload");
+            return;
+        }
+
         emiReloadPending = true;
         emiReloadWaitTicks = 0;
         emiVerificationPending = false;
         emiVerificationTicks = 0;
+    }
+
+    private static boolean isIntegratedSingleplayer() {
+        try {
+            return Minecraft.getInstance().getSingleplayerServer() != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     public static void resetCraftingSyncLifecycle() {
@@ -168,11 +179,9 @@ public final class RecipeEditorClient {
         emiVerificationTicks = 0;
         lastSyncedCraftingCount = 0;
         lastSyncedGtoFileCount = 0;
-        lastMirroredGtoRecipes = 0;
-        lastMirroredGtoFailures = 0;
     }
 
-    /** Called from the client tick event after the player/world exist. */
+
     public static void tickCraftingSyncLifecycle() {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player == null || minecraft.level == null || minecraft.getConnection() == null) {
@@ -183,8 +192,7 @@ public final class RecipeEditorClient {
             emiReloadWaitTicks++;
             int status = emiStatus();
 
-            // EMI 1.1.x: 1 = reloading, 2 = loaded. Do not restart it while its
-            // current worker is still baking recipes.
+
             if (status == 1) {
                 return;
             }
@@ -193,11 +201,9 @@ public final class RecipeEditorClient {
                 emiReloadPending = false;
                 emiReloadAttempts++;
                 LOGGER.info(
-                        "Reloading EMI after server recipe sync: craftingFiles={}, gtoFiles={}, gtoRecipes={}, gtoFailed={}, attempt={}, status={}",
+                        "Reloading EMI after server recipe sync: craftingFiles={}, gtoFiles={}, attempt={}, status={}",
                         lastSyncedCraftingCount,
                         lastSyncedGtoFileCount,
-                        lastMirroredGtoRecipes,
-                        lastMirroredGtoFailures,
                         emiReloadAttempts,
                         status
                 );
@@ -219,7 +225,7 @@ public final class RecipeEditorClient {
         }
 
         if (status == Integer.MIN_VALUE) {
-            // EMI is not installed.
+
             emiVerificationPending = false;
             return;
         }
@@ -237,11 +243,10 @@ public final class RecipeEditorClient {
         Set<ResourceLocation> expected = RecipeEditorCraftingSyncState.shadowedRecipeIds();
         int present = countCraftingRecipesPresentInEmi(expected);
         LOGGER.info(
-                "EMI sync verification: crafting={}/{}, GT/GTO client recipes={}, GT/GTO failures={}",
+                "EMI sync verification: crafting={}/{}, GT/GTO synced files={}",
                 present,
                 expected.size(),
-                lastMirroredGtoRecipes,
-                lastMirroredGtoFailures
+                lastSyncedGtoFileCount
         );
 
         if (present < expected.size() && emiReloadAttempts < MAX_EMI_RELOAD_ATTEMPTS) {
@@ -304,7 +309,7 @@ public final class RecipeEditorClient {
             Class<?> reloadManager = Class.forName("dev.emi.emi.runtime.EmiReloadManager");
             reloadManager.getMethod("reload").invoke(null);
         } catch (ClassNotFoundException ignored) {
-            // EMI is optional.
+
         } catch (Throwable throwable) {
             LOGGER.error("Unable to reload EMI after server recipe sync", throwable);
         }

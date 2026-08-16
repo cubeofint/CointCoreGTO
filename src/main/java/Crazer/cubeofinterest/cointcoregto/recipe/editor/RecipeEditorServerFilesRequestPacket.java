@@ -46,12 +46,7 @@ public record RecipeEditorServerFilesRequestPacket(boolean crafting) {
     }
 
     static boolean allowed(ServerPlayer player, boolean crafting) {
-        if (player == null || !RecipeEditorItem.canEdit(player)) {
-            return false;
-        }
-        return crafting
-                ? player.containerMenu instanceof CraftingRecipeEditorMenu
-                : player.containerMenu instanceof RecipeEditorMenu;
+        return player != null && RecipeEditorItem.canEdit(player);
     }
 
     static void send(ServerPlayer player, Object packet) {

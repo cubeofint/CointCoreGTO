@@ -47,16 +47,8 @@ public final class GtoCustomRecipeLoader {
 
     public record LoadResult(int loaded, int skipped, int failed, int files) {
     }
-
-    /** Result of mirroring server-owned GT/GTO JSON into the client GTCEu recipe maps. */
     public record ClientSyncResult(int loaded, int skipped, int failed, int files) {
     }
-
-    /**
-     * Client-side mirror used only for recipe viewers. Machine execution remains
-     * authoritative on the server. The same parser/builder path is intentionally
-     * used so EMI sees exactly the recipe shape that GTCEu sees.
-     */
     public static synchronized ClientSyncResult registerClientSyncedFiles(List<String> jsonFiles) {
         clearClientSyncedRecipes();
 
@@ -98,7 +90,7 @@ public final class GtoCustomRecipeLoader {
         return new ClientSyncResult(loaded, skipped, failed, files);
     }
 
-    /** Removes the recipes mirrored for the previous multiplayer connection. */
+
     @SuppressWarnings({"rawtypes", "unchecked"})
     public static synchronized void clearClientSyncedRecipes() {
         for (RegisteredRecipe registered : CLIENT_SYNCED_RECIPES) {
@@ -111,9 +103,7 @@ public final class GtoCustomRecipeLoader {
             } catch (Throwable ignored) {
             }
 
-            // GTCEu versions differ here. If a symmetric category-removal method
-            // exists, use it; otherwise map removal is still enough to prevent
-            // machine-side lookup from retaining the old client mirror.
+
             tryInvokeOneArgIfPresent(registered.recipeType(), "removeFromMainCategory", registered.recipeObject());
             tryInvokeOneArgIfPresent(registered.recipeType(), "removeRecipe", registered.recipeObject());
         }
@@ -647,6 +637,64 @@ public final class GtoCustomRecipeLoader {
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+
+    public static Object buildRecipeForViewer(JsonObject json, String label) throws Exception {
+        ResourceLocation typeId = requireResourceLocation(json, "type", label);
+        String configuredId = requireString(json, "id", label);
+        String builderId = normalizeBuilderId(configuredId, label);
+
+        Object recipeType = findRecipeType(typeId);
+        if (recipeType == null) {
+            throw new IllegalArgumentException("Unknown GT recipe type '" + typeId + "'");
+        }
+
+        Method builderMethod = findExactMethod(
+                recipeType.getClass(),
+                "builder",
+                String.class,
+                Object[].class
+        );
+        Object builder = invoke(recipeType, builderMethod, builderId, new Object[0]);
+        if (builder == null) {
+            throw new IllegalStateException("RecipeType.builder() returned null for " + typeId);
+        }
+
+        configureRecipe(builder, json, label);
+
+        Method buildMethod = findExactMethod(builder.getClass(), "build", boolean.class);
+        Object builtRecipe = invoke(builder, buildMethod, true);
+        if (builtRecipe == null) {
+            throw new IllegalStateException("RecipeBuilder.build(true) returned null");
+        }
+        return builtRecipe;
+    }
+
+
+    @SuppressWarnings("rawtypes")
+    public static boolean isRecipeAlreadyRegisteredForViewer(Object recipeType, Object builtRecipe) throws Exception {
+        if (recipeType == null || builtRecipe == null) {
+            return false;
+        }
+
+        Field idField = builtRecipe.getClass().getField("id");
+        Object runtimeId = idField.get(builtRecipe);
+        if (runtimeId == null) {
+            return false;
+        }
+
+        Field recipesField = recipeType.getClass().getField("recipes");
+        Object recipesObject = recipesField.get(recipeType);
+        return recipesObject instanceof Map recipesMap && recipesMap.containsKey(runtimeId);
+    }
+
+
+    public static Object findRecipeTypeForViewer(ResourceLocation typeId) throws Exception {
+        if (typeId == null) {
+            return null;
+        }
+        return findRecipeType(typeId);
     }
 
     private static Object findRecipeType(ResourceLocation typeId) throws Exception {
