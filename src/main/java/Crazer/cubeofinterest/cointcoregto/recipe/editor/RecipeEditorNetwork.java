@@ -6,7 +6,7 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class RecipeEditorNetwork {
-    private static final String PROTOCOL = "5";
+    private static final String PROTOCOL = "6";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(CointCoreGTO.MODID, "recipe_editor"),
@@ -92,10 +92,16 @@ public final class RecipeEditorNetwork {
                 .consumerMainThread(RecipeEditorServerFileDeletePacket::handle)
                 .add();
 
-        CHANNEL.messageBuilder(RecipeEditorServerFileDeleteResultPacket.class, id)
+        CHANNEL.messageBuilder(RecipeEditorServerFileDeleteResultPacket.class, id++)
                 .encoder(RecipeEditorServerFileDeleteResultPacket::encode)
                 .decoder(RecipeEditorServerFileDeleteResultPacket::decode)
                 .consumerMainThread(RecipeEditorServerFileDeleteResultPacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(RecipeEditorOpenModePacket.class, id)
+                .encoder(RecipeEditorOpenModePacket::encode)
+                .decoder(RecipeEditorOpenModePacket::decode)
+                .consumerMainThread(RecipeEditorOpenModePacket::handle)
                 .add();
 
         registered = true;

@@ -32,7 +32,7 @@ import java.util.List;
 public class ExchangerBlock extends BaseEntityBlock {
     public static final DirectionProperty FACING = BlockStateProperties.HORIZONTAL_FACING;
     public ExchangerBlock(Properties properties) {
-        super(properties);
+        super(properties.noOcclusion());
         this.registerDefaultState(
                 this.stateDefinition.any().setValue(FACING, Direction.NORTH)
         );

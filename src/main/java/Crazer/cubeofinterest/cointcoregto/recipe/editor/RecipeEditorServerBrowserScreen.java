@@ -143,10 +143,6 @@ public final class RecipeEditorServerBrowserScreen extends Screen {
         requestList();
     }
 
-    private boolean parentMatchesMode() {
-        return (crafting && parent instanceof CraftingRecipeEditorScreen)
-                || (!crafting && parent instanceof RecipeEditorScreen);
-    }
 
     private void requestList() {
         statusSuccess = true;
@@ -241,24 +237,16 @@ public final class RecipeEditorServerBrowserScreen extends Screen {
     }
 
     private void editSelected() {
-        if (selected == null || loadedJson.isBlank() || !selected.relativePath().equals(loadedPath)) {
+        if (selected == null || loadedJson.isBlank() || !samePath(selected.relativePath(), loadedPath)) {
             return;
         }
 
-        Minecraft minecraft = Minecraft.getInstance();
-        minecraft.setScreen(parent);
-        boolean loaded = false;
-        if (crafting && parent instanceof CraftingRecipeEditorScreen screen) {
-            loaded = screen.loadServerRecipe(loadedPath, loadedJson);
-        } else if (!crafting && parent instanceof RecipeEditorScreen screen) {
-            loaded = screen.loadServerRecipe(loadedPath, loadedJson);
-        }
-
-        if (!loaded) {
-            minecraft.setScreen(this);
-            statusSuccess = false;
-            status = "GUI не смог открыть этот JSON для редактирования. Его всё ещё можно просмотреть/удалить.";
-        }
+        RecipeEditorPendingOpen.queue(crafting, loadedPath, loadedJson);
+        statusSuccess = true;
+        status = crafting
+                ? "Открываю Crafting Recipe Editor..."
+                : "Открываю GT/GTO Recipe Editor...";
+        RecipeEditorNetwork.CHANNEL.sendToServer(new RecipeEditorOpenModePacket(crafting));
     }
 
     private void confirmDeleteStageOne() {
@@ -302,12 +290,11 @@ public final class RecipeEditorServerBrowserScreen extends Screen {
             return;
         }
         boolean hasSelection = selected != null;
-        editButton.active = parentMatchesMode()
-                && hasSelection
+        editButton.active = hasSelection
                 && selected.validJson()
                 && !loadedJson.isBlank()
                 && loadedJson.length() <= 64_000
-                && selected.relativePath().equals(loadedPath);
+                && samePath(selected.relativePath(), loadedPath);
         deleteButton.active = hasSelection;
         if (gtoTabButton != null) {
             gtoTabButton.active = crafting;
@@ -315,6 +302,13 @@ public final class RecipeEditorServerBrowserScreen extends Screen {
         if (craftingTabButton != null) {
             craftingTabButton.active = !crafting;
         }
+    }
+
+    private static boolean samePath(String first, String second) {
+        if (first == null || second == null) {
+            return false;
+        }
+        return first.replace('\\', '/').equals(second.replace('\\', '/'));
     }
 
     private void returnToParent() {
@@ -457,7 +451,7 @@ public final class RecipeEditorServerBrowserScreen extends Screen {
     }
 
     private List<FormattedCharSequence> previewLines() {
-        if (loadedJson.isBlank() || selected == null || !selected.relativePath().equals(loadedPath)) {
+        if (loadedJson.isBlank() || selected == null || !samePath(selected.relativePath(), loadedPath)) {
             return List.of(Component.literal("Загрузка JSON...").getVisualOrderText());
         }
 
