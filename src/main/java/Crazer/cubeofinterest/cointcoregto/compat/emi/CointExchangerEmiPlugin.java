@@ -10,12 +10,14 @@ import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorCraftingSync
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorGtoSyncState;
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorMenu;
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorScreen;
+import dev.emi.emi.api.EmiApi;
 import dev.emi.emi.api.EmiDragDropHandler;
 import dev.emi.emi.api.EmiEntrypoint;
 import dev.emi.emi.api.EmiPlugin;
 import dev.emi.emi.api.EmiRegistry;
 import dev.emi.emi.api.recipe.EmiCraftingRecipe;
 import dev.emi.emi.api.recipe.EmiRecipe;
+import dev.emi.emi.api.recipe.EmiRecipeManager;
 import dev.emi.emi.api.recipe.EmiRecipeCategory;
 import dev.emi.emi.api.stack.EmiIngredient;
 import dev.emi.emi.api.stack.EmiStack;
@@ -41,15 +43,12 @@ import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 @EmiEntrypoint
 public final class CointExchangerEmiPlugin implements EmiPlugin {
     private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO:EMI");
-
 
     private static final class SyncedCraftingEmiRecipe extends EmiCraftingRecipe {
         private SyncedCraftingEmiRecipe(
@@ -64,122 +63,144 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
 
     @Override
     public void register(EmiRegistry registry) {
-        registry.addDragDropHandler(
-                ExchangerScreen.class,
-                new EmiDragDropHandler.BoundsBased<ExchangerScreen>((screen, addTarget) -> {
-                    if (!screen.canAcceptEmiTemplates()) {
-                        return;
-                    }
+        try {
+            registry.addDragDropHandler(
+                    ExchangerScreen.class,
+                    new EmiDragDropHandler.BoundsBased<ExchangerScreen>((screen, addTarget) -> {
+                        if (!screen.canAcceptEmiTemplates()) {
+                            return;
+                        }
 
-                    addTarget.accept(
-                            new Bounds(
-                                    screen.getTemplateSlotScreenX(ExchangerBlockEntity.SLOT_PRODUCT) - 1,
-                                    screen.getTemplateSlotScreenY(ExchangerBlockEntity.SLOT_PRODUCT) - 1,
-                                    18,
-                                    18
-                            ),
-                            ingredient -> screen.setTemplateFromEmi(
-                                    ExchangerBlockEntity.SLOT_PRODUCT,
-                                    toItemStack(ingredient)
-                            )
-                    );
-
-                    addTarget.accept(
-                            new Bounds(
-                                    screen.getTemplateSlotScreenX(ExchangerBlockEntity.SLOT_PRICE) - 1,
-                                    screen.getTemplateSlotScreenY(ExchangerBlockEntity.SLOT_PRICE) - 1,
-                                    18,
-                                    18
-                            ),
-                            ingredient -> screen.setTemplateFromEmi(
-                                    ExchangerBlockEntity.SLOT_PRICE,
-                                    toItemStack(ingredient)
-                            )
-                    );
-                })
-        );
-
-        registry.addDragDropHandler(
-                RecipeEditorScreen.class,
-                new EmiDragDropHandler.BoundsBased<RecipeEditorScreen>((screen, addTarget) -> {
-
-                    for (int index = 0; index < RecipeEditorMenu.GHOST_SLOT_COUNT; index++) {
-                        final int slotIndex = index;
                         addTarget.accept(
                                 new Bounds(
-                                        screen.getItemTargetScreenX(slotIndex),
-                                        screen.getItemTargetScreenY(slotIndex),
-                                        screen.getItemTargetWidth(),
-                                        screen.getItemTargetHeight()
-                                ),
-                                ingredient -> {
-                                    ItemDrop item = toItemDrop(ingredient);
-                                    if (item != null) {
-                                        screen.setItemFromEmi(slotIndex, item.stack(), item.amount());
-                                    }
-                                }
-                        );
-                    }
-
-
-                    for (int index = 0; index < RecipeEditorScreen.FLUID_SLOT_COUNT; index++) {
-                        final int fluidIndex = index;
-                        addTarget.accept(
-                                new Bounds(
-                                        screen.getFluidTargetScreenX(fluidIndex),
-                                        screen.getFluidTargetScreenY(fluidIndex),
-                                        screen.getFluidTargetWidth(),
-                                        screen.getFluidTargetHeight()
-                                ),
-                                ingredient -> {
-                                    FluidDrop fluid = toFluid(ingredient);
-                                    if (fluid != null) {
-                                        screen.setFluidFromEmi(fluidIndex, fluid.id(), fluid.amount());
-                                    }
-                                }
-                        );
-                    }
-                })
-        );
-
-        registry.addDragDropHandler(
-                CraftingRecipeEditorScreen.class,
-                new EmiDragDropHandler.BoundsBased<CraftingRecipeEditorScreen>((screen, addTarget) -> {
-                    for (int index = 0; index < CraftingRecipeEditorMenu.GHOST_SLOT_COUNT; index++) {
-                        final int slotIndex = index;
-                        addTarget.accept(
-                                new Bounds(
-                                        screen.getItemTargetScreenX(slotIndex),
-                                        screen.getItemTargetScreenY(slotIndex),
+                                        screen.getTemplateSlotScreenX(ExchangerBlockEntity.SLOT_PRODUCT) - 1,
+                                        screen.getTemplateSlotScreenY(ExchangerBlockEntity.SLOT_PRODUCT) - 1,
                                         18,
                                         18
                                 ),
-                                ingredient -> {
-                                    ItemDrop item = toItemDrop(ingredient);
-                                    if (item != null) {
-                                        screen.setItemFromEmi(slotIndex, item.stack(), item.amount());
-                                    }
-                                }
+                                ingredient -> screen.setTemplateFromEmi(
+                                        ExchangerBlockEntity.SLOT_PRODUCT,
+                                        toItemStack(ingredient)
+                                )
                         );
-                    }
-                })
-        );
 
-        registerSyncedCraftingRecipes(registry);
-        registerSyncedGtoRecipes(registry);
+                        addTarget.accept(
+                                new Bounds(
+                                        screen.getTemplateSlotScreenX(ExchangerBlockEntity.SLOT_PRICE) - 1,
+                                        screen.getTemplateSlotScreenY(ExchangerBlockEntity.SLOT_PRICE) - 1,
+                                        18,
+                                        18
+                                ),
+                                ingredient -> screen.setTemplateFromEmi(
+                                        ExchangerBlockEntity.SLOT_PRICE,
+                                        toItemStack(ingredient)
+                                )
+                        );
+                    })
+            );
+        } catch (Throwable throwable) {
+            LOGGER.warn("Unable to register exchanger EMI drag/drop handler", throwable);
+        }
+
+        try {
+            registry.addDragDropHandler(
+                    RecipeEditorScreen.class,
+                    new EmiDragDropHandler.BoundsBased<RecipeEditorScreen>((screen, addTarget) -> {
+                        for (int index = 0; index < RecipeEditorMenu.GHOST_SLOT_COUNT; index++) {
+                            final int slotIndex = index;
+                            addTarget.accept(
+                                    new Bounds(
+                                            screen.getItemTargetScreenX(slotIndex),
+                                            screen.getItemTargetScreenY(slotIndex),
+                                            screen.getItemTargetWidth(),
+                                            screen.getItemTargetHeight()
+                                    ),
+                                    ingredient -> {
+                                        ItemDrop item = toItemDrop(ingredient);
+                                        if (item != null) {
+                                            screen.setItemFromEmi(slotIndex, item.stack(), item.amount());
+                                        }
+                                    }
+                            );
+                        }
+
+                        for (int index = 0; index < RecipeEditorScreen.FLUID_SLOT_COUNT; index++) {
+                            final int fluidIndex = index;
+                            addTarget.accept(
+                                    new Bounds(
+                                            screen.getFluidTargetScreenX(fluidIndex),
+                                            screen.getFluidTargetScreenY(fluidIndex),
+                                            screen.getFluidTargetWidth(),
+                                            screen.getFluidTargetHeight()
+                                    ),
+                                    ingredient -> {
+                                        FluidDrop fluid = toFluid(ingredient);
+                                        if (fluid != null) {
+                                            screen.setFluidFromEmi(fluidIndex, fluid.id(), fluid.amount());
+                                        }
+                                    }
+                            );
+                        }
+                    })
+            );
+        } catch (Throwable throwable) {
+            LOGGER.warn("Unable to register recipe editor EMI drag/drop handler", throwable);
+        }
+
+        try {
+            registry.addDragDropHandler(
+                    CraftingRecipeEditorScreen.class,
+                    new EmiDragDropHandler.BoundsBased<CraftingRecipeEditorScreen>((screen, addTarget) -> {
+                        for (int index = 0; index < CraftingRecipeEditorMenu.GHOST_SLOT_COUNT; index++) {
+                            final int slotIndex = index;
+                            addTarget.accept(
+                                    new Bounds(
+                                            screen.getItemTargetScreenX(slotIndex),
+                                            screen.getItemTargetScreenY(slotIndex),
+                                            18,
+                                            18
+                                    ),
+                                    ingredient -> {
+                                        ItemDrop item = toItemDrop(ingredient);
+                                        if (item != null) {
+                                            screen.setItemFromEmi(slotIndex, item.stack(), item.amount());
+                                        }
+                                    }
+                            );
+                        }
+                    })
+            );
+        } catch (Throwable throwable) {
+            LOGGER.warn("Unable to register crafting recipe editor EMI drag/drop handler", throwable);
+        }
     }
 
-    private static void registerSyncedCraftingRecipes(EmiRegistry registry) {
-        List<String> syncedJson = RecipeEditorCraftingSyncState.activeJson();
-        Map<ResourceLocation, JsonObject> recipes = new LinkedHashMap<>();
-        int rejected = 0;
+    private static ResourceLocation syncedCraftingViewerId(ResourceLocation originalId) {
+        return new ResourceLocation(
+                "cointcoregto",
+                "server_sync/crafting/" + originalId.getNamespace() + "/" + originalId.getPath()
+        );
+    }
 
-        for (String json : syncedJson) {
+    public static void injectSyncedRecipesIntoLiveManager() {
+        EmiRecipeManager current = EmiApi.getRecipeManager();
+        if (current == null) {
+            throw new IllegalStateException("EMI recipe manager is unavailable");
+        }
+
+        List<EmiRecipeCategory> categories = new ArrayList<>(current.getCategories());
+        Map<EmiRecipeCategory, List<EmiIngredient>> workstations = new LinkedHashMap<>();
+        for (EmiRecipeCategory category : categories) {
+            workstations.put(category, new ArrayList<>(current.getWorkstations(category)));
+        }
+
+        List<EmiRecipe> liveRecipes = new ArrayList<>(current.getRecipes());
+        liveRecipes.removeIf(CointExchangerEmiPlugin::isSyncedViewerRecipe);
+
+        for (String json : RecipeEditorCraftingSyncState.activeJson()) {
             try {
                 JsonElement element = JsonParser.parseString(json);
                 if (!element.isJsonObject()) {
-                    rejected++;
-                    LOGGER.warn("Ignoring synced crafting JSON because its root is not an object");
                     continue;
                 }
                 JsonObject root = element.getAsJsonObject();
@@ -187,98 +208,128 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
                     continue;
                 }
 
-                ResourceLocation id = requiredResourceLocation(root, "id");
+                ResourceLocation originalId = requiredResourceLocation(root, "id");
                 ResourceLocation type = requiredResourceLocation(root, "type");
                 if (!CraftingRecipeLoader.isSupportedType(type)) {
-                    rejected++;
-                    LOGGER.warn("Ignoring synced recipe {} because type {} is not supported by crafting EMI sync", id, type);
                     continue;
                 }
-                recipes.put(id, root);
-            } catch (Throwable throwable) {
-                rejected++;
-                LOGGER.warn("Unable to parse a server-synced crafting recipe for EMI", throwable);
-            }
-        }
+                if (localCraftingRuntimeContains(originalId) || current.getRecipe(originalId) != null) {
+                    continue;
+                }
 
-
-        if (isIntegratedSingleplayer()) {
-            LOGGER.info(
-                    "EMI server crafting sync: received={}, parsed={}, singleplayerNative=true, nativePresent={}, registered=0, rejected={}",
-                    syncedJson.size(),
-                    recipes.size(),
-                    recipes.size(),
-                    rejected
-            );
-            return;
-        }
-
-
-        Map<ResourceLocation, JsonObject> missingOnClient = new LinkedHashMap<>();
-        Set<ResourceLocation> shadowed = new LinkedHashSet<>();
-        int nativePresent = 0;
-        for (Map.Entry<ResourceLocation, JsonObject> entry : recipes.entrySet()) {
-            if (localCraftingRuntimeContains(entry.getKey())) {
-                nativePresent++;
-            } else {
-                missingOnClient.put(entry.getKey(), entry.getValue());
-                shadowed.add(entry.getKey());
-            }
-        }
-
-
-        if (!shadowed.isEmpty()) {
-            registry.removeRecipes(recipe ->
-                    recipe != null
-                            && recipe.getId() != null
-                            && shadowed.contains(recipe.getId())
-                            && !(recipe instanceof SyncedCraftingEmiRecipe)
-            );
-        }
-
-        int registered = 0;
-        for (Map.Entry<ResourceLocation, JsonObject> entry : missingOnClient.entrySet()) {
-            try {
-                JsonObject root = entry.getValue();
-                ResourceLocation type = requiredResourceLocation(root, "type");
                 List<EmiIngredient> inputs = CraftingRecipeLoader.CRAFTING_SHAPED.equals(type)
                         ? parseShapedInputs(root)
                         : parseShapelessInputs(root);
                 EmiStack output = parseCraftingOutput(root);
-                registry.addRecipe(new SyncedCraftingEmiRecipe(
+                liveRecipes.add(new SyncedCraftingEmiRecipe(
                         inputs,
                         output,
-                        entry.getKey(),
+                        syncedCraftingViewerId(originalId),
                         CraftingRecipeLoader.CRAFTING_SHAPELESS.equals(type)
                 ));
-                registered++;
             } catch (Throwable throwable) {
-                rejected++;
-                LOGGER.warn("Unable to register server-synced crafting recipe {} in EMI", entry.getKey(), throwable);
+                LOGGER.warn("Unable to inject a server-synced crafting recipe into live EMI", throwable);
             }
         }
 
-        LOGGER.info(
-                "EMI server crafting sync: received={}, parsed={}, nativePresent={}, registered={}, rejected={}",
-                syncedJson.size(),
-                recipes.size(),
-                nativePresent,
-                registered,
-                rejected
-        );
+        Map<ResourceLocation, JsonObject> gtoRecipes = new LinkedHashMap<>();
+        List<String> syncedGto = RecipeEditorGtoSyncState.activeJson();
+        for (int fileIndex = 0; fileIndex < syncedGto.size(); fileIndex++) {
+            try {
+                collectGtoRecipeObjects(
+                        JsonParser.parseString(syncedGto.get(fileIndex)),
+                        gtoRecipes,
+                        "direct-sync#" + (fileIndex + 1)
+                );
+            } catch (Throwable throwable) {
+                LOGGER.warn(
+                        "Unable to parse server-synced GT/GTO recipe file #{} for direct EMI injection",
+                        fileIndex + 1,
+                        throwable
+                );
+            }
+        }
+
+        for (Map.Entry<ResourceLocation, JsonObject> entry : gtoRecipes.entrySet()) {
+            ResourceLocation recipeId = entry.getKey();
+            JsonObject json = entry.getValue();
+            try {
+                ResourceLocation typeId = requiredResourceLocation(json, "type");
+                Object recipeType = GtoCustomRecipeLoader.findRecipeTypeForViewer(typeId);
+                if (recipeType == null) {
+                    throw new IllegalStateException("GTCEu recipe type is unavailable: " + typeId);
+                }
+
+                Object nativeProbe = GtoCustomRecipeLoader.buildRecipeForViewer(
+                        json,
+                        "emi-direct-sync-probe:" + recipeId
+                );
+                if (GtoCustomRecipeLoader.isRecipeAlreadyRegisteredForViewer(recipeType, nativeProbe)) {
+                    continue;
+                }
+
+                JsonObject viewerJson = json.deepCopy();
+                viewerJson.addProperty("id", syncedGtoViewerId(recipeId).toString());
+                Object gtRecipe = GtoCustomRecipeLoader.buildRecipeForViewer(
+                        viewerJson,
+                        "emi-direct-sync-viewer:" + recipeId
+                );
+
+                EmiRecipeCategory category = findNativeGtoCategory(typeId, recipeType);
+                if (category == null) {
+                    throw new IllegalStateException("Native GTCEu EMI category was not found for recipe type " + typeId);
+                }
+
+                liveRecipes.add(createNativeGtoEmiRecipe(gtRecipe, category));
+            } catch (Throwable throwable) {
+                LOGGER.warn("Unable to inject server-synced GT/GTO recipe {} into live EMI", recipeId, throwable);
+            }
+        }
+
+        replaceLiveRecipeManager(categories, workstations, liveRecipes);
     }
 
-    private static boolean isIntegratedSingleplayer() {
-        try {
-            return Minecraft.getInstance().getSingleplayerServer() != null;
-        } catch (Throwable ignored) {
+    private static boolean isSyncedViewerRecipe(EmiRecipe recipe) {
+        if (recipe == null) {
             return false;
+        }
+        ResourceLocation id = recipe.getId();
+        if (id == null || !"cointcoregto".equals(id.getNamespace())) {
+            return false;
+        }
+        String path = id.getPath();
+        return path.startsWith("server_sync/crafting/") || path.startsWith("server_sync/gto/");
+    }
+
+    private static void replaceLiveRecipeManager(
+            List<EmiRecipeCategory> categories,
+            Map<EmiRecipeCategory, List<EmiIngredient>> workstations,
+            List<EmiRecipe> recipes
+    ) {
+        try {
+            ClassLoader loader = CointExchangerEmiPlugin.class.getClassLoader();
+            Class<?> managerClass = Class.forName("dev.emi.emi.registry.EmiRecipes$Manager", false, loader);
+            Constructor<?> constructor = managerClass.getDeclaredConstructor(
+                    List.class,
+                    Map.class,
+                    List.class,
+                    boolean.class
+            );
+            if (!constructor.canAccess(null) && !constructor.trySetAccessible()) {
+                throw new IllegalStateException("Unable to access EMI recipe manager constructor");
+            }
+            Object replacement = constructor.newInstance(categories, workstations, recipes, false);
+
+            Class<?> recipesClass = Class.forName("dev.emi.emi.registry.EmiRecipes", false, loader);
+            Field managerField = recipesClass.getField("manager");
+            managerField.set(null, replacement);
+        } catch (Throwable throwable) {
+            throw new IllegalStateException("Unable to replace the live EMI recipe manager", throwable);
         }
     }
 
     @SuppressWarnings("rawtypes")
     private static boolean localCraftingRuntimeContains(ResourceLocation id) {
-
 
         try {
             Minecraft minecraft = Minecraft.getInstance();
@@ -288,7 +339,6 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
                 return true;
             }
 
-
             var integratedServer = minecraft.getSingleplayerServer();
             if (integratedServer != null
                     && integratedServer.getRecipeManager().byKey(id).isPresent()) {
@@ -297,7 +347,6 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
         } catch (Throwable throwable) {
             LOGGER.debug("Unable to check live RecipeManager for {}", id, throwable);
         }
-
 
         try {
             Class<?> gtRecipesClass = Class.forName(
@@ -324,168 +373,73 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
         return false;
     }
 
-    private static void registerSyncedGtoRecipes(EmiRegistry registry) {
-        List<String> syncedJson = RecipeEditorGtoSyncState.activeJson();
-        if (syncedJson.isEmpty()) {
-            return;
-        }
-
-        Map<ResourceLocation, JsonObject> recipes = new LinkedHashMap<>();
-        int rejected = 0;
-
-        for (int fileIndex = 0; fileIndex < syncedJson.size(); fileIndex++) {
-            String json = syncedJson.get(fileIndex);
-            try {
-                JsonElement root = JsonParser.parseString(json);
-                rejected += collectGtoRecipeObjects(root, recipes, "server-sync#" + (fileIndex + 1));
-            } catch (Throwable throwable) {
-                rejected++;
-                LOGGER.warn("Unable to parse server-synced GT/GTO recipe file #{} for EMI", fileIndex + 1, throwable);
-            }
-        }
-
-        if (recipes.isEmpty()) {
-            LOGGER.info("EMI server GT/GTO sync: files={}, parsed=0, queued=0, rejected={}",
-                    syncedJson.size(), rejected);
-            return;
-        }
-
-
-        final int fileCount = syncedJson.size();
-        final int parsedCount = recipes.size();
-        final int parseRejected = rejected;
-        final Map<ResourceLocation, JsonObject> deferredRecipes = new LinkedHashMap<>(recipes);
-
-        registry.addDeferredRecipes(addRecipe -> {
-            int registered = 0;
-            int nativePresent = 0;
-            int failed = 0;
-
-            for (Map.Entry<ResourceLocation, JsonObject> entry : deferredRecipes.entrySet()) {
-                ResourceLocation recipeId = entry.getKey();
-                JsonObject json = entry.getValue();
-                try {
-                    ResourceLocation typeId = requiredResourceLocation(json, "type");
-                    Object recipeType = GtoCustomRecipeLoader.findRecipeTypeForViewer(typeId);
-                    if (recipeType == null) {
-                        throw new IllegalStateException("GTCEu recipe type is unavailable: " + typeId);
-                    }
-
-                    Object gtRecipe = GtoCustomRecipeLoader.buildRecipeForViewer(
-                            json,
-                            "emi-server-sync:" + recipeId
-                    );
-
-
-                    if (GtoCustomRecipeLoader.isRecipeAlreadyRegisteredForViewer(recipeType, gtRecipe)) {
-                        nativePresent++;
-                        continue;
-                    }
-
-                    EmiRecipeCategory category = findNativeGtoCategory(typeId, recipeType);
-                    if (category == null) {
-                        throw new IllegalStateException(
-                                "Native GTCEu EMI category was not found for recipe type " + typeId
-                        );
-                    }
-
-                    EmiRecipe nativeRecipe = createNativeGtoEmiRecipe(gtRecipe, category);
-                    addRecipe.accept(nativeRecipe);
-                    registered++;
-                } catch (Throwable throwable) {
-                    failed++;
-                    LOGGER.warn(
-                            "Unable to attach server-synced GT/GTO recipe {} to its native GTCEu EMI machine category",
-                            recipeId,
-                            throwable
-                    );
-                }
-            }
-
-            LOGGER.info(
-                    "EMI native GT/GTO sync: files={}, parsed={}, nativePresent={}, registered={}, rejected={}",
-                    fileCount,
-                    parsedCount,
-                    nativePresent,
-                    registered,
-                    parseRejected + failed
-            );
-        });
-
-        LOGGER.info(
-                "Queued {} server GT/GTO recipes for native GTCEu EMI categories (files={}, rejected={})",
-                recipes.size(),
-                syncedJson.size(),
-                rejected
-        );
-    }
-
-
-    private static int collectGtoRecipeObjects(
+    private static void collectGtoRecipeObjects(
             JsonElement root,
             Map<ResourceLocation, JsonObject> recipes,
             String label
     ) {
-        int rejected = 0;
         if (root.isJsonArray()) {
             JsonArray array = root.getAsJsonArray();
             for (int i = 0; i < array.size(); i++) {
                 JsonElement element = array.get(i);
                 if (!element.isJsonObject()) {
-                    rejected++;
                     LOGGER.warn("Ignoring GT/GTO entry {}#{} because it is not an object", label, i + 1);
                     continue;
                 }
-                rejected += collectSingleGtoRecipe(element.getAsJsonObject(), recipes, label + "#" + (i + 1));
+                collectSingleGtoRecipe(element.getAsJsonObject(), recipes, label + "#" + (i + 1));
             }
-            return rejected;
+            return;
         }
 
         if (!root.isJsonObject()) {
             LOGGER.warn("Ignoring GT/GTO file {} because root is neither object nor array", label);
-            return 1;
+            return;
         }
 
         JsonObject object = root.getAsJsonObject();
         if (object.has("recipes")) {
             if (!object.get("recipes").isJsonArray()) {
                 LOGGER.warn("Ignoring GT/GTO file {} because 'recipes' is not an array", label);
-                return 1;
+                return;
             }
             JsonArray array = object.getAsJsonArray("recipes");
             for (int i = 0; i < array.size(); i++) {
                 JsonElement element = array.get(i);
                 if (!element.isJsonObject()) {
-                    rejected++;
+                    LOGGER.warn("Ignoring GT/GTO entry {}#{} because it is not an object", label, i + 1);
                     continue;
                 }
-                rejected += collectSingleGtoRecipe(element.getAsJsonObject(), recipes, label + "#" + (i + 1));
+                collectSingleGtoRecipe(element.getAsJsonObject(), recipes, label + "#" + (i + 1));
             }
-            return rejected;
+            return;
         }
 
-        return collectSingleGtoRecipe(object, recipes, label);
+        collectSingleGtoRecipe(object, recipes, label);
     }
 
-    private static int collectSingleGtoRecipe(
+    private static void collectSingleGtoRecipe(
             JsonObject recipe,
             Map<ResourceLocation, JsonObject> recipes,
             String label
     ) {
         try {
             if (recipe.has("enabled") && !recipe.get("enabled").getAsBoolean()) {
-                return 0;
+                return;
             }
             ResourceLocation id = requiredResourceLocation(recipe, "id");
             requiredResourceLocation(recipe, "type");
             recipes.put(id, recipe);
-            return 0;
         } catch (Throwable throwable) {
             LOGGER.warn("Ignoring invalid GT/GTO recipe {} in EMI sync", label, throwable);
-            return 1;
         }
     }
 
+    private static ResourceLocation syncedGtoViewerId(ResourceLocation originalId) {
+        return new ResourceLocation(
+                "cointcoregto",
+                "server_sync/gto/" + originalId.getNamespace() + "/" + originalId.getPath()
+        );
+    }
 
     private static EmiRecipeCategory findNativeGtoCategory(
             ResourceLocation typeId,
@@ -502,13 +456,11 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
             throw new IllegalStateException("EMI category registry is unavailable");
         }
 
-
         for (Object value : categories) {
             if (value instanceof EmiRecipeCategory category && typeId.equals(category.getId())) {
                 return category;
             }
         }
-
 
         for (Object value : categories) {
             if (!(value instanceof EmiRecipeCategory category)) {
@@ -545,7 +497,6 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
         }
         return false;
     }
-
 
     private static EmiRecipe createNativeGtoEmiRecipe(
             Object gtRecipe,
@@ -749,7 +700,6 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
             if (id == null) {
                 continue;
             }
-
 
             long amount = emiStack.getAmount();
             if (amount <= 0L) {

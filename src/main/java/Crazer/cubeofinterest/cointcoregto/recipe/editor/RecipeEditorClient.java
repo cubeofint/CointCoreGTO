@@ -1,28 +1,17 @@
 package Crazer.cubeofinterest.cointcoregto.recipe.editor;
 
+import Crazer.cubeofinterest.cointcoregto.compat.emi.CointExchangerEmiPlugin;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.MenuScreens;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.ResourceLocation;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.lang.reflect.Method;
-import java.util.Set;
-
 public final class RecipeEditorClient {
     private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO:RecipeSyncClient");
-    private static final int MAX_EMI_RELOAD_ATTEMPTS = 3;
-
-    private static boolean emiReloadPending;
-    private static int emiReloadWaitTicks;
-    private static int emiReloadAttempts;
-    private static boolean emiVerificationPending;
-    private static int emiVerificationTicks;
-
-    private static int lastSyncedCraftingCount;
-    private static int lastSyncedGtoFileCount;
+    private static boolean emiDirectSyncPending;
+    private static int emiDirectSyncWaitTicks;
 
     private RecipeEditorClient() {
     }
@@ -117,9 +106,8 @@ public final class RecipeEditorClient {
                 case RESET -> RecipeEditorCraftingSyncState.begin();
                 case ENTRY -> RecipeEditorCraftingSyncState.accept(packet.json());
                 case APPLY -> {
-                    lastSyncedCraftingCount = RecipeEditorCraftingSyncState.apply();
-                    LOGGER.info("Received {} server crafting recipe JSON files", lastSyncedCraftingCount);
-                    scheduleEmiReload();
+                    RecipeEditorCraftingSyncState.apply();
+                    scheduleDirectEmiSync();
                 }
             }
         });
@@ -132,35 +120,22 @@ public final class RecipeEditorClient {
                 case RESET -> RecipeEditorGtoSyncState.begin();
                 case ENTRY -> RecipeEditorGtoSyncState.accept(packet.json());
                 case APPLY -> {
-                    lastSyncedGtoFileCount = RecipeEditorGtoSyncState.apply();
-
-
-                    LOGGER.info(
-                            "Received {} server GT/GTO recipe JSON files; they will be attached to native GTCEu EMI categories",
-                            lastSyncedGtoFileCount
-                    );
-                    scheduleEmiReload();
+                    RecipeEditorGtoSyncState.apply();
+                    scheduleDirectEmiSync();
                 }
             }
         });
     }
 
-    private static void scheduleEmiReload() {
-
-
+    private static void scheduleDirectEmiSync() {
         if (isIntegratedSingleplayer()) {
-            emiReloadPending = false;
-            emiReloadWaitTicks = 0;
-            emiVerificationPending = false;
-            emiVerificationTicks = 0;
-            LOGGER.info("Integrated server detected; skipping forced EMI server-recipe reload");
+            emiDirectSyncPending = false;
+            emiDirectSyncWaitTicks = 0;
             return;
         }
 
-        emiReloadPending = true;
-        emiReloadWaitTicks = 0;
-        emiVerificationPending = false;
-        emiVerificationTicks = 0;
+        emiDirectSyncPending = true;
+        emiDirectSyncWaitTicks = 0;
     }
 
     private static boolean isIntegratedSingleplayer() {
@@ -172,122 +147,34 @@ public final class RecipeEditorClient {
     }
 
     public static void resetCraftingSyncLifecycle() {
-        emiReloadPending = false;
-        emiReloadWaitTicks = 0;
-        emiReloadAttempts = 0;
-        emiVerificationPending = false;
-        emiVerificationTicks = 0;
-        lastSyncedCraftingCount = 0;
-        lastSyncedGtoFileCount = 0;
+        emiDirectSyncPending = false;
+        emiDirectSyncWaitTicks = 0;
     }
-
 
     public static void tickCraftingSyncLifecycle() {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player == null || minecraft.level == null || minecraft.getConnection() == null) {
             return;
         }
-
-        if (emiReloadPending) {
-            emiReloadWaitTicks++;
-            int status = emiStatus();
-
-
-            if (status == 1) {
-                return;
-            }
-
-            if (status == 2 || emiReloadWaitTicks >= 60) {
-                emiReloadPending = false;
-                emiReloadAttempts++;
-                LOGGER.info(
-                        "Reloading EMI after server recipe sync: craftingFiles={}, gtoFiles={}, attempt={}, status={}",
-                        lastSyncedCraftingCount,
-                        lastSyncedGtoFileCount,
-                        emiReloadAttempts,
-                        status
-                );
-                reloadEmi();
-                emiVerificationPending = true;
-                emiVerificationTicks = 0;
-            }
+        if (!emiDirectSyncPending) {
             return;
         }
 
-        if (!emiVerificationPending) {
-            return;
-        }
-
-        emiVerificationTicks++;
+        emiDirectSyncWaitTicks++;
         int status = emiStatus();
-        if (status == 1 || emiVerificationTicks < 5) {
-            return;
-        }
-
         if (status == Integer.MIN_VALUE) {
-
-            emiVerificationPending = false;
+            emiDirectSyncPending = false;
+            return;
+        }
+        if (status != 2 || emiDirectSyncWaitTicks < 10) {
             return;
         }
 
-        if (status != 2) {
-            if (emiReloadAttempts < MAX_EMI_RELOAD_ATTEMPTS && emiVerificationTicks >= 60) {
-                LOGGER.warn("EMI did not reach loaded state after recipe sync (status={}); retrying", status);
-                emiVerificationPending = false;
-                emiReloadPending = true;
-                emiReloadWaitTicks = 0;
-            }
-            return;
-        }
-
-        Set<ResourceLocation> expected = RecipeEditorCraftingSyncState.shadowedRecipeIds();
-        int present = countCraftingRecipesPresentInEmi(expected);
-        LOGGER.info(
-                "EMI sync verification: crafting={}/{}, GT/GTO synced files={}",
-                present,
-                expected.size(),
-                lastSyncedGtoFileCount
-        );
-
-        if (present < expected.size() && emiReloadAttempts < MAX_EMI_RELOAD_ATTEMPTS) {
-            LOGGER.warn(
-                    "EMI is missing {} synced crafting recipes after reload; retrying",
-                    expected.size() - present
-            );
-            emiVerificationPending = false;
-            emiReloadPending = true;
-            emiReloadWaitTicks = 0;
-            return;
-        }
-
-        emiVerificationPending = false;
-    }
-
-    private static int countCraftingRecipesPresentInEmi(Set<ResourceLocation> ids) {
-        if (ids.isEmpty()) {
-            return 0;
-        }
+        emiDirectSyncPending = false;
         try {
-            Class<?> apiClass = Class.forName("dev.emi.emi.api.EmiApi");
-            Object recipeManager = apiClass.getMethod("getRecipeManager").invoke(null);
-            if (recipeManager == null) {
-                return 0;
-            }
-            Class<?> managerInterface = Class.forName("dev.emi.emi.api.recipe.EmiRecipeManager");
-            Method getRecipe = managerInterface.getMethod("getRecipe", ResourceLocation.class);
-            int present = 0;
-            for (ResourceLocation id : ids) {
-                Object recipe = getRecipe.invoke(recipeManager, id);
-                if (recipe != null) {
-                    present++;
-                }
-            }
-            return present;
-        } catch (ClassNotFoundException ignored) {
-            return 0;
+            CointExchangerEmiPlugin.injectSyncedRecipesIntoLiveManager();
         } catch (Throwable throwable) {
-            LOGGER.warn("Unable to verify synced crafting recipes in EMI", throwable);
-            return 0;
+            LOGGER.error("Unable to apply server-synced recipes to EMI", throwable);
         }
     }
 
@@ -304,14 +191,4 @@ public final class RecipeEditorClient {
         }
     }
 
-    private static void reloadEmi() {
-        try {
-            Class<?> reloadManager = Class.forName("dev.emi.emi.runtime.EmiReloadManager");
-            reloadManager.getMethod("reload").invoke(null);
-        } catch (ClassNotFoundException ignored) {
-
-        } catch (Throwable throwable) {
-            LOGGER.error("Unable to reload EMI after server recipe sync", throwable);
-        }
-    }
 }
