@@ -5,6 +5,7 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.material.MapColor;
@@ -33,8 +34,8 @@ public final class CointExchangerRegistry {
             "exchanger",
             () -> new ExchangerBlock(BlockBehaviour.Properties.of()
                     .mapColor(MapColor.METAL)
-                    .strength(4.0F, 6.0F)
-                    .requiresCorrectToolForDrops())
+                    .strength(1.5F, 6.0F)
+                    .sound(SoundType.METAL))
     );
 
     public static final RegistryObject<Item> EXCHANGER_ITEM = ITEMS.register(

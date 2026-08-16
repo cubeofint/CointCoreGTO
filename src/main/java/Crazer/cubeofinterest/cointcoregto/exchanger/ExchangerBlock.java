@@ -22,9 +22,12 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.StateDefinition;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.DirectionProperty;
+import net.minecraft.world.level.storage.loot.LootParams;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraftforge.network.NetworkHooks;
 import org.jetbrains.annotations.Nullable;
+
+import java.util.List;
 
 public class ExchangerBlock extends BaseEntityBlock {
     public static final DirectionProperty FACING = BlockStateProperties.HORIZONTAL_FACING;
@@ -66,6 +69,20 @@ public class ExchangerBlock extends BaseEntityBlock {
     @Override
     public RenderShape getRenderShape(BlockState state) {
         return RenderShape.MODEL;
+    }
+
+    @Override
+    public List<ItemStack> getDrops(BlockState state, LootParams.Builder builder) {
+        return List.of(new ItemStack(CointExchangerRegistry.EXCHANGER_ITEM.get()));
+    }
+
+    @Override
+    public ItemStack getCloneItemStack(
+            net.minecraft.world.level.BlockGetter level,
+            BlockPos pos,
+            BlockState state
+    ) {
+        return new ItemStack(CointExchangerRegistry.EXCHANGER_ITEM.get());
     }
 
     @Override

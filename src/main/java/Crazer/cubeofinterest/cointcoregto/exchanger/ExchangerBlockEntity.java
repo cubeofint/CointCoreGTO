@@ -21,7 +21,9 @@ import appeng.items.tools.powered.WirelessTerminalItem;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.Connection;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.MenuProvider;
 import net.minecraft.world.SimpleContainer;
@@ -82,6 +84,7 @@ public class ExchangerBlockEntity extends BlockEntity implements MenuProvider, I
     private String ownerName = "";
     private long currencyPricePerDeal;
     private String requiredTierId = "";
+    private ItemStack clientDisplayProduct = ItemStack.EMPTY;
 
     public ExchangerBlockEntity(BlockPos pos, BlockState state) {
         super(CointExchangerRegistry.EXCHANGER_BLOCK_ENTITY.get(), pos, state);
@@ -89,6 +92,13 @@ public class ExchangerBlockEntity extends BlockEntity implements MenuProvider, I
 
     public ItemStackHandler getItems() {
         return items;
+    }
+
+    public ItemStack getDisplayProduct() {
+        if (level != null && level.isClientSide) {
+            return clientDisplayProduct;
+        }
+        return items.getStackInSlot(SLOT_PRODUCT);
     }
 
     public BlockPos getBlockPos() {
@@ -961,6 +971,37 @@ public class ExchangerBlockEntity extends BlockEntity implements MenuProvider, I
         ownerName = tag.getString("OwnerName");
         currencyPricePerDeal = Math.max(0L, tag.getLong("CurrencyPricePerDeal"));
         requiredTierId = CurrencyConfig.normalizeTierId(tag.getString("RequiredTierId"));
+    }
+
+    @Override
+    public CompoundTag getUpdateTag() {
+        CompoundTag tag = new CompoundTag();
+        ItemStack product = items.getStackInSlot(SLOT_PRODUCT);
+        if (!product.isEmpty()) {
+            tag.put("DisplayProduct", product.save(new CompoundTag()));
+        }
+        return tag;
+    }
+
+    @Override
+    public void handleUpdateTag(CompoundTag tag) {
+        clientDisplayProduct = tag.contains("DisplayProduct")
+                ? ItemStack.of(tag.getCompound("DisplayProduct"))
+                : ItemStack.EMPTY;
+    }
+
+    @Override
+    public void onDataPacket(Connection connection, ClientboundBlockEntityDataPacket packet) {
+        CompoundTag tag = packet.getTag();
+        if (tag != null) {
+            handleUpdateTag(tag);
+        }
+    }
+
+    @Nullable
+    @Override
+    public ClientboundBlockEntityDataPacket getUpdatePacket() {
+        return ClientboundBlockEntityDataPacket.create(this);
     }
 
     private void setChangedAndSync() {
