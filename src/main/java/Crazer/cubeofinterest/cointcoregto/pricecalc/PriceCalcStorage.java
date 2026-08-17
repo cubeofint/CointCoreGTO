@@ -18,8 +18,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.stream.Stream;
 
 public final class PriceCalcStorage {
     private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO:PriceCalc");
@@ -34,6 +37,8 @@ public final class PriceCalcStorage {
     private static final Path SETTINGS_FILE = DIRECTORY.resolve("settings.json");
     private static final Path COMPUTED_FILE = DIRECTORY.resolve("computed_prices.json");
     private static final Path PREFERRED_FILE = DIRECTORY.resolve("preferred_recipes.json");
+    private static final Path BACKUP_DIRECTORY = FMLPaths.CONFIGDIR.get().resolve(CointCoreGTO.MODID).resolve("pricecalc_backups");
+    private static final DateTimeFormatter BACKUP_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss_SSS");
 
     private static Map<String, Double> itemPrices = new LinkedHashMap<>();
     private static Map<String, Double> fluidPrices = new LinkedHashMap<>();
@@ -53,13 +58,43 @@ public final class PriceCalcStorage {
     }
 
     public static synchronized void reloadAndInvalidateComputed() {
-        load(true);
+        try {
+            reloadAndInvalidateComputedSafely();
+        } catch (IOException exception) {
+            throw new IllegalStateException("Unable to back up price calculator configuration", exception);
+        }
+    }
+
+    public static synchronized Path reloadAndInvalidateComputedSafely() throws IOException {
+        ensureLoaded();
+        Path backup = createBackup("reload");
+        if (!load(true)) {
+            throw new IOException("Не удалось перечитать конфиги. Бекап сохранён: " + backup.toAbsolutePath().normalize());
+        }
+        return backup;
     }
 
     public static synchronized void clearComputed() {
+        try {
+            clearComputedSafely();
+        } catch (IOException exception) {
+            throw new IllegalStateException("Unable to back up price calculator configuration", exception);
+        }
+    }
+
+    public static synchronized Path clearComputedSafely() throws IOException {
         ensureLoaded();
-        computedPrices.clear();
-        writeJson(COMPUTED_FILE, computedPrices);
+        Path backup = createBackup("clear");
+        Map<String, ComputedPrice> previous = computedPrices;
+        Map<String, ComputedPrice> cleared = new LinkedHashMap<>();
+        try {
+            writeJsonChecked(COMPUTED_FILE, cleared);
+            computedPrices = cleared;
+        } catch (IOException exception) {
+            computedPrices = previous;
+            throw exception;
+        }
+        return backup;
     }
 
     public static synchronized Double getItemUnitPrice(ResourceLocation id) {
@@ -145,7 +180,37 @@ public final class PriceCalcStorage {
         return DIRECTORY;
     }
 
-    private static void load(boolean invalidateComputed) {
+    public static Path getBackupDirectory() {
+        return BACKUP_DIRECTORY;
+    }
+
+    private static Path createBackup(String action) throws IOException {
+        Files.createDirectories(DIRECTORY);
+        Files.createDirectories(BACKUP_DIRECTORY);
+        String name = BACKUP_TIME.format(LocalDateTime.now()) + "_" + action;
+        Path backup = BACKUP_DIRECTORY.resolve(name);
+        Files.createDirectories(backup);
+
+        try (Stream<Path> stream = Files.list(DIRECTORY)) {
+            for (Path source : stream.filter(Files::isRegularFile).toList()) {
+                String fileName = source.getFileName().toString();
+                if (fileName.endsWith(".tmp")) {
+                    continue;
+                }
+                Files.copy(
+                        source,
+                        backup.resolve(source.getFileName()),
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.COPY_ATTRIBUTES
+                );
+            }
+        }
+
+        return backup;
+    }
+
+    private static boolean load(boolean invalidateComputed) {
+        boolean previouslyLoaded = loaded;
         try {
             Files.createDirectories(DIRECTORY);
             ensureFile(ITEMS_FILE, "{}\n");
@@ -155,26 +220,39 @@ public final class PriceCalcStorage {
             ensureFile(COMPUTED_FILE, "{}\n");
             ensureFile(SETTINGS_FILE, "{\n  \"price_per_eu\": 0.0,\n  \"max_depth\": 64\n}\n");
 
-            itemPrices = readDoubleMap(ITEMS_FILE);
-            fluidPrices = readDoubleMap(FLUIDS_FILE);
-            tagPrices = readDoubleMap(TAGS_FILE);
-            preferredRecipes = readStringMap(PREFERRED_FILE);
-            computedPrices = invalidateComputed ? new LinkedHashMap<>() : readComputedMap(COMPUTED_FILE);
-            settings = readSettings(SETTINGS_FILE);
-            loaded = true;
+            Map<String, Double> loadedItemPrices = readDoubleMap(ITEMS_FILE);
+            Map<String, Double> loadedFluidPrices = readDoubleMap(FLUIDS_FILE);
+            Map<String, Double> loadedTagPrices = readDoubleMap(TAGS_FILE);
+            Map<String, String> loadedPreferredRecipes = readStringMap(PREFERRED_FILE);
+            Map<String, ComputedPrice> loadedComputedPrices = invalidateComputed
+                    ? new LinkedHashMap<>()
+                    : readComputedMap(COMPUTED_FILE);
+            Settings loadedSettings = readSettings(SETTINGS_FILE);
 
             if (invalidateComputed) {
-                writeJson(COMPUTED_FILE, computedPrices);
+                writeJsonChecked(COMPUTED_FILE, loadedComputedPrices);
             }
+
+            itemPrices = loadedItemPrices;
+            fluidPrices = loadedFluidPrices;
+            tagPrices = loadedTagPrices;
+            preferredRecipes = loadedPreferredRecipes;
+            computedPrices = loadedComputedPrices;
+            settings = loadedSettings;
+            loaded = true;
+            return true;
         } catch (Throwable throwable) {
             LOGGER.error("Unable to load price calculator configuration", throwable);
-            itemPrices = new LinkedHashMap<>();
-            fluidPrices = new LinkedHashMap<>();
-            tagPrices = new LinkedHashMap<>();
-            preferredRecipes = new LinkedHashMap<>();
-            computedPrices = new LinkedHashMap<>();
-            settings = new Settings();
-            loaded = true;
+            if (!previouslyLoaded) {
+                itemPrices = new LinkedHashMap<>();
+                fluidPrices = new LinkedHashMap<>();
+                tagPrices = new LinkedHashMap<>();
+                preferredRecipes = new LinkedHashMap<>();
+                computedPrices = new LinkedHashMap<>();
+                settings = new Settings();
+                loaded = true;
+            }
+            return false;
         }
     }
 
@@ -220,16 +298,20 @@ public final class PriceCalcStorage {
 
     private static void writeJson(Path file, Object value) {
         try {
-            Files.createDirectories(DIRECTORY);
-            Path temp = file.resolveSibling(file.getFileName() + ".tmp");
-            Files.writeString(temp, GSON.toJson(value) + "\n", StandardCharsets.UTF_8);
-            try {
-                Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (IOException ignored) {
-                Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
-            }
+            writeJsonChecked(file, value);
         } catch (Throwable throwable) {
             LOGGER.error("Unable to save price calculator file {}", file, throwable);
+        }
+    }
+
+    private static void writeJsonChecked(Path file, Object value) throws IOException {
+        Files.createDirectories(DIRECTORY);
+        Path temp = file.resolveSibling(file.getFileName() + ".tmp");
+        Files.writeString(temp, GSON.toJson(value) + "\n", StandardCharsets.UTF_8);
+        try {
+            Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException ignored) {
+            Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 

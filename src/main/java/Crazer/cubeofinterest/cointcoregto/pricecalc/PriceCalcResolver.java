@@ -63,6 +63,11 @@ public final class PriceCalcResolver {
             return Resolution.success(manual, "base");
         }
 
+        PriceCalcStorage.ComputedPrice computed = PriceCalcStorage.getComputedPrice(key.storageKey());
+        if (computed != null && Double.isFinite(computed.price) && computed.price >= 0.0D) {
+            return Resolution.success(computed.price, computed.recipeId);
+        }
+
         Resolution memoized = memo.get(key.storageKey());
         if (memoized != null) {
             return memoized;
