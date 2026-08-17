@@ -144,15 +144,15 @@ public final class PriceCalcClientEvents {
             }
             PriceCalcStorage.ComputedPrice computed = PriceCalcStorage.getComputedPrice(itemId.toString());
             if (computed != null && Double.isFinite(computed.price) && computed.price >= 0.0D) {
-                event.getToolTip().add(Component.literal("§6Расчётная стоимость: §f" + PriceCalcClient.formatPrice(computed.price)));
+                event.getToolTip().add(formatPriceTooltip(PriceCalcStorage.getTooltipPriceFormat(), computed.price));
                 return;
             }
             Double basePrice = PriceCalcStorage.getItemUnitPrice(itemId);
             if (basePrice != null) {
-                event.getToolTip().add(Component.literal("§6Базовая стоимость: §f" + PriceCalcClient.formatPrice(basePrice)));
+                event.getToolTip().add(formatPriceTooltip(PriceCalcStorage.getTooltipBasePriceFormat(), basePrice));
                 return;
             }
-            event.getToolTip().add(Component.literal("§8[P] — рассчитать стоимость"));
+            event.getToolTip().add(Component.literal("§8" + PriceCalcStorage.getTooltipUncalculatedText()));
         }
     }
 
@@ -201,6 +201,17 @@ public final class PriceCalcClientEvents {
 
     static boolean isTooltipEnabled() {
         return accessAllowed && systemEnabled && tooltipEnabled;
+    }
+
+    private static Component formatPriceTooltip(String format, double price) {
+        String priceText = "§f" + PriceCalcClient.formatPrice(price) + "§6";
+        String text = format == null ? "{price}" : format;
+        if (text.contains("{price}")) {
+            text = text.replace("{price}", priceText);
+        } else {
+            text = text + " " + priceText;
+        }
+        return Component.literal("§6" + text);
     }
 
     private static boolean isTextInputFocused(Screen screen) {

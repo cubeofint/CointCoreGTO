@@ -31,12 +31,12 @@ public final class PriceCalcClientPacketHandler {
                     PriceCalcClient.calculateHoveredOrHeld();
                 }
                 case RELOAD -> {
-                    Path backup = PriceCalcStorage.reloadAndInvalidateComputedSafely();
+                    PriceCalcStorage.ReloadResult result = PriceCalcStorage.reloadSafely();
+                    String message = result.computedInvalidated()
+                            ? "§e[PriceCalc] Конфиги перечитаны. Расчётные данные изменились, кеш цен очищен. §7Бекап: §f"
+                            : "§a[PriceCalc] Конфиги перечитаны. Посчитанные цены сохранены. §7Бекап: §f";
                     minecraft.player.displayClientMessage(
-                            Component.literal(
-                                    "§a[PriceCalc] Конфиги перечитаны, вычисленный кеш очищен. §7Бекап: §f"
-                                            + backup.toAbsolutePath().normalize()
-                            ),
+                            Component.literal(message + result.backup().toAbsolutePath().normalize()),
                             false
                     );
                 }

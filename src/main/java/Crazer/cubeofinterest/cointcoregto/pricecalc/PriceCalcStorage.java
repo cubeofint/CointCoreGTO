@@ -64,6 +64,16 @@ public final class PriceCalcStorage {
         }
     }
 
+    public static synchronized ReloadResult reloadSafely() throws IOException {
+        ensureLoaded();
+        Path backup = createBackup("reload");
+        LoadResult result = load(false);
+        if (!result.success()) {
+            throw new IOException("Не удалось перечитать конфиги. Бекап сохранён: " + backup.toAbsolutePath().normalize());
+        }
+        return new ReloadResult(backup, result.computedInvalidated());
+    }
+
     public static synchronized void reloadAndInvalidateComputed() {
         try {
             reloadAndInvalidateComputedSafely();
@@ -75,7 +85,8 @@ public final class PriceCalcStorage {
     public static synchronized Path reloadAndInvalidateComputedSafely() throws IOException {
         ensureLoaded();
         Path backup = createBackup("reload");
-        if (!load(true)) {
+        LoadResult result = load(true);
+        if (!result.success()) {
             throw new IOException("Не удалось перечитать конфиги. Бекап сохранён: " + backup.toAbsolutePath().normalize());
         }
         return backup;
@@ -241,6 +252,21 @@ public final class PriceCalcStorage {
         return Math.max(0.0D, settings.pricePerEu);
     }
 
+    public static synchronized String getTooltipPriceFormat() {
+        ensureLoaded();
+        return sanitizeText(settings.tooltipPriceFormat, "Расчётная стоимость: {price}");
+    }
+
+    public static synchronized String getTooltipBasePriceFormat() {
+        ensureLoaded();
+        return sanitizeText(settings.tooltipBasePriceFormat, "Базовая стоимость: {price}");
+    }
+
+    public static synchronized String getTooltipUncalculatedText() {
+        ensureLoaded();
+        return sanitizeText(settings.tooltipUncalculatedText, "[P] — рассчитать стоимость");
+    }
+
     public static synchronized int getMaxDepth() {
         ensureLoaded();
         return Math.max(8, Math.min(256, settings.maxDepth));
@@ -309,7 +335,7 @@ public final class PriceCalcStorage {
         return backup;
     }
 
-    private static boolean load(boolean invalidateComputed) {
+    private static LoadResult load(boolean forceInvalidateComputed) {
         boolean previouslyLoaded = loaded;
         try {
             Files.createDirectories(DIRECTORY);
@@ -319,19 +345,28 @@ public final class PriceCalcStorage {
             ensureFile(PREFERRED_FILE, "{}\n");
             ensureFile(COMPUTED_FILE, "{}\n");
             ensureFile(MACHINE_BLACKLIST_FILE, "[]\n");
-            ensureFile(SETTINGS_FILE, "{\n  \"price_per_eu\": 0.0,\n  \"max_depth\": 64\n}\n");
+            ensureFile(SETTINGS_FILE, "{\n  \"price_per_eu\": 0.0,\n  \"max_depth\": 64,\n  \"tooltip_price_format\": \"Расчётная стоимость: {price}\",\n  \"tooltip_base_price_format\": \"Базовая стоимость: {price}\",\n  \"tooltip_uncalculated_text\": \"[P] — рассчитать стоимость\"\n}\n");
 
             Map<String, Double> loadedItemPrices = readDoubleMap(ITEMS_FILE);
             Map<String, Double> loadedFluidPrices = readDoubleMap(FLUIDS_FILE);
             Map<String, Double> loadedTagPrices = readDoubleMap(TAGS_FILE);
             Map<String, String> loadedPreferredRecipes = readStringMap(PREFERRED_FILE);
-            Map<String, ComputedPrice> loadedComputedPrices = invalidateComputed
-                    ? new LinkedHashMap<>()
-                    : readComputedMap(COMPUTED_FILE);
+            Map<String, ComputedPrice> loadedComputedPrices = readComputedMap(COMPUTED_FILE);
             Set<String> loadedMachineBlacklist = readStringSet(MACHINE_BLACKLIST_FILE);
             Settings loadedSettings = readSettings(SETTINGS_FILE);
 
+            boolean calculationChanged = previouslyLoaded && (
+                    !itemPrices.equals(loadedItemPrices)
+                            || !fluidPrices.equals(loadedFluidPrices)
+                            || !tagPrices.equals(loadedTagPrices)
+                            || !preferredRecipes.equals(loadedPreferredRecipes)
+                            || !machineBlacklist.equals(loadedMachineBlacklist)
+                            || Double.compare(settings.pricePerEu, loadedSettings.pricePerEu) != 0
+                            || settings.maxDepth != loadedSettings.maxDepth
+            );
+            boolean invalidateComputed = forceInvalidateComputed || calculationChanged;
             if (invalidateComputed) {
+                loadedComputedPrices = new LinkedHashMap<>();
                 writeJsonChecked(COMPUTED_FILE, loadedComputedPrices);
             }
 
@@ -343,7 +378,7 @@ public final class PriceCalcStorage {
             machineBlacklist = loadedMachineBlacklist;
             settings = loadedSettings;
             loaded = true;
-            return true;
+            return new LoadResult(true, invalidateComputed);
         } catch (Throwable throwable) {
             LOGGER.error("Unable to load price calculator configuration", throwable);
             if (!previouslyLoaded) {
@@ -356,7 +391,7 @@ public final class PriceCalcStorage {
                 settings = new Settings();
                 loaded = true;
             }
-            return false;
+            return new LoadResult(false, false);
         }
     }
 
@@ -407,6 +442,32 @@ public final class PriceCalcStorage {
         if (object.has("max_depth")) {
             value.maxDepth = object.get("max_depth").getAsInt();
         }
+        boolean updated = false;
+        boolean customPriceFormat = object.has("tooltip_price_format");
+        if (customPriceFormat) {
+            value.tooltipPriceFormat = object.get("tooltip_price_format").getAsString();
+        } else {
+            object.addProperty("tooltip_price_format", value.tooltipPriceFormat);
+            updated = true;
+        }
+        if (object.has("tooltip_base_price_format")) {
+            value.tooltipBasePriceFormat = object.get("tooltip_base_price_format").getAsString();
+        } else {
+            if (customPriceFormat) {
+                value.tooltipBasePriceFormat = value.tooltipPriceFormat;
+            }
+            object.addProperty("tooltip_base_price_format", value.tooltipBasePriceFormat);
+            updated = true;
+        }
+        if (object.has("tooltip_uncalculated_text")) {
+            value.tooltipUncalculatedText = object.get("tooltip_uncalculated_text").getAsString();
+        } else {
+            object.addProperty("tooltip_uncalculated_text", value.tooltipUncalculatedText);
+            updated = true;
+        }
+        if (updated) {
+            writeJsonChecked(file, object);
+        }
         return value;
     }
 
@@ -442,6 +503,19 @@ public final class PriceCalcStorage {
         return price;
     }
 
+    private static String sanitizeText(String text, String fallback) {
+        if (text == null || text.isBlank()) {
+            return fallback;
+        }
+        return text;
+    }
+
+    public record ReloadResult(Path backup, boolean computedInvalidated) {
+    }
+
+    private record LoadResult(boolean success, boolean computedInvalidated) {
+    }
+
     public static final class ComputedPrice {
         public double price;
         public String recipeId;
@@ -460,5 +534,8 @@ public final class PriceCalcStorage {
     private static final class Settings {
         private double pricePerEu;
         private int maxDepth = 64;
+        private String tooltipPriceFormat = "Расчётная стоимость: {price}";
+        private String tooltipBasePriceFormat = "Базовая стоимость: {price}";
+        private String tooltipUncalculatedText = "[P] — рассчитать стоимость";
     }
 }
