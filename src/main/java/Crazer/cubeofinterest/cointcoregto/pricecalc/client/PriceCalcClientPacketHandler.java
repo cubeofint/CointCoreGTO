@@ -69,6 +69,8 @@ public final class PriceCalcClientPacketHandler {
                 case TOGGLE_SYSTEM -> showSystemState(minecraft, PriceCalcClientEvents.toggleSystem());
                 case ENABLE_SYSTEM -> showSystemState(minecraft, PriceCalcClientEvents.setSystemEnabled(true));
                 case DISABLE_SYSTEM -> showSystemState(minecraft, PriceCalcClientEvents.setSystemEnabled(false));
+                case OPEN_BLACKLIST -> minecraft.setScreen(new PriceMachineBlacklistScreen(minecraft.screen));
+                case SHOW_STATUS -> showStatus(minecraft);
             }
         } catch (Throwable throwable) {
             minecraft.player.displayClientMessage(
@@ -83,6 +85,51 @@ public final class PriceCalcClientPacketHandler {
 
     public static void setAccessAllowed(boolean allowed) {
         PriceCalcClientEvents.setAccessAllowed(allowed);
+    }
+
+    private static void showStatus(Minecraft minecraft) {
+        if (minecraft.player == null) {
+            return;
+        }
+        PriceCalcStorage.ensureLoaded();
+        minecraft.player.displayClientMessage(Component.literal("§6[PriceCalc] §fСтатус"), false);
+        minecraft.player.displayClientMessage(
+                Component.literal("§7Система: " + (PriceCalcClientEvents.isSystemEnabled() ? "§aON" : "§cOFF")),
+                false
+        );
+        minecraft.player.displayClientMessage(
+                Component.literal("§7Тултип: " + (PriceCalcClientEvents.isTooltipEnabled() ? "§aON" : "§cOFF")),
+                false
+        );
+        minecraft.player.displayClientMessage(Component.literal("§7Права: §aOK"), false);
+        minecraft.player.displayClientMessage(
+                Component.literal("§7Посчитанных цен: §f" + PriceCalcStorage.getComputedPriceCount()),
+                false
+        );
+        minecraft.player.displayClientMessage(
+                Component.literal("§7Предпочтительных рецептов: §f" + PriceCalcStorage.getPreferredRecipeCount()),
+                false
+        );
+        minecraft.player.displayClientMessage(
+                Component.literal("§7Машин в ЧС: §f" + PriceCalcStorage.getMachineBlacklistCount()),
+                false
+        );
+        minecraft.player.displayClientMessage(
+                Component.literal(
+                        "§7Базовые цены: §f" + PriceCalcStorage.getBaseItemPriceCount()
+                                + "§7 предметов, §f" + PriceCalcStorage.getBaseFluidPriceCount()
+                                + "§7 жидкостей, §f" + PriceCalcStorage.getBaseTagPriceCount()
+                                + "§7 тегов"
+                ),
+                false
+        );
+        minecraft.player.displayClientMessage(
+                Component.literal(
+                        "§7Цена EU: §f" + PriceCalcClient.formatPrice(PriceCalcStorage.getPricePerEu())
+                                + " §8| §7Макс. глубина: §f" + PriceCalcStorage.getMaxDepth()
+                ),
+                false
+        );
     }
 
     private static void showSystemState(Minecraft minecraft, boolean enabled) {

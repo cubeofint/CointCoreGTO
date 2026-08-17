@@ -16,7 +16,9 @@ public record PriceCalcCommandPacket(Action action) {
         TOGGLE_TOOLTIP,
         TOGGLE_SYSTEM,
         ENABLE_SYSTEM,
-        DISABLE_SYSTEM
+        DISABLE_SYSTEM,
+        OPEN_BLACKLIST,
+        SHOW_STATUS
     }
 
     public static void encode(PriceCalcCommandPacket packet, FriendlyByteBuf buffer) {

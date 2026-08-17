@@ -277,6 +277,9 @@ public final class PriceCalcResolver {
             if (recipe == null || !recipe.supportsRecipeTree()) {
                 continue;
             }
+            if (isRecipeBlacklisted(recipe)) {
+                continue;
+            }
             if (!(expectedTargetOutput(recipe, target) > 0.0D)) {
                 continue;
             }
@@ -285,6 +288,18 @@ public final class PriceCalcResolver {
         ArrayList<EmiRecipe> list = new ArrayList<>(unique.values());
         list.sort(Comparator.comparing(PriceCalcResolver::recipeKey));
         return list;
+    }
+
+    public static String machineCategoryKey(EmiRecipe recipe) {
+        if (recipe == null || recipe.getCategory() == null || recipe.getCategory().getId() == null) {
+            return "";
+        }
+        return recipe.getCategory().getId().toString();
+    }
+
+    public static boolean isRecipeBlacklisted(EmiRecipe recipe) {
+        String categoryKey = machineCategoryKey(recipe);
+        return !categoryKey.isEmpty() && PriceCalcStorage.isMachineCategoryBlacklisted(categoryKey);
     }
 
     private static EmiRecipe findByRecipeKey(List<EmiRecipe> recipes, String key) {

@@ -20,8 +20,12 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 public final class PriceCalcStorage {
@@ -29,6 +33,7 @@ public final class PriceCalcStorage {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
     private static final Type DOUBLE_MAP_TYPE = new TypeToken<LinkedHashMap<String, Double>>() {}.getType();
     private static final Type STRING_MAP_TYPE = new TypeToken<LinkedHashMap<String, String>>() {}.getType();
+    private static final Type STRING_LIST_TYPE = new TypeToken<List<String>>() {}.getType();
     private static final Type COMPUTED_MAP_TYPE = new TypeToken<LinkedHashMap<String, ComputedPrice>>() {}.getType();
     private static final Path DIRECTORY = FMLPaths.CONFIGDIR.get().resolve(CointCoreGTO.MODID).resolve("pricecalc");
     private static final Path ITEMS_FILE = DIRECTORY.resolve("base_prices_items.json");
@@ -37,6 +42,7 @@ public final class PriceCalcStorage {
     private static final Path SETTINGS_FILE = DIRECTORY.resolve("settings.json");
     private static final Path COMPUTED_FILE = DIRECTORY.resolve("computed_prices.json");
     private static final Path PREFERRED_FILE = DIRECTORY.resolve("preferred_recipes.json");
+    private static final Path MACHINE_BLACKLIST_FILE = DIRECTORY.resolve("machine_blacklist.json");
     private static final Path BACKUP_DIRECTORY = FMLPaths.CONFIGDIR.get().resolve(CointCoreGTO.MODID).resolve("pricecalc_backups");
     private static final DateTimeFormatter BACKUP_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss_SSS");
 
@@ -45,6 +51,7 @@ public final class PriceCalcStorage {
     private static Map<String, Double> tagPrices = new LinkedHashMap<>();
     private static Map<String, String> preferredRecipes = new LinkedHashMap<>();
     private static Map<String, ComputedPrice> computedPrices = new LinkedHashMap<>();
+    private static Set<String> machineBlacklist = new LinkedHashSet<>();
     private static Settings settings = new Settings();
     private static boolean loaded;
 
@@ -139,6 +146,69 @@ public final class PriceCalcStorage {
         return computedPrices.get(key);
     }
 
+    public static synchronized boolean isMachineCategoryBlacklisted(ResourceLocation id) {
+        return id != null && isMachineCategoryBlacklisted(id.toString());
+    }
+
+    public static synchronized boolean isMachineCategoryBlacklisted(String categoryId) {
+        ensureLoaded();
+        if (categoryId == null || categoryId.isBlank()) {
+            return false;
+        }
+        return machineBlacklist.contains(categoryId);
+    }
+
+    public static synchronized List<String> getMachineBlacklist() {
+        ensureLoaded();
+        return new ArrayList<>(machineBlacklist);
+    }
+
+    public static synchronized Path setMachineCategoryBlacklistedSafely(String categoryId, boolean blocked) throws IOException {
+        ensureLoaded();
+        ResourceLocation parsed = ResourceLocation.tryParse(categoryId == null ? "" : categoryId.trim());
+        if (parsed == null) {
+            throw new IllegalArgumentException("Некорректный ID категории: " + categoryId);
+        }
+        String key = parsed.toString();
+        boolean current = machineBlacklist.contains(key);
+        if (current == blocked) {
+            return null;
+        }
+
+        Path backup = createBackup(blocked ? "blacklist-add" : "blacklist-remove");
+        LinkedHashSet<String> previousBlacklist = new LinkedHashSet<>(machineBlacklist);
+        LinkedHashMap<String, ComputedPrice> previousComputed = new LinkedHashMap<>(computedPrices);
+        LinkedHashSet<String> nextBlacklist = new LinkedHashSet<>(machineBlacklist);
+        if (blocked) {
+            nextBlacklist.add(key);
+        } else {
+            nextBlacklist.remove(key);
+        }
+        LinkedHashMap<String, ComputedPrice> clearedComputed = new LinkedHashMap<>();
+
+        try {
+            writeJsonChecked(MACHINE_BLACKLIST_FILE, nextBlacklist);
+            writeJsonChecked(COMPUTED_FILE, clearedComputed);
+            machineBlacklist = nextBlacklist;
+            computedPrices = clearedComputed;
+        } catch (IOException exception) {
+            machineBlacklist = previousBlacklist;
+            computedPrices = previousComputed;
+            try {
+                writeJsonChecked(MACHINE_BLACKLIST_FILE, previousBlacklist);
+            } catch (IOException restoreException) {
+                exception.addSuppressed(restoreException);
+            }
+            try {
+                writeJsonChecked(COMPUTED_FILE, previousComputed);
+            } catch (IOException restoreException) {
+                exception.addSuppressed(restoreException);
+            }
+            throw exception;
+        }
+        return backup;
+    }
+
     public static synchronized void putComputedPrice(String key, double price, String recipeId) {
         LinkedHashMap<String, PriceCalcResultEntry> values = new LinkedHashMap<>();
         values.put(key, new PriceCalcResultEntry(price, recipeId));
@@ -174,6 +244,36 @@ public final class PriceCalcStorage {
     public static synchronized int getMaxDepth() {
         ensureLoaded();
         return Math.max(8, Math.min(256, settings.maxDepth));
+    }
+
+    public static synchronized int getComputedPriceCount() {
+        ensureLoaded();
+        return computedPrices.size();
+    }
+
+    public static synchronized int getPreferredRecipeCount() {
+        ensureLoaded();
+        return preferredRecipes.size();
+    }
+
+    public static synchronized int getMachineBlacklistCount() {
+        ensureLoaded();
+        return machineBlacklist.size();
+    }
+
+    public static synchronized int getBaseItemPriceCount() {
+        ensureLoaded();
+        return itemPrices.size();
+    }
+
+    public static synchronized int getBaseFluidPriceCount() {
+        ensureLoaded();
+        return fluidPrices.size();
+    }
+
+    public static synchronized int getBaseTagPriceCount() {
+        ensureLoaded();
+        return tagPrices.size();
     }
 
     public static Path getDirectory() {
@@ -218,6 +318,7 @@ public final class PriceCalcStorage {
             ensureFile(TAGS_FILE, "{}\n");
             ensureFile(PREFERRED_FILE, "{}\n");
             ensureFile(COMPUTED_FILE, "{}\n");
+            ensureFile(MACHINE_BLACKLIST_FILE, "[]\n");
             ensureFile(SETTINGS_FILE, "{\n  \"price_per_eu\": 0.0,\n  \"max_depth\": 64\n}\n");
 
             Map<String, Double> loadedItemPrices = readDoubleMap(ITEMS_FILE);
@@ -227,6 +328,7 @@ public final class PriceCalcStorage {
             Map<String, ComputedPrice> loadedComputedPrices = invalidateComputed
                     ? new LinkedHashMap<>()
                     : readComputedMap(COMPUTED_FILE);
+            Set<String> loadedMachineBlacklist = readStringSet(MACHINE_BLACKLIST_FILE);
             Settings loadedSettings = readSettings(SETTINGS_FILE);
 
             if (invalidateComputed) {
@@ -238,6 +340,7 @@ public final class PriceCalcStorage {
             tagPrices = loadedTagPrices;
             preferredRecipes = loadedPreferredRecipes;
             computedPrices = loadedComputedPrices;
+            machineBlacklist = loadedMachineBlacklist;
             settings = loadedSettings;
             loaded = true;
             return true;
@@ -249,6 +352,7 @@ public final class PriceCalcStorage {
                 tagPrices = new LinkedHashMap<>();
                 preferredRecipes = new LinkedHashMap<>();
                 computedPrices = new LinkedHashMap<>();
+                machineBlacklist = new LinkedHashSet<>();
                 settings = new Settings();
                 loaded = true;
             }
@@ -266,6 +370,22 @@ public final class PriceCalcStorage {
         String json = Files.readString(file, StandardCharsets.UTF_8);
         Map<String, String> map = GSON.fromJson(json, STRING_MAP_TYPE);
         return map == null ? new LinkedHashMap<>() : new LinkedHashMap<>(map);
+    }
+
+    private static Set<String> readStringSet(Path file) throws IOException {
+        String json = Files.readString(file, StandardCharsets.UTF_8);
+        List<String> values = GSON.fromJson(json, STRING_LIST_TYPE);
+        LinkedHashSet<String> result = new LinkedHashSet<>();
+        if (values == null) {
+            return result;
+        }
+        for (String value : values) {
+            ResourceLocation id = ResourceLocation.tryParse(value == null ? "" : value.trim());
+            if (id != null) {
+                result.add(id.toString());
+            }
+        }
+        return result;
     }
 
     private static Map<String, ComputedPrice> readComputedMap(Path file) throws IOException {

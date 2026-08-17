@@ -199,6 +199,10 @@ public final class PriceCalcClientEvents {
         return tooltipEnabled;
     }
 
+    static boolean isTooltipEnabled() {
+        return accessAllowed && systemEnabled && tooltipEnabled;
+    }
+
     private static boolean isTextInputFocused(Screen screen) {
         if (screen.getFocused() instanceof EditBox) {
             return true;

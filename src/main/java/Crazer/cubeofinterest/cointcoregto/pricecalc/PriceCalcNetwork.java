@@ -15,7 +15,7 @@ import java.util.Optional;
 
 @Mod.EventBusSubscriber(modid = CointCoreGTO.MODID, bus = Mod.EventBusSubscriber.Bus.MOD)
 public final class PriceCalcNetwork {
-    private static final String PROTOCOL_VERSION = "3";
+    private static final String PROTOCOL_VERSION = "5";
     private static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(CointCoreGTO.MODID, "pricecalc"),
             () -> PROTOCOL_VERSION,

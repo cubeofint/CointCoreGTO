@@ -1,6 +1,7 @@
 package Crazer.cubeofinterest.cointcoregto.pricecalc.client;
 
 import Crazer.cubeofinterest.cointcoregto.pricecalc.PriceCalcResolver;
+import Crazer.cubeofinterest.cointcoregto.pricecalc.PriceCalcStorage;
 import dev.emi.emi.api.EmiApi;
 import dev.emi.emi.api.recipe.EmiRecipe;
 import dev.emi.emi.api.stack.EmiIngredient;
@@ -32,6 +33,7 @@ public final class PriceRecipePickerScreen extends Screen {
     private List<SearchEntry> indexedRecipes = List.of();
     private List<SearchEntry> filteredRecipes = List.of();
     private EditBox searchBox;
+    private Button blacklistButton;
     private String searchQuery = "";
     private int page;
     private boolean chosen;
@@ -51,12 +53,18 @@ public final class PriceRecipePickerScreen extends Screen {
         int cardWidth = Math.min(430, width - 32);
         int left = (width - cardWidth) / 2;
 
-        searchBox = new EditBox(font, left, SEARCH_TOP, cardWidth, 20, Component.literal("Поиск рецептов"));
+        int blacklistWidth = 78;
+        searchBox = new EditBox(font, left, SEARCH_TOP, cardWidth - blacklistWidth - 4, 20, Component.literal("Поиск рецептов"));
         searchBox.setMaxLength(160);
         searchBox.setHint(Component.literal("Поиск по машине, входам, выходам, количеству или ID"));
         searchBox.setValue(searchQuery);
         searchBox.setResponder(this::setSearchQuery);
         addRenderableWidget(searchBox);
+
+        blacklistButton = Button.builder(blacklistButtonText(), button -> minecraft.setScreen(new PriceMachineBlacklistScreen(this)))
+                .bounds(left + cardWidth - blacklistWidth, SEARCH_TOP, blacklistWidth, 20)
+                .build();
+        addRenderableWidget(blacklistButton);
 
         indexedRecipes = recipes.stream().map(this::indexRecipe).toList();
         applySearch();
@@ -84,13 +92,20 @@ public final class PriceRecipePickerScreen extends Screen {
 
     private void applySearch() {
         String query = normalize(searchQuery).trim();
-        if (query.isEmpty()) {
-            filteredRecipes = indexedRecipes;
-            return;
-        }
         filteredRecipes = indexedRecipes.stream()
-                .filter(entry -> matchesSearch(entry, query))
+                .filter(entry -> !PriceCalcResolver.isRecipeBlacklisted(entry.recipe()))
+                .filter(entry -> query.isEmpty() || matchesSearch(entry, query))
                 .toList();
+    }
+
+    void resumeAfterBlacklistChange() {
+        chosen = true;
+        minecraft.setScreen(parent);
+        PriceCalcClient.runPendingCalculation();
+    }
+
+    private Component blacklistButtonText() {
+        return Component.literal("ЧС: " + PriceCalcStorage.getMachineBlacklist().size());
     }
 
     private boolean matchesSearch(SearchEntry entry, String query) {
@@ -245,13 +260,20 @@ public final class PriceRecipePickerScreen extends Screen {
             if (id.length() > maxIdLength) {
                 id = id.substring(0, Math.max(1, maxIdLength - 3)) + "...";
             }
+            int blacklistWidth = 34;
             Button button = Button.builder(
                             Component.literal(label + "  §8" + id),
                             ignored -> select(recipe))
-                    .bounds(left, y, cardWidth, 20)
+                    .bounds(left, y, cardWidth - blacklistWidth - 4, 20)
                     .build();
             dynamicButtons.add(button);
             addRenderableWidget(button);
+
+            Button block = Button.builder(Component.literal("§cЧС"), ignored -> blacklist(recipe))
+                    .bounds(left + cardWidth - blacklistWidth, y, blacklistWidth, 20)
+                    .build();
+            dynamicButtons.add(block);
+            addRenderableWidget(block);
         }
 
         if (page > 0) {
@@ -299,6 +321,29 @@ public final class PriceRecipePickerScreen extends Screen {
         chosen = true;
         minecraft.setScreen(parent);
         PriceCalcClient.chooseRecipe(preferenceKey, PriceCalcResolver.recipeKey(recipe));
+    }
+
+    private void blacklist(EmiRecipe recipe) {
+        String categoryKey = PriceCalcResolver.machineCategoryKey(recipe);
+        if (categoryKey.isEmpty()) {
+            return;
+        }
+        try {
+            PriceCalcStorage.setMachineCategoryBlacklistedSafely(categoryKey, true);
+        } catch (Throwable throwable) {
+            if (minecraft.player != null) {
+                String message = throwable.getMessage();
+                minecraft.player.displayClientMessage(
+                        Component.literal("§c[PriceCalc] Не удалось добавить машину в чёрный список: §7"
+                                + (message == null || message.isBlank() ? throwable.getClass().getSimpleName() : message)),
+                        false
+                );
+            }
+            return;
+        }
+        chosen = true;
+        minecraft.setScreen(parent);
+        PriceCalcClient.runPendingCalculation();
     }
 
     @Override
