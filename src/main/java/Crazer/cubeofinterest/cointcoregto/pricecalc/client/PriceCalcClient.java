@@ -8,10 +8,15 @@ import dev.emi.emi.api.stack.EmiIngredient;
 import dev.emi.emi.api.stack.EmiStack;
 import dev.emi.emi.api.stack.EmiStackInteraction;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.util.LinkedHashMap;
@@ -106,7 +111,34 @@ public final class PriceCalcClient {
         }
     }
 
+    static boolean hasHoveredTarget() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft == null || minecraft.screen == null) {
+            return false;
+        }
+        EmiStack target = findHoveredTarget(minecraft);
+        return target != null && !target.isEmpty();
+    }
+
     private static EmiStack findTarget(Minecraft minecraft) {
+        EmiStack hovered = findHoveredTarget(minecraft);
+        if (hovered != null && !hovered.isEmpty()) {
+            return hovered;
+        }
+
+        ItemStack mainHand = minecraft.player.getItemInHand(InteractionHand.MAIN_HAND);
+        if (!mainHand.isEmpty()) {
+            return EmiStack.of(mainHand);
+        }
+        ItemStack offHand = minecraft.player.getItemInHand(InteractionHand.OFF_HAND);
+        if (!offHand.isEmpty()) {
+            return EmiStack.of(offHand);
+        }
+        return null;
+    }
+
+
+    private static EmiStack findHoveredTarget(Minecraft minecraft) {
         try {
             EmiStackInteraction interaction = EmiApi.getHoveredStack(false);
             if (interaction != null && !interaction.isEmpty()) {
@@ -124,13 +156,95 @@ public final class PriceCalcClient {
         } catch (Throwable ignored) {
         }
 
-        ItemStack mainHand = minecraft.player.getItemInHand(InteractionHand.MAIN_HAND);
-        if (!mainHand.isEmpty()) {
-            return EmiStack.of(mainHand);
+        ItemStack vanillaStack = findVanillaHoveredSlotStack(minecraft.screen);
+        if (!vanillaStack.isEmpty()) {
+            return EmiStack.of(vanillaStack);
         }
-        ItemStack offHand = minecraft.player.getItemInHand(InteractionHand.OFF_HAND);
-        if (!offHand.isEmpty()) {
-            return EmiStack.of(offHand);
+        return null;
+    }
+
+    private static ItemStack findVanillaHoveredSlotStack(Screen screen) {
+        if (!(screen instanceof AbstractContainerScreen<?> containerScreen)) {
+            return ItemStack.EMPTY;
+        }
+
+        Slot hoveredSlot = findHoveredSlotByMousePosition(containerScreen);
+        if (hoveredSlot == null || !hoveredSlot.isActive() || !hoveredSlot.hasItem()) {
+            return ItemStack.EMPTY;
+        }
+
+        ItemStack stack = hoveredSlot.getItem();
+        return stack.isEmpty() ? ItemStack.EMPTY : stack.copy();
+    }
+
+    private static Slot findHoveredSlotByMousePosition(AbstractContainerScreen<?> screen) {
+        Minecraft minecraft = Minecraft.getInstance();
+        int mouseX = getScaledMouseX(minecraft);
+        int mouseY = getScaledMouseY(minecraft);
+        int left = getScreenInt(screen, "getGuiLeft", "leftPos", "f_97735_");
+        int top = getScreenInt(screen, "getGuiTop", "topPos", "f_97736_");
+
+        for (Slot slot : screen.getMenu().slots) {
+            if (slot == null || !slot.isActive() || !slot.hasItem()) {
+                continue;
+            }
+            int slotX = left + slot.x;
+            int slotY = top + slot.y;
+            if (mouseX >= slotX && mouseX < slotX + 16 && mouseY >= slotY && mouseY < slotY + 16) {
+                return slot;
+            }
+        }
+        return null;
+    }
+
+    private static int getScaledMouseX(Minecraft minecraft) {
+        return (int) (minecraft.mouseHandler.xpos()
+                * minecraft.getWindow().getGuiScaledWidth()
+                / minecraft.getWindow().getScreenWidth());
+    }
+
+    private static int getScaledMouseY(Minecraft minecraft) {
+        return (int) (minecraft.mouseHandler.ypos()
+                * minecraft.getWindow().getGuiScaledHeight()
+                / minecraft.getWindow().getScreenHeight());
+    }
+
+    private static int getScreenInt(
+            AbstractContainerScreen<?> screen,
+            String methodName,
+            String fieldName,
+            String obfuscatedFieldName
+    ) {
+        try {
+            Method method = AbstractContainerScreen.class.getMethod(methodName);
+            Object result = method.invoke(screen);
+            if (result instanceof Integer integer) {
+                return integer;
+            }
+        } catch (Throwable ignored) {
+        }
+
+        Field field = findField(AbstractContainerScreen.class, fieldName, obfuscatedFieldName);
+        if (field != null) {
+            try {
+                field.setAccessible(true);
+                return field.getInt(screen);
+            } catch (Throwable ignored) {
+            }
+        }
+        return 0;
+    }
+
+    private static Field findField(Class<?> startClass, String... names) {
+        Class<?> currentClass = startClass;
+        while (currentClass != null) {
+            for (String name : names) {
+                try {
+                    return currentClass.getDeclaredField(name);
+                } catch (NoSuchFieldException ignored) {
+                }
+            }
+            currentClass = currentClass.getSuperclass();
         }
         return null;
     }

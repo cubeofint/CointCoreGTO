@@ -91,7 +91,7 @@ public final class PriceCalcClientPacketHandler {
         }
         minecraft.player.displayClientMessage(
                 Component.literal(enabled
-                        ? "§a[PriceCalc] Система расчёта включена. §7Клавиша P активна только в игре без открытых GUI."
+                        ? "§a[PriceCalc] Система расчёта включена. §7P работает в игре и над предметами в инвентаре/EMI."
                         : "§e[PriceCalc] Система расчёта выключена. §7PriceCalc не реагирует на P."),
                 false
         );

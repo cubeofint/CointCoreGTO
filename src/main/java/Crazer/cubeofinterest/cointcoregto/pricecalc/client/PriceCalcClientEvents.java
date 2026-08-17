@@ -5,11 +5,11 @@ import Crazer.cubeofinterest.cointcoregto.pricecalc.PriceCalcNetwork;
 import Crazer.cubeofinterest.cointcoregto.pricecalc.PriceCalcStorage;
 import com.mojang.blaze3d.platform.InputConstants;
 import dev.emi.emi.api.EmiApi;
-import dev.emi.emi.api.stack.EmiStackInteraction;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.ChatScreen;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraftforge.api.distmarker.Dist;
@@ -119,13 +119,13 @@ public final class PriceCalcClientEvents {
             if (event.getScreen() instanceof ChatScreen || event.getScreen() instanceof PriceRecipePickerScreen) {
                 return;
             }
-            if (event.getScreen().getFocused() instanceof EditBox) {
+            if (isTextInputFocused(event.getScreen())) {
                 return;
             }
             if (!CALCULATE_PRICE.matches(event.getKeyCode(), event.getScanCode())) {
                 return;
             }
-            if (!hasHoveredEmiStack()) {
+            if (!PriceCalcClient.hasHoveredTarget()) {
                 return;
             }
             PriceCalcNetwork.requestCalculation();
@@ -199,10 +199,12 @@ public final class PriceCalcClientEvents {
         return tooltipEnabled;
     }
 
-    private static boolean hasHoveredEmiStack() {
+    private static boolean isTextInputFocused(Screen screen) {
+        if (screen.getFocused() instanceof EditBox) {
+            return true;
+        }
         try {
-            EmiStackInteraction interaction = EmiApi.getHoveredStack(false);
-            return interaction != null && !interaction.isEmpty();
+            return EmiApi.isSearchFocused();
         } catch (Throwable ignored) {
             return false;
         }
