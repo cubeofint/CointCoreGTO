@@ -508,6 +508,7 @@ public class CointCoreGTO {
         CointExchangerRegistry.register(modEventBus);
         CointRecipeEditorRegistry.register(modEventBus);
         TradeRegistry.register(modEventBus);
+        Crazer.cubeofinterest.cointcoregto.invview.InvViewRegistry.register(modEventBus);
         BattlePassNetwork.register();
         modEventBus.addListener(this::onClientSetup);
 
@@ -518,6 +519,7 @@ public class CointCoreGTO {
         CointExchangerNetwork.register();
         RecipeEditorNetwork.register();
         TradeNetwork.register();
+        Crazer.cubeofinterest.cointcoregto.invview.InvViewNetwork.register();
         CointCoreGTONetwork.register();
         ClusterTestModule.register();
 
@@ -534,6 +536,7 @@ public class CointCoreGTO {
             CointExchangerClient.registerScreens();
             RecipeEditorClient.registerScreens();
             TradeClient.registerScreens();
+            Crazer.cubeofinterest.cointcoregto.invview.InvViewClient.registerScreens();
         });
     }
 
