@@ -1,15 +1,20 @@
 package Crazer.cubeofinterest.cointcoregto;
 
 import com.mojang.blaze3d.platform.NativeImage;
+import net.minecraft.client.GuiMessage;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.ChatComponent;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Style;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.client.event.ClientChatReceivedEvent;
 import net.minecraftforge.client.event.RenderGuiEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -28,6 +33,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -49,6 +55,7 @@ public final class CointCoreGTOEmoji {
 
     private static final Pattern DISCORD_CUSTOM_EMOJI_PATTERN = Pattern.compile("<a?:([A-Za-z0-9_]{2,64}):(\\d{10,32})>");
     private static final Pattern MINECRAFT_EMOJI_TOKEN_PATTERN = Pattern.compile(":([A-Za-z0-9_]{2,64}):");
+    private static final String EMOJI_INSERTION_PREFIX = "cointcoregto:emoji:";
 
     private static final Map<String, EmojiInfo> SERVER_EMOJIS_BY_NAME = new ConcurrentHashMap<>();
     private static final Map<String, EmojiInfo> CLIENT_EMOJIS_BY_NAME = new ConcurrentHashMap<>();
@@ -288,6 +295,64 @@ public final class CointCoreGTOEmoji {
     }
 
     @SubscribeEvent
+    public static void onClientChatReceived(ClientChatReceivedEvent event) {
+        if (event == null || event.getMessage() == null || CLIENT_EMOJIS_BY_NAME.isEmpty()) {
+            return;
+        }
+
+        Component replaced = replaceEmojiTokensForClient(event.getMessage());
+        if (replaced != null) {
+            event.setMessage(replaced);
+        }
+    }
+
+    private static Component replaceEmojiTokensForClient(Component message) {
+        MutableComponent result = Component.empty();
+        boolean[] changed = {false};
+
+        message.visit((style, text) -> {
+            if (text == null || text.isEmpty()) {
+                return Optional.empty();
+            }
+
+            Matcher matcher = MINECRAFT_EMOJI_TOKEN_PATTERN.matcher(text);
+            int last = 0;
+
+            while (matcher.find()) {
+                String name = sanitizeEmojiName(matcher.group(1));
+                EmojiInfo info = name == null ? null : findClientEmoji(name);
+
+                if (info == null && name != null) {
+                    info = findClientEmoji(name.toLowerCase(Locale.ROOT));
+                }
+
+                if (info == null) {
+                    continue;
+                }
+
+                if (matcher.start() > last) {
+                    result.append(Component.literal(text.substring(last, matcher.start())).setStyle(style));
+                }
+
+                getOrLoadClientTexture(info);
+                Style emojiStyle = style.withInsertion(EMOJI_INSERTION_PREFIX + info.name());
+                result.append(Component.literal(" ").setStyle(emojiStyle));
+                result.append(Component.literal(" ").setStyle(style));
+                last = matcher.end();
+                changed[0] = true;
+            }
+
+            if (last < text.length()) {
+                result.append(Component.literal(text.substring(last)).setStyle(style));
+            }
+
+            return Optional.empty();
+        }, Style.EMPTY);
+
+        return changed[0] ? result : message;
+    }
+
+    @SubscribeEvent
     public static void onRenderGui(RenderGuiEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
 
@@ -304,7 +369,7 @@ public final class CointCoreGTOEmoji {
             return;
         }
 
-        List<String> visibleLines = getVisibleChatLines(chat);
+        List<VisibleChatLine> visibleLines = getVisibleChatLines(chat);
         if (visibleLines.isEmpty()) {
             return;
         }
@@ -319,18 +384,19 @@ public final class CointCoreGTOEmoji {
         GuiGraphics graphics = event.getGuiGraphics();
 
         for (int lineIndex = 0; lineIndex < count; lineIndex++) {
-            String lineText = visibleLines.get(lineIndex);
-            if (lineText == null || lineText.isBlank()) {
+            VisibleChatLine line = visibleLines.get(lineIndex);
+            if (line == null || line.text() == null || line.emojis().isEmpty()) {
                 continue;
             }
 
-            for (EmojiMatch match : findEmojiMatches(lineText)) {
-                ClientEmojiTexture texture = getOrLoadClientTexture(match.info());
+            for (EmojiVisual emoji : line.emojis()) {
+                ClientEmojiTexture texture = getOrLoadClientTexture(emoji.info());
                 if (texture == null || texture.location() == null || !texture.ready()) {
                     continue;
                 }
 
-                int beforeWidth = mc.font.width(lineText.substring(0, match.start()));
+                int safeIndex = Math.max(0, Math.min(emoji.charIndex(), line.text().length()));
+                int beforeWidth = mc.font.width(line.text().substring(0, safeIndex));
                 int textY = chatBottom - (lineIndex + 1) * lineHeight;
                 int emojiX = 4 + beforeWidth;
                 int emojiY = textY;
@@ -341,36 +407,6 @@ public final class CointCoreGTOEmoji {
                 graphics.pose().popPose();
             }
         }
-    }
-
-    private static List<EmojiMatch> findEmojiMatches(String lineText) {
-        ArrayList<EmojiMatch> result = new ArrayList<>();
-
-        if (lineText == null || lineText.isBlank()) {
-            return result;
-        }
-
-        Matcher matcher = MINECRAFT_EMOJI_TOKEN_PATTERN.matcher(lineText);
-        while (matcher.find()) {
-            String rawName = matcher.group(1);
-            String name = sanitizeEmojiName(rawName);
-
-            if (name == null) {
-                continue;
-            }
-
-            EmojiInfo info = findClientEmoji(name);
-
-            if (info == null) {
-                info = findClientEmoji(name.toLowerCase(Locale.ROOT));
-            }
-
-            if (info != null) {
-                result.add(new EmojiMatch(info, matcher.start(), matcher.end()));
-            }
-        }
-
-        return result;
     }
 
     private static ClientEmojiTexture getOrLoadClientTexture(EmojiInfo info) {
@@ -542,11 +578,11 @@ public final class CointCoreGTOEmoji {
         return cleaned;
     }
 
-    private static List<String> getVisibleChatLines(ChatComponent chat) {
-        ArrayList<String> lines = new ArrayList<>();
+    private static List<VisibleChatLine> getVisibleChatLines(ChatComponent chat) {
+        ArrayList<VisibleChatLine> lines = new ArrayList<>();
 
         try {
-            Field trimmedMessagesField = findField(ChatComponent.class, "trimmedMessages", "f_93762_", "field_2064");
+            Field trimmedMessagesField = findField(ChatComponent.class, "trimmedMessages", "f_93761_", "field_2064");
             if (trimmedMessagesField == null) {
                 return lines;
             }
@@ -565,7 +601,7 @@ public final class CointCoreGTOEmoji {
             int end = Math.min(rawLines.size(), scroll + maxVisibleLines + 2);
 
             for (int i = scroll; i < end; i++) {
-                lines.add(lineToString(rawLines.get(i)));
+                lines.add(lineToVisibleChatLine(rawLines.get(i)));
             }
         } catch (Throwable ignored) {
         }
@@ -573,51 +609,78 @@ public final class CointCoreGTOEmoji {
         return lines;
     }
 
-    private static String lineToString(Object line) {
+    private static VisibleChatLine lineToVisibleChatLine(Object line) {
         if (line == null) {
-            return "";
+            return new VisibleChatLine("", List.of());
         }
 
         try {
-            Object content;
+            FormattedCharSequence sequence = null;
 
-            try {
-                content = line.getClass().getMethod("content").invoke(line);
-            } catch (Throwable ignored) {
-                Field contentField = findField(line.getClass(), "content", "f_242248_", "field_40678");
+            if (line instanceof GuiMessage.Line guiLine) {
+                sequence = guiLine.content();
+            }
 
-                if (contentField == null) {
-                    return "";
+            if (sequence == null) {
+                Object content = null;
+
+                try {
+                    content = line.getClass().getMethod("content").invoke(line);
+                } catch (Throwable ignored) {
+                    try {
+                        content = line.getClass().getMethod("f_240339_").invoke(line);
+                    } catch (Throwable ignoredToo) {
+                        Field contentField = findField(line.getClass(), "content", "f_240339_", "field_39766");
+                        if (contentField != null) {
+                            contentField.setAccessible(true);
+                            content = contentField.get(line);
+                        }
+                    }
                 }
 
-                contentField.setAccessible(true);
-                content = contentField.get(line);
+                if (content instanceof FormattedCharSequence formatted) {
+                    sequence = formatted;
+                } else if (content instanceof Component component) {
+                    sequence = component.getVisualOrderText();
+                }
             }
 
-            if (content instanceof FormattedCharSequence sequence) {
-                StringBuilder builder = new StringBuilder();
-
-                sequence.accept((index, style, codePoint) -> {
-                    builder.appendCodePoint(codePoint);
-                    return true;
-                });
-
-                return builder.toString();
+            if (sequence == null) {
+                return new VisibleChatLine("", List.of());
             }
 
-            if (content instanceof net.minecraft.network.chat.Component component) {
-                return component.getString();
-            }
+            StringBuilder builder = new StringBuilder();
+            ArrayList<EmojiVisual> emojis = new ArrayList<>();
+            String[] lastInsertion = {null};
 
-            return content == null ? "" : content.toString();
+            sequence.accept((index, style, codePoint) -> {
+                String insertion = style == null ? null : style.getInsertion();
+                if (insertion != null && insertion.startsWith(EMOJI_INSERTION_PREFIX)
+                        && !insertion.equals(lastInsertion[0])) {
+                    String name = sanitizeEmojiName(insertion.substring(EMOJI_INSERTION_PREFIX.length()));
+                    EmojiInfo info = name == null ? null : findClientEmoji(name);
+                    if (info == null && name != null) {
+                        info = findClientEmoji(name.toLowerCase(Locale.ROOT));
+                    }
+                    if (info != null) {
+                        emojis.add(new EmojiVisual(info, builder.length()));
+                    }
+                }
+
+                lastInsertion[0] = insertion;
+                builder.appendCodePoint(codePoint);
+                return true;
+            });
+
+            return new VisibleChatLine(builder.toString(), emojis);
         } catch (Throwable ignored) {
-            return "";
+            return new VisibleChatLine("", List.of());
         }
     }
 
     private static int getChatScroll(ChatComponent chat) {
         try {
-            Field field = findField(ChatComponent.class, "chatScrollbarPos", "scrollPos", "f_93764_", "field_2065");
+            Field field = findField(ChatComponent.class, "chatScrollbarPos", "scrollPos", "f_93763_", "field_2066");
             if (field == null) {
                 return 0;
             }
@@ -631,14 +694,10 @@ public final class CointCoreGTOEmoji {
 
     private static int getChatHeight(ChatComponent chat) {
         try {
-            Object value = ChatComponent.class.getMethod("getHeight").invoke(chat);
-            if (value instanceof Integer integer) {
-                return Math.max(1, integer);
-            }
+            return Math.max(1, chat.getHeight());
         } catch (Throwable ignored) {
+            return 180;
         }
-
-        return 180;
     }
 
     private static Field findField(Class<?> type, String... names) {
@@ -664,7 +723,10 @@ public final class CointCoreGTOEmoji {
     private record ClientEmojiTexture(ResourceLocation location, boolean ready) {
     }
 
-    private record EmojiMatch(EmojiInfo info, int start, int end) {
+    private record EmojiVisual(EmojiInfo info, int charIndex) {
+    }
+
+    private record VisibleChatLine(String text, List<EmojiVisual> emojis) {
     }
 
     private record EmojiRegistryPacket(List<EmojiInfo> emojis) {

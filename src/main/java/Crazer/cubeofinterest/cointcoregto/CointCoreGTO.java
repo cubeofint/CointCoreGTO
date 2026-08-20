@@ -2423,7 +2423,7 @@ public class CointCoreGTO {
 
         if (enabled) {
             SPY_ENABLED.add(player.getUUID());
-            player.displayClientMessage(Component.literal("§5[SPY] §aВключён. Вы видите локальный, глобальный, торговый и личный чат."), true);
+            player.displayClientMessage(Component.literal("§5[SPY] §aВключён. Показываются только скрытые сообщения: локальный чат вне радиуса и личные сообщения других игроков."), true);
             SPY_LOGGER.info("{} enabled chat spy", player.getGameProfile().getName());
         } else {
             SPY_ENABLED.remove(player.getUUID());
@@ -2489,11 +2489,7 @@ public class CointCoreGTO {
     }
 
     private static void sendPrivateParticipantMessage(ServerPlayer player, Component message) {
-        if (isSpyEnabled(player)) {
-            sendSpyMessage(player, message);
-        } else {
-            player.sendSystemMessage(message);
-        }
+        player.sendSystemMessage(message);
     }
 
     private static void rememberChatMessage(ServerPlayer target, ChatView view, String formattedMessage) {
@@ -2523,11 +2519,6 @@ public class CointCoreGTO {
 
     private static void sendFilteredChatMessage(ServerPlayer target, ChatView view, String formattedMessage, Component liveMessage) {
         rememberChatMessage(target, view, formattedMessage, liveMessage);
-
-        if (isSpyEnabled(target)) {
-            sendSpyMessage(target, liveMessage);
-            return;
-        }
 
         if (canReceive(target, view)) {
             target.sendSystemMessage(liveMessage);

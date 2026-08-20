@@ -2,6 +2,7 @@ package Crazer.cubeofinterest.cointcoregto;
 
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.JDABuilder;
+import net.dv8tion.jda.api.entities.Activity;
 import net.dv8tion.jda.api.entities.Message;
 import net.dv8tion.jda.api.entities.channel.concrete.TextChannel;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
@@ -20,11 +21,14 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class CointCoreGTODiscordBridge {
     private static JDA jda;
@@ -42,6 +46,14 @@ public class CointCoreGTODiscordBridge {
     private static String onlineStatusChannelId = "";
     private static int onlineStatusUpdateSeconds = 60;
     private static ScheduledExecutorService onlineStatusExecutor;
+    private static ScheduledFuture<?> pendingOnlineStatusUpdate;
+    private static final AtomicBoolean onlineStatusRequestInFlight = new AtomicBoolean(false);
+    private static final AtomicBoolean onlineStatusUpdatePending = new AtomicBoolean(false);
+    private static final AtomicBoolean onlineStatusPinResolveInFlight = new AtomicBoolean(false);
+    private static volatile boolean onlineStatusPinResolved = false;
+    private static volatile String lastOnlineStatusText = "";
+    private static volatile String lastBotPresenceText = "";
+    private static volatile long onlineStatusRetryNotBeforeMillis = 0L;
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
 
     public static void start(
@@ -67,9 +79,11 @@ public class CointCoreGTODiscordBridge {
                 : configuredAvatarUrlTemplate.trim();
         onlineStatusEnabled = configuredOnlineStatusEnabled;
         onlineStatusChannelId = configuredOnlineStatusChannelId == null ? "" : configuredOnlineStatusChannelId.trim();
-        onlineStatusUpdateSeconds = Math.max(15, configuredOnlineStatusUpdateSeconds);
+        onlineStatusUpdateSeconds = Math.max(10, configuredOnlineStatusUpdateSeconds);
 
         stopOnlineStatusUpdater();
+        System.out.println("[CointDiscord] Starting bridge. onlineStatus=" + onlineStatusEnabled
+                + ", update=" + onlineStatusUpdateSeconds + "s");
 
         if (!enabled) {
             System.out.println("[CointDiscord] Discord bridge is disabled.");
@@ -97,6 +111,9 @@ public class CointCoreGTODiscordBridge {
                     })
                     .build();
 
+            ensureOnlineStatusUpdater();
+            requestOnlineStatusUpdate();
+
             new Thread(() -> {
                 try {
                     jda.awaitReady();
@@ -118,6 +135,8 @@ public class CointCoreGTODiscordBridge {
                         return;
                     }
 
+                    resolvePinnedOnlineStatusMessage(getOnlineStatusChannel());
+                    updateBotPresenceNow();
                     System.out.println("[CointDiscord] Discord bridge connected.");
                     CointCoreGTOEmoji.refreshFromJda(jda);
                     CointCoreGTOEmoji.broadcastEmojiRegistry();
@@ -126,10 +145,11 @@ public class CointCoreGTODiscordBridge {
                         sendToDiscord("**[A] сервер включился!**");
                     }
 
-                    startOnlineStatusUpdater();
+                    ensureOnlineStatusUpdater();
                     requestOnlineStatusUpdate();
-                } catch (Exception e) {
+                } catch (Throwable e) {
                     System.out.println("[CointDiscord] Failed to start Discord bridge: " + e.getMessage());
+                    e.printStackTrace();
                 }
             }, "CointDiscord-Init").start();
 
@@ -362,6 +382,7 @@ public class CointCoreGTODiscordBridge {
 
         message = removeBotMention(event, message);
         message = CointCoreGTOEmoji.discordToMinecraft(message);
+        message = sanitizeDiscordMessageForMinecraft(message);
 
         if (message == null || message.isBlank()) {
             return;
@@ -371,7 +392,12 @@ public class CointCoreGTODiscordBridge {
 
         Message referenced = event.getMessage().getReferencedMessage();
         if (referenced != null && referenced.getAuthor().isBot()) {
-            replyToMinecraftPlayer = extractMinecraftNameFromBotMessage(referenced.getContentDisplay());
+            if (!referenced.getAuthor().getId().equals(event.getJDA().getSelfUser().getId())) {
+                replyToMinecraftPlayer = extractMinecraftNameFromWebhookAuthor(referenced.getAuthor().getName());
+            }
+            if (replyToMinecraftPlayer == null || replyToMinecraftPlayer.isBlank()) {
+                replyToMinecraftPlayer = extractMinecraftNameFromBotMessage(referenced.getContentDisplay());
+            }
         }
 
         if (server == null) {
@@ -389,34 +415,38 @@ public class CointCoreGTODiscordBridge {
             return;
         }
 
-        scheduleOnlineStatusUpdate(0L);
-        scheduleOnlineStatusUpdate(3L);
-        scheduleOnlineStatusUpdate(10L);
-    }
+        ensureOnlineStatusUpdater();
 
-    private static void scheduleOnlineStatusUpdate(long delaySeconds) {
-        Thread thread = new Thread(() -> {
-            try {
-                if (delaySeconds > 0L) {
-                    Thread.sleep(delaySeconds * 1000L);
-                }
+        ScheduledExecutorService executor = onlineStatusExecutor;
+        if (executor == null || executor.isShutdown()) {
+            return;
+        }
 
-                safeUpdateOnlineStatusMessageNow("manual-" + delaySeconds);
-            } catch (Throwable error) {
-                System.out.println("[CointDiscord] Online status manual update failed: " + error.getMessage());
+        synchronized (CointCoreGTODiscordBridge.class) {
+            if (pendingOnlineStatusUpdate != null) {
+                pendingOnlineStatusUpdate.cancel(false);
             }
-        }, "CointDiscord-OnlineStatus-Manual-" + delaySeconds);
 
-        thread.setDaemon(true);
-        thread.start();
+            long now = System.currentTimeMillis();
+            long retryDelayMillis = Math.max(0L, onlineStatusRetryNotBeforeMillis - now);
+            long delayMillis = Math.max(10_000L, retryDelayMillis);
+
+            pendingOnlineStatusUpdate = executor.schedule(
+                    () -> safeUpdateOnlineStatusMessageNow("event"),
+                    delayMillis,
+                    TimeUnit.MILLISECONDS
+            );
+        }
     }
 
-    private static void startOnlineStatusUpdater() {
+    private static synchronized void ensureOnlineStatusUpdater() {
         if (!enabled || !onlineStatusEnabled || jda == null || server == null) {
             return;
         }
 
-        stopOnlineStatusUpdater();
+        if (onlineStatusExecutor != null && !onlineStatusExecutor.isShutdown()) {
+            return;
+        }
 
         onlineStatusExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "CointDiscord-OnlineStatus");
@@ -424,15 +454,25 @@ public class CointCoreGTODiscordBridge {
             return thread;
         });
 
+        long initialDelay = Math.min(15L, onlineStatusUpdateSeconds);
         onlineStatusExecutor.scheduleAtFixedRate(
                 () -> safeUpdateOnlineStatusMessageNow("timer"),
-                5L,
+                initialDelay,
                 onlineStatusUpdateSeconds,
                 TimeUnit.SECONDS
         );
+
+        System.out.println("[CointDiscord] Online status updater started.");
     }
 
     private static void stopOnlineStatusUpdater() {
+        synchronized (CointCoreGTODiscordBridge.class) {
+            if (pendingOnlineStatusUpdate != null) {
+                pendingOnlineStatusUpdate.cancel(false);
+                pendingOnlineStatusUpdate = null;
+            }
+        }
+
         if (onlineStatusExecutor != null) {
             try {
                 onlineStatusExecutor.shutdownNow();
@@ -441,6 +481,13 @@ public class CointCoreGTODiscordBridge {
         }
 
         onlineStatusExecutor = null;
+        onlineStatusRequestInFlight.set(false);
+        onlineStatusUpdatePending.set(false);
+        onlineStatusPinResolveInFlight.set(false);
+        onlineStatusPinResolved = false;
+        lastOnlineStatusText = "";
+        lastBotPresenceText = "";
+        onlineStatusRetryNotBeforeMillis = 0L;
     }
 
     private static void safeUpdateOnlineStatusMessageNow(String reason) {
@@ -459,16 +506,39 @@ public class CointCoreGTODiscordBridge {
 
         MinecraftServer minecraftServer = server;
         minecraftServer.execute(() -> {
+            updateBotPresenceNow();
             if (!enabled || !onlineStatusEnabled || jda == null || server == null) {
                 return;
             }
 
             TextChannel statusChannel = getOnlineStatusChannel();
             if (statusChannel == null) {
+                onlineStatusUpdatePending.set(true);
+                requestOnlineStatusUpdate();
+                return;
+            }
+
+            if (!onlineStatusPinResolved) {
+                resolvePinnedOnlineStatusMessage(statusChannel);
                 return;
             }
 
             String messageText = buildOnlineStatusMessage();
+            if (messageText.equals(lastOnlineStatusText)) {
+                return;
+            }
+
+            if (System.currentTimeMillis() < onlineStatusRetryNotBeforeMillis) {
+                onlineStatusUpdatePending.set(true);
+                requestOnlineStatusUpdate();
+                return;
+            }
+
+            if (!onlineStatusRequestInFlight.compareAndSet(false, true)) {
+                onlineStatusUpdatePending.set(true);
+                return;
+            }
+
             String messageId = loadOnlineStatusMessageId();
 
             if (messageId == null || messageId.isBlank()) {
@@ -493,6 +563,73 @@ public class CointCoreGTODiscordBridge {
         }
 
         return textChannel;
+    }
+
+
+    private static void resolvePinnedOnlineStatusMessage(TextChannel channel) {
+        if (channel == null || onlineStatusPinResolved) {
+            return;
+        }
+
+        if (!onlineStatusPinResolveInFlight.compareAndSet(false, true)) {
+            return;
+        }
+
+        try {
+            channel.retrievePinnedMessages().queue(messages -> {
+                try {
+                    JDA currentJda = jda;
+                    String selfId = currentJda == null ? "" : currentJda.getSelfUser().getId();
+                    Message pinnedStatus = messages.stream()
+                            .filter(message -> message != null)
+                            .filter(message -> !selfId.isBlank() && selfId.equals(message.getAuthor().getId()))
+                            .filter(message -> isOnlineStatusMessageText(message.getContentRaw()))
+                            .min(Comparator.comparing(Message::getTimeCreated))
+                            .orElse(null);
+
+                    if (pinnedStatus != null) {
+                        String savedId = loadOnlineStatusMessageId();
+                        if (!pinnedStatus.getId().equals(savedId)) {
+                            saveOnlineStatusMessageId(pinnedStatus.getId());
+                            System.out.println("[CointDiscord] Rebound online status to pinned message. old="
+                                    + (savedId == null || savedId.isBlank() ? "<empty>" : savedId)
+                                    + ", new="
+                                    + pinnedStatus.getId());
+                        } else {
+                            System.out.println("[CointDiscord] Pinned online status message confirmed. ID: "
+                                    + pinnedStatus.getId());
+                        }
+                    } else {
+                        System.out.println("[CointDiscord] No matching pinned online status message found; using saved message ID.");
+                    }
+
+                    lastOnlineStatusText = "";
+                } finally {
+                    onlineStatusPinResolved = true;
+                    onlineStatusPinResolveInFlight.set(false);
+                    safeUpdateOnlineStatusMessageNow("pin-resolved");
+                }
+            }, error -> {
+                onlineStatusPinResolved = true;
+                onlineStatusPinResolveInFlight.set(false);
+                System.out.println("[CointDiscord] Failed to inspect pinned messages: " + error.getMessage());
+                safeUpdateOnlineStatusMessageNow("pin-resolve-failed");
+            });
+        } catch (Throwable error) {
+            onlineStatusPinResolved = true;
+            onlineStatusPinResolveInFlight.set(false);
+            System.out.println("[CointDiscord] Failed to inspect pinned messages: " + error.getMessage());
+            safeUpdateOnlineStatusMessageNow("pin-resolve-failed");
+        }
+    }
+
+    private static boolean isOnlineStatusMessageText(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+
+        String normalized = text.toLowerCase(java.util.Locale.ROOT);
+        return normalized.contains("cube of interest") && normalized.contains("онлайн:");
     }
 
     private static void editOnlineStatusMessageRaw(TextChannel channel, String messageId, String messageText) {
@@ -527,26 +664,103 @@ public class CointCoreGTODiscordBridge {
                         int code = response.statusCode();
 
                         if (code >= 200 && code < 300) {
+                            onlineStatusRetryNotBeforeMillis = 0L;
+                            lastOnlineStatusText = messageText == null ? "" : messageText;
+                            System.out.println("[CointDiscord] Online status message updated. channel="
+                                    + channel.getId()
+                                    + ", message="
+                                    + messageId.trim());
+                            finishOnlineStatusRequest();
+                            return;
+                        }
+
+                        String body = response.body() == null ? "" : response.body();
+
+                        if (code == 404) {
+                            sendNewOnlineStatusMessage(channel, messageText);
+                            return;
+                        }
+
+                        if (code == 429) {
+                            long retryMillis = parseRetryAfterMillis(body);
+                            onlineStatusRetryNotBeforeMillis = Math.max(
+                                    onlineStatusRetryNotBeforeMillis,
+                                    System.currentTimeMillis() + retryMillis
+                            );
+                            onlineStatusUpdatePending.set(true);
+                            logOnlineStatusError("[CointDiscord] Discord rate limited online status edit. Retrying same message in "
+                                    + retryMillis
+                                    + " ms. Body: "
+                                    + body);
+                            finishOnlineStatusRequest();
                             return;
                         }
 
                         logOnlineStatusError("[CointDiscord] Failed to edit online status message via HTTP. Code: "
                                 + code
                                 + ", body: "
-                                + response.body());
-
-                        if (code == 404) {
-                            logOnlineStatusError("[CointDiscord] Online status message not found, creating a new one.");
-                            sendNewOnlineStatusMessage(channel, messageText);
-                        }
+                                + body);
+                        finishOnlineStatusRequest();
                     })
                     .exceptionally(error -> {
                         logOnlineStatusError("[CointDiscord] Failed to edit online status message via HTTP: "
                                 + error.getMessage());
+                        finishOnlineStatusRequest();
                         return null;
                     });
         } catch (Throwable e) {
             logOnlineStatusError("[CointDiscord] Failed to build online status edit request: " + e.getMessage());
+            finishOnlineStatusRequest();
+        }
+    }
+
+    private static long parseRetryAfterMillis(String body) {
+        if (body == null || body.isBlank()) {
+            return 10_000L;
+        }
+
+        int key = body.indexOf("\"retry_after\"");
+        if (key < 0) {
+            return 10_000L;
+        }
+
+        int colon = body.indexOf(':', key);
+        if (colon < 0) {
+            return 10_000L;
+        }
+
+        int start = colon + 1;
+        while (start < body.length() && Character.isWhitespace(body.charAt(start))) {
+            start++;
+        }
+
+        int end = start;
+        while (end < body.length()) {
+            char c = body.charAt(end);
+            if ((c >= '0' && c <= '9') || c == '.') {
+                end++;
+                continue;
+            }
+            break;
+        }
+
+        if (end <= start) {
+            return 10_000L;
+        }
+
+        try {
+            double seconds = Double.parseDouble(body.substring(start, end));
+            return Math.max(1_000L, (long) Math.ceil(seconds * 1000.0D) + 500L);
+        } catch (NumberFormatException ignored) {
+            return 10_000L;
+        }
+    }
+
+    private static void finishOnlineStatusRequest() {
+        onlineStatusRequestInFlight.set(false);
+
+        if (onlineStatusUpdatePending.getAndSet(false)) {
+            requestOnlineStatusUpdate();
         }
     }
 
@@ -565,10 +779,49 @@ public class CointCoreGTODiscordBridge {
         try {
             channel.sendMessage(messageText).queue(message -> {
                 saveOnlineStatusMessageId(message.getId());
-                System.out.println("[CointDiscord] Created online status message. Pin this message in Discord. ID: " + message.getId());
-            }, error -> System.out.println("[CointDiscord] Failed to create online status message: " + error.getMessage()));
+                lastOnlineStatusText = messageText == null ? "" : messageText;
+                try {
+                    message.pin().queue(ignored -> {
+                    }, ignored -> {
+                    });
+                } catch (Throwable ignored) {
+                }
+                System.out.println("[CointDiscord] Created online status message. ID: " + message.getId());
+                finishOnlineStatusRequest();
+            }, error -> {
+                System.out.println("[CointDiscord] Failed to create online status message: " + error.getMessage());
+                finishOnlineStatusRequest();
+            });
         } catch (Throwable e) {
             System.out.println("[CointDiscord] Failed to send online status message: " + e.getMessage());
+            finishOnlineStatusRequest();
+        }
+    }
+
+    private static void updateBotPresenceNow() {
+        JDA currentJda = jda;
+        MinecraftServer minecraftServer = server;
+        if (!enabled || currentJda == null || minecraftServer == null) {
+            return;
+        }
+
+        int online = (int) minecraftServer.getPlayerList().getPlayers()
+                .stream()
+                .filter(CointCoreGTO::shouldShowInDiscordOnlineStatus)
+                .count();
+        int max = minecraftServer.getPlayerList().getMaxPlayers();
+        String presenceText = "Онлайн [" + online + "/" + max + "]";
+
+        if (presenceText.equals(lastBotPresenceText)) {
+            return;
+        }
+
+        try {
+            currentJda.getPresence().setActivity(Activity.customStatus(presenceText));
+            lastBotPresenceText = presenceText;
+            System.out.println("[CointDiscord] Bot status updated: " + presenceText);
+        } catch (Throwable error) {
+            System.out.println("[CointDiscord] Failed to update bot status: " + error.getMessage());
         }
     }
 
@@ -657,22 +910,55 @@ public class CointCoreGTODiscordBridge {
         return message.trim();
     }
 
-    private static String removeDiscordEmojis(String text) {
+    private static String sanitizeDiscordMessageForMinecraft(String text) {
         if (text == null || text.isBlank()) {
             return text;
         }
 
-        text = text.replaceAll("<a?:[a-zA-Z0-9_~]+:\\d+>", "");
+        String cleaned = text;
+        cleaned = cleaned.replaceAll("\\[([^\\]]+)]\\((?i:https?://)[^\\s)]+\\)", "$1");
+        cleaned = cleaned.replaceAll("<(?i:https?://)[^>\\s]+>", "");
+        cleaned = cleaned.replaceAll("(?i:https?://)\\S+", "");
+        cleaned = cleaned.replaceAll("(?i:www\\.)\\S+", "");
+        cleaned = cleaned.replaceAll("[ \t]{2,}", " ");
+        cleaned = cleaned.replaceAll(" ?\\n ?", "\n");
+        cleaned = cleaned.replaceAll("\\n{3,}", "\n\n");
+        return cleaned.trim();
+    }
 
-        text = text.replaceAll("\\[[^\\]]*]\\(https://cdn\\.discordapp\\.com/emojis/[^)]*\\)", "");
+    private static String extractMinecraftNameFromWebhookAuthor(String authorName) {
+        if (authorName == null || authorName.isBlank()) {
+            return null;
+        }
 
-        text = text.replaceAll("[\\x{1F300}-\\x{1FAFF}]", "");
-        text = text.replaceAll("[\\x{2600}-\\x{27BF}]", "");
+        String value = authorName.trim();
 
-        text = text.replaceAll("[\\x{FE00}-\\x{FE0F}]", "");
-        text = text.replaceAll("\\x{200D}", "");
+        while (value.startsWith("[")) {
+            int close = value.indexOf(']');
+            if (close < 0) {
+                break;
+            }
+            value = value.substring(close + 1).trim();
+        }
 
-        return text.replaceAll("\\s{2,}", " ").trim();
+        if (value.isBlank()) {
+            return null;
+        }
+
+        String[] parts = value.split("\\s+");
+        if (parts.length == 0) {
+            return null;
+        }
+
+        String candidate = parts[parts.length - 1]
+                .replaceAll("^[^A-Za-z0-9_]+", "")
+                .replaceAll("[^A-Za-z0-9_]+$", "");
+
+        if (candidate.isBlank() || candidate.length() > 16) {
+            return null;
+        }
+
+        return candidate;
     }
 
     private static String extractMinecraftNameFromBotMessage(String text) {
