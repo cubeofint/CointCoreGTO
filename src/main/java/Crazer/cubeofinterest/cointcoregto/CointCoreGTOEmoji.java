@@ -5,6 +5,8 @@ import net.minecraft.client.GuiMessage;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.ChatComponent;
+import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.chat.Component;
@@ -16,6 +18,8 @@ import net.minecraft.util.FormattedCharSequence;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.ClientChatReceivedEvent;
 import net.minecraftforge.client.event.RenderGuiEvent;
+import net.minecraftforge.client.event.ScreenEvent;
+import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.network.NetworkDirection;
@@ -23,6 +27,7 @@ import net.minecraftforge.network.NetworkEvent;
 import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.PacketDistributor;
 import net.minecraftforge.network.simple.SimpleChannel;
+import org.lwjgl.glfw.GLFW;
 
 import java.io.InputStream;
 import java.lang.reflect.Field;
@@ -34,6 +39,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -56,10 +63,17 @@ public final class CointCoreGTOEmoji {
     private static final Pattern DISCORD_CUSTOM_EMOJI_PATTERN = Pattern.compile("<a?:([A-Za-z0-9_]{2,64}):(\\d{10,32})>");
     private static final Pattern MINECRAFT_EMOJI_TOKEN_PATTERN = Pattern.compile(":([A-Za-z0-9_]{2,64}):");
     private static final String EMOJI_INSERTION_PREFIX = "cointcoregto:emoji:";
+    private static final int CHAT_MESSAGE_LIFETIME_TICKS = 200;
+    private static final int AUTOCOMPLETE_MAX_ROWS = 10;
 
     private static final Map<String, EmojiInfo> SERVER_EMOJIS_BY_NAME = new ConcurrentHashMap<>();
     private static final Map<String, EmojiInfo> CLIENT_EMOJIS_BY_NAME = new ConcurrentHashMap<>();
     private static final Map<String, ClientEmojiTexture> CLIENT_TEXTURES = new ConcurrentHashMap<>();
+    private static volatile List<EmojiInfo> CLIENT_AUTOCOMPLETE_MATCHES = List.of();
+    private static int clientAutocompleteSelection = 0;
+    private static String clientAutocompleteSignature = "";
+    private static int clientAutocompleteTokenStart = -1;
+    private static int clientAutocompleteTokenEnd = -1;
 
     private static boolean registered = false;
 
@@ -382,10 +396,17 @@ public final class CointCoreGTOEmoji {
         int count = Math.min(visibleLines.size(), maxVisibleLines);
 
         GuiGraphics graphics = event.getGuiGraphics();
+        int currentGuiTick = mc.gui.getGuiTicks();
+        boolean chatFocused = mc.screen instanceof ChatScreen;
 
         for (int lineIndex = 0; lineIndex < count; lineIndex++) {
             VisibleChatLine line = visibleLines.get(lineIndex);
             if (line == null || line.text() == null || line.emojis().isEmpty()) {
+                continue;
+            }
+
+            float lineAlpha = getChatLineAlpha(mc, currentGuiTick, line.addedTime(), chatFocused);
+            if (lineAlpha <= 0.01F) {
                 continue;
             }
 
@@ -403,10 +424,265 @@ public final class CointCoreGTOEmoji {
 
                 graphics.pose().pushPose();
                 graphics.pose().translate(0.0F, 0.0F, 2100.0F);
+                graphics.setColor(1.0F, 1.0F, 1.0F, lineAlpha);
                 graphics.blit(texture.location(), emojiX, emojiY, 0, 0, 8, 8, 8, 8);
+                graphics.setColor(1.0F, 1.0F, 1.0F, 1.0F);
                 graphics.pose().popPose();
             }
         }
+    }
+
+    private static float getChatLineAlpha(Minecraft mc, int currentGuiTick, int addedTime, boolean chatFocused) {
+        double chatOpacity = mc.options.chatOpacity().get() * 0.9D + 0.1D;
+
+        if (chatFocused || addedTime < 0) {
+            return (float) chatOpacity;
+        }
+
+        int age = Math.max(0, currentGuiTick - addedTime);
+        if (age >= CHAT_MESSAGE_LIFETIME_TICKS) {
+            return 0.0F;
+        }
+
+        double fade = (double) age / (double) CHAT_MESSAGE_LIFETIME_TICKS;
+        fade = 1.0D - fade;
+        fade *= 10.0D;
+        fade = Math.max(0.0D, Math.min(1.0D, fade));
+        fade *= fade;
+
+        return (float) (fade * chatOpacity);
+    }
+
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
+    public static void onChatScreenKeyPressed(ScreenEvent.KeyPressed.Pre event) {
+        if (!(event.getScreen() instanceof ChatScreen chatScreen)) {
+            clearClientAutocomplete();
+            return;
+        }
+
+        EditBox input = findChatInput(chatScreen);
+        if (input == null || !refreshClientAutocomplete(input)) {
+            return;
+        }
+
+        int key = event.getKeyCode();
+
+        if (key == GLFW.GLFW_KEY_UP) {
+            clientAutocompleteSelection = Math.floorMod(clientAutocompleteSelection - 1, CLIENT_AUTOCOMPLETE_MATCHES.size());
+            event.setCanceled(true);
+            return;
+        }
+
+        if (key == GLFW.GLFW_KEY_DOWN) {
+            clientAutocompleteSelection = Math.floorMod(clientAutocompleteSelection + 1, CLIENT_AUTOCOMPLETE_MATCHES.size());
+            event.setCanceled(true);
+            return;
+        }
+
+        if (key == GLFW.GLFW_KEY_TAB || key == GLFW.GLFW_KEY_ENTER || key == GLFW.GLFW_KEY_KP_ENTER) {
+            applyClientAutocomplete(input);
+            event.setCanceled(true);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onRenderChatAutocomplete(ScreenEvent.Render.Post event) {
+        if (!(event.getScreen() instanceof ChatScreen chatScreen)) {
+            clearClientAutocomplete();
+            return;
+        }
+
+        Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.font == null || CLIENT_EMOJIS_BY_NAME.isEmpty()) {
+            clearClientAutocomplete();
+            return;
+        }
+
+        EditBox input = findChatInput(chatScreen);
+        if (input == null || !refreshClientAutocomplete(input)) {
+            return;
+        }
+
+        List<EmojiInfo> matches = CLIENT_AUTOCOMPLETE_MATCHES;
+        if (matches.isEmpty()) {
+            return;
+        }
+
+        GuiGraphics graphics = event.getGuiGraphics();
+        int rowHeight = 12;
+        int padding = 4;
+        int maxTextWidth = 0;
+
+        for (EmojiInfo info : matches) {
+            maxTextWidth = Math.max(maxTextWidth, mc.font.width(":" + info.name().toLowerCase(Locale.ROOT) + ":"));
+        }
+
+        int width = Math.min(mc.getWindow().getGuiScaledWidth() - 8, Math.max(120, maxTextWidth + 26));
+        int x = Math.max(2, Math.min(input.getX(), mc.getWindow().getGuiScaledWidth() - width - 2));
+        int height = matches.size() * rowHeight + padding;
+        int y = Math.max(2, input.getY() - height - 2);
+
+        graphics.pose().pushPose();
+        graphics.pose().translate(0.0F, 0.0F, 2300.0F);
+        graphics.fill(x, y, x + width, y + height, 0xE0101010);
+
+        for (int i = 0; i < matches.size(); i++) {
+            EmojiInfo info = matches.get(i);
+            int rowY = y + 2 + i * rowHeight;
+
+            if (i == clientAutocompleteSelection) {
+                graphics.fill(x + 1, rowY - 1, x + width - 1, rowY + rowHeight - 1, 0xCC5A5A5A);
+            }
+
+            ClientEmojiTexture texture = getOrLoadClientTexture(info);
+            if (texture != null && texture.location() != null && texture.ready()) {
+                graphics.blit(texture.location(), x + 3, rowY + 1, 0, 0, 9, 9, 9, 9);
+            }
+
+            int color = i == clientAutocompleteSelection ? 0xFFFFFF55 : 0xFFFFFFFF;
+            graphics.drawString(mc.font, ":" + info.name().toLowerCase(Locale.ROOT) + ":", x + 16, rowY + 1, color, false);
+        }
+
+        graphics.pose().popPose();
+    }
+
+    private static boolean refreshClientAutocomplete(EditBox input) {
+        if (input == null || CLIENT_EMOJIS_BY_NAME.isEmpty()) {
+            clearClientAutocomplete();
+            return false;
+        }
+
+        String value = input.getValue();
+        int cursor = Math.max(0, Math.min(input.getCursorPosition(), value.length()));
+        AutocompleteToken token = findAutocompleteToken(value, cursor);
+
+        if (token == null) {
+            clearClientAutocomplete();
+            return false;
+        }
+
+        String prefix = token.prefix().toLowerCase(Locale.ROOT);
+        Set<String> seen = new HashSet<>();
+        ArrayList<EmojiInfo> matches = new ArrayList<>();
+
+        for (EmojiInfo info : CLIENT_EMOJIS_BY_NAME.values()) {
+            if (info == null || info.name() == null) {
+                continue;
+            }
+
+            String lowerName = info.name().toLowerCase(Locale.ROOT);
+            if (!lowerName.startsWith(prefix) || !seen.add(lowerName)) {
+                continue;
+            }
+
+            matches.add(info);
+        }
+
+        matches.sort(Comparator.comparing(EmojiInfo::name, String.CASE_INSENSITIVE_ORDER));
+        if (matches.size() > AUTOCOMPLETE_MAX_ROWS) {
+            matches = new ArrayList<>(matches.subList(0, AUTOCOMPLETE_MAX_ROWS));
+        }
+
+        if (matches.isEmpty()) {
+            clearClientAutocomplete();
+            return false;
+        }
+
+        String signature = token.start() + "|" + token.end() + "|" + prefix;
+        if (!signature.equals(clientAutocompleteSignature)) {
+            clientAutocompleteSelection = 0;
+            clientAutocompleteSignature = signature;
+        }
+
+        clientAutocompleteSelection = Math.max(0, Math.min(clientAutocompleteSelection, matches.size() - 1));
+        clientAutocompleteTokenStart = token.start();
+        clientAutocompleteTokenEnd = token.end();
+        CLIENT_AUTOCOMPLETE_MATCHES = List.copyOf(matches);
+        return true;
+    }
+
+    private static AutocompleteToken findAutocompleteToken(String value, int cursor) {
+        if (value == null || value.isEmpty() || cursor <= 0) {
+            return null;
+        }
+
+        int colon = value.lastIndexOf(':', cursor - 1);
+        if (colon < 0) {
+            return null;
+        }
+
+        if (colon > 0) {
+            char previous = value.charAt(colon - 1);
+            if (Character.isLetterOrDigit(previous) || previous == '_' || previous == ':') {
+                return null;
+            }
+        }
+
+        String prefix = value.substring(colon + 1, cursor);
+        if (prefix.isEmpty() || prefix.length() > 64) {
+            return null;
+        }
+
+        for (int i = 0; i < prefix.length(); i++) {
+            char c = prefix.charAt(i);
+            if (!(Character.isLetterOrDigit(c) || c == '_')) {
+                return null;
+            }
+        }
+
+        return new AutocompleteToken(colon, cursor, prefix);
+    }
+
+    private static void applyClientAutocomplete(EditBox input) {
+        List<EmojiInfo> matches = CLIENT_AUTOCOMPLETE_MATCHES;
+        if (input == null || matches.isEmpty()) {
+            return;
+        }
+
+        int index = Math.max(0, Math.min(clientAutocompleteSelection, matches.size() - 1));
+        EmojiInfo info = matches.get(index);
+        String value = input.getValue();
+        int start = Math.max(0, Math.min(clientAutocompleteTokenStart, value.length()));
+        int end = Math.max(start, Math.min(clientAutocompleteTokenEnd, value.length()));
+        String replacement = ":" + info.name().toLowerCase(Locale.ROOT) + ":";
+        String newValue = value.substring(0, start) + replacement + value.substring(end);
+
+        input.setValue(newValue);
+        input.setCursorPosition(start + replacement.length());
+        clearClientAutocomplete();
+    }
+
+    private static EditBox findChatInput(ChatScreen screen) {
+        Class<?> current = screen.getClass();
+
+        while (current != null) {
+            for (Field field : current.getDeclaredFields()) {
+                if (!EditBox.class.isAssignableFrom(field.getType())) {
+                    continue;
+                }
+
+                try {
+                    field.setAccessible(true);
+                    Object value = field.get(screen);
+                    if (value instanceof EditBox editBox) {
+                        return editBox;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+
+            current = current.getSuperclass();
+        }
+
+        return null;
+    }
+
+    private static void clearClientAutocomplete() {
+        CLIENT_AUTOCOMPLETE_MATCHES = List.of();
+        clientAutocompleteSelection = 0;
+        clientAutocompleteSignature = "";
+        clientAutocompleteTokenStart = -1;
+        clientAutocompleteTokenEnd = -1;
     }
 
     private static ClientEmojiTexture getOrLoadClientTexture(EmojiInfo info) {
@@ -502,6 +778,7 @@ public final class CointCoreGTOEmoji {
     private static void applyClientRegistry(Collection<EmojiInfo> emojis) {
         CLIENT_EMOJIS_BY_NAME.clear();
         CLIENT_TEXTURES.clear();
+        clearClientAutocomplete();
 
         for (EmojiInfo emoji : emojis) {
             if (emoji == null || emoji.name() == null || emoji.id() == null) {
@@ -611,14 +888,16 @@ public final class CointCoreGTOEmoji {
 
     private static VisibleChatLine lineToVisibleChatLine(Object line) {
         if (line == null) {
-            return new VisibleChatLine("", List.of());
+            return new VisibleChatLine("", List.of(), -1);
         }
 
         try {
             FormattedCharSequence sequence = null;
+            int addedTime = -1;
 
             if (line instanceof GuiMessage.Line guiLine) {
                 sequence = guiLine.content();
+                addedTime = guiLine.addedTime();
             }
 
             if (sequence == null) {
@@ -646,7 +925,7 @@ public final class CointCoreGTOEmoji {
             }
 
             if (sequence == null) {
-                return new VisibleChatLine("", List.of());
+                return new VisibleChatLine("", List.of(), addedTime);
             }
 
             StringBuilder builder = new StringBuilder();
@@ -672,9 +951,9 @@ public final class CointCoreGTOEmoji {
                 return true;
             });
 
-            return new VisibleChatLine(builder.toString(), emojis);
+            return new VisibleChatLine(builder.toString(), emojis, addedTime);
         } catch (Throwable ignored) {
-            return new VisibleChatLine("", List.of());
+            return new VisibleChatLine("", List.of(), -1);
         }
     }
 
@@ -726,7 +1005,10 @@ public final class CointCoreGTOEmoji {
     private record EmojiVisual(EmojiInfo info, int charIndex) {
     }
 
-    private record VisibleChatLine(String text, List<EmojiVisual> emojis) {
+    private record VisibleChatLine(String text, List<EmojiVisual> emojis, int addedTime) {
+    }
+
+    private record AutocompleteToken(int start, int end, String prefix) {
     }
 
     private record EmojiRegistryPacket(List<EmojiInfo> emojis) {
