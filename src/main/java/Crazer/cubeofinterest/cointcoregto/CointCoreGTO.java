@@ -6,6 +6,9 @@ import Crazer.cubeofinterest.cointcoregto.compat.radio.CointRadioNetwork;
 import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerClient;
 import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerNetwork;
 import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerRegistry;
+import Crazer.cubeofinterest.cointcoregto.supply.SupplyBufferClient;
+import Crazer.cubeofinterest.cointcoregto.supply.SupplyBufferNetwork;
+import Crazer.cubeofinterest.cointcoregto.supply.SupplyBufferRegistry;
 import Crazer.cubeofinterest.cointcoregto.currency.CurrencyCommands;
 import Crazer.cubeofinterest.cointcoregto.currency.CurrencyConfig;
 import Crazer.cubeofinterest.cointcoregto.currency.CurrencyService;
@@ -506,6 +509,7 @@ public class CointCoreGTO {
 
         CointRadioBlocks.register(modEventBus);
         CointExchangerRegistry.register(modEventBus);
+        SupplyBufferRegistry.register(modEventBus);
         CointRecipeEditorRegistry.register(modEventBus);
         TradeRegistry.register(modEventBus);
         Crazer.cubeofinterest.cointcoregto.invview.InvViewRegistry.register(modEventBus);
@@ -517,6 +521,7 @@ public class CointCoreGTO {
         CointCoreGTOEmoji.registerNetwork();
         CointRadioNetwork.register();
         CointExchangerNetwork.register();
+        SupplyBufferNetwork.register();
         RecipeEditorNetwork.register();
         TradeNetwork.register();
         Crazer.cubeofinterest.cointcoregto.invview.InvViewNetwork.register();
@@ -534,6 +539,7 @@ public class CointCoreGTO {
     private void onClientSetup(FMLClientSetupEvent event) {
         event.enqueueWork(() -> {
             CointExchangerClient.registerScreens();
+            SupplyBufferClient.registerScreens();
             RecipeEditorClient.registerScreens();
             TradeClient.registerScreens();
             Crazer.cubeofinterest.cointcoregto.invview.InvViewClient.registerScreens();

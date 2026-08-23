@@ -287,6 +287,7 @@ public final class ClusterFtbChunksManager {
                     local,
                     cluster.claims(),
                     owners,
+                    registeredDimensions,
                     reconcilePhysicalState
             );
 
@@ -434,6 +435,7 @@ public final class ClusterFtbChunksManager {
             ClusterFtbChunksCodec.Snapshot local,
             Collection<ClusterFtbChunksCodec.ClaimState> clusterClaims,
             Map<String, String> owners,
+            Set<String> registeredDimensions,
             boolean reconcilePhysicalState
     ) {
         Map<ClusterFtbChunksCodec.ChunkKey, ClusterFtbChunksCodec.ClaimState> localByKey =
@@ -467,7 +469,11 @@ public final class ClusterFtbChunksManager {
                             config.ftbChunksDefaultAuthorityNode()
                     )
             );
+            boolean dimensionAvailableLocally = registeredDimensions.contains(
+                    desired.dimensionId().toLowerCase(Locale.ROOT)
+            );
             boolean desiredPhysicalForce = desired.forceLoaded()
+                    && dimensionAvailableLocally
                     && (!config.ftbChunksForceLoadOwnerOnly() || owner);
 
             if (current == null
