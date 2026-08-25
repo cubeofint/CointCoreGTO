@@ -159,6 +159,21 @@ public final class SupplyBufferService {
         }, EXECUTOR);
     }
 
+    public static CompletableFuture<SupplyBufferDatabase.CancelResult> tryCancelPending(UUID operationId) {
+        return CompletableFuture.supplyAsync(() -> {
+            ClusterConfig config = requireConfig();
+            try {
+                return SupplyBufferDatabase.tryCancelPending(
+                        config,
+                        operationId,
+                        config.nodeId()
+                );
+            } catch (Exception exception) {
+                throw new SupplyServiceException(exception);
+            }
+        }, EXECUTOR);
+    }
+
     public static CompletableFuture<SupplyBufferDatabase.RemoteSyncResult> syncRemote(
             String linkId,
             Collection<SupplyBufferDatabase.PendingDescriptor> pending,

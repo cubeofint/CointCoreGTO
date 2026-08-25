@@ -10,6 +10,7 @@ import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorCraftingSync
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorGtoSyncState;
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorMenu;
 import Crazer.cubeofinterest.cointcoregto.recipe.editor.RecipeEditorScreen;
+import Crazer.cubeofinterest.cointcoregto.supply.SupplyBufferEmiPlugin;
 import dev.emi.emi.api.EmiApi;
 import dev.emi.emi.api.EmiDragDropHandler;
 import dev.emi.emi.api.EmiEntrypoint;
@@ -63,6 +64,12 @@ public final class CointExchangerEmiPlugin implements EmiPlugin {
 
     @Override
     public void register(EmiRegistry registry) {
+        try {
+            SupplyBufferEmiPlugin.registerHandlers(registry);
+        } catch (Throwable throwable) {
+            LOGGER.warn("Unable to register Supply Buffer EMI drag/drop handler", throwable);
+        }
+
         try {
             registry.addDragDropHandler(
                     ExchangerScreen.class,

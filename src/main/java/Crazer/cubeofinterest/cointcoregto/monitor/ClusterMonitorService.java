@@ -3,6 +3,8 @@ package Crazer.cubeofinterest.cointcoregto.monitor;
 import Crazer.cubeofinterest.cointcoregto.ClusterConfig;
 import Crazer.cubeofinterest.cointcoregto.ClusterDatabase;
 import Crazer.cubeofinterest.cointcoregto.supply.SupplyBufferDatabase;
+import Crazer.cubeofinterest.cointcoregto.supply.SupplyKeyCodec;
+import appeng.api.stacks.AEKey;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -16,6 +18,8 @@ import java.util.concurrent.Executors;
 public final class ClusterMonitorService {
     private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO-ClusterMonitor");
     private static final long CONFIG_CACHE_MILLIS = 15_000L;
+    private static final long OPERATIONS_CACHE_MILLIS = 2_500L;
+    private static final int OPERATION_HISTORY_LIMIT = 50;
 
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "CointCoreGTO-ClusterMonitor-DB");
@@ -26,11 +30,13 @@ public final class ClusterMonitorService {
 
     private static volatile ClusterConfig cachedConfig;
     private static volatile long configCacheUntil;
+    private static volatile List<ClusterMonitorSnapshot.OperationEntry> cachedOperations = List.of();
+    private static volatile long operationsCacheUntil;
 
     private ClusterMonitorService() {
     }
 
-    public static CompletableFuture<ClusterMonitorSnapshot> readSnapshot() {
+    public static CompletableFuture<ClusterMonitorSnapshot> readSnapshot(boolean includeOperations) {
         return CompletableFuture.supplyAsync(() -> {
             ClusterConfig config = currentConfig();
             if (config == null) {
@@ -42,6 +48,7 @@ public final class ClusterMonitorService {
                         config.nodeId(),
                         System.currentTimeMillis(),
                         0,
+                        List.of(),
                         List.of(),
                         List.of(),
                         "Кластер отключён в cointcoregto-cluster.properties"
@@ -69,6 +76,7 @@ public final class ClusterMonitorService {
                                 resource.resourceType().name(),
                                 resource.filterIndex(),
                                 resource.displayName(),
+                                resource.resourceKey(),
                                 resource.amount(),
                                 resource.capacity(),
                                 resource.refillBelowPercent(),
@@ -94,6 +102,10 @@ public final class ClusterMonitorService {
                     ));
                 }
 
+                List<ClusterMonitorSnapshot.OperationEntry> operations = includeOperations
+                        ? recentOperations(config)
+                        : List.of();
+
                 return new ClusterMonitorSnapshot(
                         true,
                         config.nodeId(),
@@ -101,6 +113,7 @@ public final class ClusterMonitorService {
                         SupplyBufferDatabase.countActiveOperations(config),
                         nodes,
                         buffers,
+                        operations,
                         ""
                 );
             } catch (Exception exception) {
@@ -109,6 +122,54 @@ public final class ClusterMonitorService {
                 return ClusterMonitorSnapshot.error(config.nodeId(), root.getMessage());
             }
         }, EXECUTOR);
+    }
+
+    private static List<ClusterMonitorSnapshot.OperationEntry> recentOperations(
+            ClusterConfig config
+    ) throws Exception {
+        long now = System.currentTimeMillis();
+        List<ClusterMonitorSnapshot.OperationEntry> current = cachedOperations;
+        if (now < operationsCacheUntil) {
+            return current;
+        }
+
+        List<ClusterMonitorSnapshot.OperationEntry> result = new ArrayList<>();
+        for (SupplyBufferDatabase.MonitorOperation operation
+                : SupplyBufferDatabase.listRecentOperations(config, OPERATION_HISTORY_LIMIT)) {
+            String displayName = "";
+            String resourceKey = "";
+            try {
+                AEKey key = SupplyKeyCodec.decode(operation.keyPayload());
+                displayName = key.getDisplayName().getString();
+                if (key.getId() != null) {
+                    resourceKey = key.getId().toString();
+                }
+            } catch (RuntimeException ignored) {
+                displayName = operation.resourceType().name();
+            }
+
+            result.add(new ClusterMonitorSnapshot.OperationEntry(
+                    operation.operationId().toString(),
+                    operation.linkId(),
+                    operation.sourceNode(),
+                    operation.providerNode(),
+                    operation.direction().name(),
+                    operation.resourceType().name(),
+                    displayName,
+                    resourceKey,
+                    operation.requestedAmount(),
+                    operation.deliveredAmount(),
+                    operation.status(),
+                    operation.errorText(),
+                    operation.createdAgeSeconds(),
+                    operation.updatedAgeSeconds()
+            ));
+        }
+
+        current = List.copyOf(result);
+        cachedOperations = current;
+        operationsCacheUntil = now + OPERATIONS_CACHE_MILLIS;
+        return current;
     }
 
     private static ClusterConfig currentConfig() {

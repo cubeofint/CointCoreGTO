@@ -66,6 +66,35 @@ public final class SupplyBufferDatabase {
     ) {
     }
 
+    public record MonitorOperation(
+            UUID operationId,
+            String linkId,
+            String sourceNode,
+            String providerNode,
+            TransferDirection direction,
+            ResourceType resourceType,
+            String keyPayload,
+            long requestedAmount,
+            long deliveredAmount,
+            String status,
+            String errorText,
+            long createdAgeSeconds,
+            long updatedAgeSeconds
+    ) {
+        public MonitorOperation {
+            linkId = linkId == null ? "" : linkId;
+            sourceNode = sourceNode == null ? "" : sourceNode;
+            providerNode = providerNode == null ? "" : providerNode;
+            keyPayload = keyPayload == null ? "" : keyPayload;
+            status = status == null ? "" : status;
+            errorText = errorText == null ? "" : errorText;
+            requestedAmount = Math.max(0L, requestedAmount);
+            deliveredAmount = Math.max(0L, deliveredAmount);
+            createdAgeSeconds = Math.max(0L, createdAgeSeconds);
+            updatedAgeSeconds = Math.max(0L, updatedAgeSeconds);
+        }
+    }
+
     public record OperationResult(
             String status,
             long deliveredAmount,
@@ -88,10 +117,23 @@ public final class SupplyBufferDatabase {
     ) {
     }
 
+    /**
+     * Result of a remote-side attempt to cancel a request before the provider
+     * has applied it. If cancelled is false, result contains the operation's
+     * current database state so the block entity can safely finish an already
+     * claimed/applied transfer instead of losing resources.
+     */
+    public record CancelResult(
+            boolean cancelled,
+            OperationResult result
+    ) {
+    }
+
     public record ResourceSnapshot(
             ResourceType resourceType,
             int filterIndex,
             String displayName,
+            String resourceKey,
             long amount,
             long capacity,
             int refillBelowPercent,
@@ -101,6 +143,7 @@ public final class SupplyBufferDatabase {
             resourceType = resourceType == null ? ResourceType.ITEM : resourceType;
             filterIndex = Math.max(0, filterIndex);
             displayName = displayName == null ? "" : displayName;
+            resourceKey = resourceKey == null ? "" : resourceKey;
             amount = Math.max(0L, amount);
             capacity = Math.max(0L, capacity);
             refillBelowPercent = Math.max(0, Math.min(100, refillBelowPercent));
@@ -263,6 +306,70 @@ public final class SupplyBufferDatabase {
              ResultSet resultSet = statement.executeQuery()) {
             return resultSet.next() ? resultSet.getInt(1) : 0;
         }
+    }
+
+    public static List<MonitorOperation> listRecentOperations(
+            ClusterConfig config,
+            int requestedLimit
+    ) throws SQLException {
+        ensureSchema(config);
+        int limit = Math.max(1, Math.min(50, requestedLimit));
+        String sql = """
+                SELECT operations.operation_id, operations.link_id, operations.source_node,
+                       COALESCE(NULLIF(operations.claimed_by, ''), providers.node_id, '') AS provider_node,
+                       operations.direction, operations.resource_type, operations.resource_nbt,
+                       operations.requested_amount, operations.delivered_amount, operations.status,
+                       COALESCE(operations.error_text, '') AS error_text,
+                       GREATEST(0, TIMESTAMPDIFF(SECOND, operations.created_at, CURRENT_TIMESTAMP(3))) AS created_age_seconds,
+                       GREATEST(0, TIMESTAMPDIFF(SECOND, operations.updated_at, CURRENT_TIMESTAMP(3))) AS updated_age_seconds
+                FROM cluster_supply_operations AS operations
+                LEFT JOIN cluster_supply_providers AS providers
+                  ON BINARY providers.link_id = BINARY operations.link_id
+                ORDER BY operations.updated_at DESC
+                LIMIT ?
+                """;
+
+        List<MonitorOperation> result = new ArrayList<>(limit);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, limit);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    TransferDirection direction;
+                    ResourceType resourceType;
+                    try {
+                        direction = TransferDirection.valueOf(resultSet.getString("direction"));
+                        resourceType = ResourceType.valueOf(resultSet.getString("resource_type"));
+                    } catch (IllegalArgumentException exception) {
+                        continue;
+                    }
+
+                    UUID operationId;
+                    try {
+                        operationId = UUID.fromString(resultSet.getString("operation_id"));
+                    } catch (IllegalArgumentException exception) {
+                        continue;
+                    }
+
+                    result.add(new MonitorOperation(
+                            operationId,
+                            resultSet.getString("link_id"),
+                            resultSet.getString("source_node"),
+                            resultSet.getString("provider_node"),
+                            direction,
+                            resourceType,
+                            resultSet.getString("resource_nbt"),
+                            resultSet.getLong("requested_amount"),
+                            resultSet.getLong("delivered_amount"),
+                            resultSet.getString("status"),
+                            resultSet.getString("error_text"),
+                            resultSet.getLong("created_age_seconds"),
+                            resultSet.getLong("updated_age_seconds")
+                    ));
+                }
+            }
+        }
+        return List.copyOf(result);
     }
 
     public static void touchProvider(
@@ -452,6 +559,80 @@ public final class SupplyBufferDatabase {
             statement.setString(2, truncate(error, 512));
             statement.setString(3, operationId.toString());
             statement.executeUpdate();
+        }
+    }
+
+    public static CancelResult tryCancelPending(
+            ClusterConfig config,
+            UUID operationId,
+            String sourceNode
+    ) throws SQLException {
+        ensureSchema(config);
+        if (operationId == null) {
+            return new CancelResult(true, null);
+        }
+
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                int deleted;
+                try (PreparedStatement statement = connection.prepareStatement("""
+                        DELETE FROM cluster_supply_operations
+                        WHERE operation_id = ?
+                          AND source_node = ?
+                          AND status = 'PENDING'
+                        """)) {
+                    statement.setString(1, operationId.toString());
+                    statement.setString(2, truncate(sourceNode, 64));
+                    deleted = statement.executeUpdate();
+                }
+
+                if (deleted > 0) {
+                    connection.commit();
+                    return new CancelResult(true, null);
+                }
+
+                OperationResult result = readResultForSource(connection, operationId, sourceNode);
+                connection.commit();
+
+                // No row means the local PendingTransfer had not reached SQL yet.
+                // Treat it as cancelled; the caller stops submitting it afterwards.
+                if (result == null) {
+                    return new CancelResult(true, null);
+                }
+                return new CancelResult(false, result);
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    private static OperationResult readResultForSource(
+            Connection connection,
+            UUID operationId,
+            String sourceNode
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT status, delivered_amount, error_text
+                FROM cluster_supply_operations
+                WHERE operation_id = ?
+                  AND source_node = ?
+                """)) {
+            statement.setString(1, operationId.toString());
+            statement.setString(2, truncate(sourceNode, 64));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return null;
+                }
+                return new OperationResult(
+                        resultSet.getString("status"),
+                        resultSet.getLong("delivered_amount"),
+                        resultSet.getString("error_text")
+                );
+            }
         }
     }
 
@@ -783,6 +964,7 @@ public final class SupplyBufferDatabase {
                 object.addProperty("type", resource.resourceType().name());
                 object.addProperty("index", resource.filterIndex());
                 object.addProperty("name", truncate(resource.displayName(), 256));
+                object.addProperty("key", truncate(resource.resourceKey(), 256));
                 object.addProperty("amount", Math.max(0L, resource.amount()));
                 object.addProperty("capacity", Math.max(0L, resource.capacity()));
                 object.addProperty("below", Math.max(0, Math.min(100, resource.refillBelowPercent())));
@@ -820,6 +1002,7 @@ public final class SupplyBufferDatabase {
                         type,
                         readInt(object, "index", 0),
                         readString(object, "name", ""),
+                        readString(object, "key", ""),
                         readLong(object, "amount", 0L),
                         readLong(object, "capacity", 0L),
                         readInt(object, "below", 0),

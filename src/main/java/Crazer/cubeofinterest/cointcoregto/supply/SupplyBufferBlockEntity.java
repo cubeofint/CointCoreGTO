@@ -43,6 +43,7 @@ import net.minecraftforge.fluids.capability.templates.FluidTank;
 import net.minecraftforge.items.IItemHandler;
 import net.minecraftforge.items.ItemHandlerHelper;
 import net.minecraftforge.items.ItemStackHandler;
+import net.minecraftforge.registries.ForgeRegistries;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
@@ -68,6 +69,11 @@ public class SupplyBufferBlockEntity extends BlockEntity
     public static final int FLUID_CAPACITY_PER_FILTER = 16_000_000;
     public static final int FLUID_CAPACITY = FLUID_CAPACITY_PER_FILTER;
 
+    public static final long DEFAULT_ITEM_TARGET = 576L;
+    public static final long DEFAULT_FLUID_TARGET = 16_000_000L;
+    // Keeps percentage arithmetic and monitor progress calculations comfortably inside signed long.
+    public static final long MAX_VIRTUAL_AMOUNT = 9_000_000_000_000_000L;
+
     private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO-SupplyBuffer");
     private static final int[] THRESHOLD_OPTIONS = {10, 25, 50, 75, 90};
     private static final int[] TARGET_OPTIONS = {25, 50, 75, 100};
@@ -87,6 +93,10 @@ public class SupplyBufferBlockEntity extends BlockEntity
 
     private final String[] itemFilterPayloads = new String[REQUEST_FILTER_COUNT];
     private final String[] fluidFilterPayloads = new String[REQUEST_FILTER_COUNT];
+    private final long[] virtualItemAmounts = new long[REQUEST_FILTER_COUNT];
+    private final long[] virtualFluidAmounts = new long[REQUEST_FILTER_COUNT];
+    private final long[] itemTargetAmounts = new long[REQUEST_FILTER_COUNT];
+    private final long[] fluidTargetAmounts = new long[REQUEST_FILTER_COUNT];
 
     private final ItemStackHandler supplyItems = new ItemStackHandler(SUPPLY_SLOT_COUNT) {
         @Override
@@ -118,9 +128,10 @@ public class SupplyBufferBlockEntity extends BlockEntity
             .setIdlePowerUsage(1.0)
             .setVisualRepresentation(SupplyBufferRegistry.SUPPLY_BUFFER_ITEM.get());
 
+    private final IItemHandler virtualSupplyItems = new VirtualSupplyItemHandler(this);
     private final IItemHandler exportInputView = new InsertOnlyItemHandler(exportItems);
-    private final IItemHandler supplyOutputView = new ExtractOnlyItemHandler(supplyItems);
-    private final IFluidHandler fluidOutputView = new DrainOnlyFluidHandler(fluidTanks);
+    private final IItemHandler supplyOutputView = new ExtractOnlyItemHandler(virtualSupplyItems);
+    private final IFluidHandler fluidOutputView = new VirtualDrainFluidHandler(this);
 
     private LazyOptional<IItemHandler> exportInputCapability = LazyOptional.of(() -> exportInputView);
     private LazyOptional<IItemHandler> supplyOutputCapability = LazyOptional.of(() -> supplyOutputView);
@@ -140,6 +151,10 @@ public class SupplyBufferBlockEntity extends BlockEntity
     private PendingTransfer pendingOutbound;
     private final PendingTransfer[] pendingItemRequests = new PendingTransfer[REQUEST_FILTER_COUNT];
     private final PendingTransfer[] pendingFluidRequests = new PendingTransfer[REQUEST_FILTER_COUNT];
+    private final boolean[] itemClearRequested = new boolean[REQUEST_FILTER_COUNT];
+    private final boolean[] fluidClearRequested = new boolean[REQUEST_FILTER_COUNT];
+    private transient CompletableFuture<SupplyBufferDatabase.CancelResult>[] itemCancelFutures = createCancelFutureArray();
+    private transient CompletableFuture<SupplyBufferDatabase.CancelResult>[] fluidCancelFutures = createCancelFutureArray();
     private ProviderJournal providerJournal;
     private final Set<UUID> pendingAcknowledgements = new LinkedHashSet<>();
 
@@ -173,6 +188,11 @@ public class SupplyBufferBlockEntity extends BlockEntity
         Arrays.fill(fluidFilterPayloads, "");
     }
 
+    @SuppressWarnings("unchecked")
+    private static CompletableFuture<SupplyBufferDatabase.CancelResult>[] createCancelFutureArray() {
+        return (CompletableFuture<SupplyBufferDatabase.CancelResult>[]) new CompletableFuture<?>[REQUEST_FILTER_COUNT];
+    }
+
     public static void serverTick(
             ServerLevel level,
             BlockPos pos,
@@ -185,10 +205,6 @@ public class SupplyBufferBlockEntity extends BlockEntity
     private void serverTick() {
         tickCounter++;
         ensureGridNodeForRole();
-
-        if (role == SupplyBufferRole.REMOTE) {
-            compactVisibleSupplySlots();
-        }
 
         if (role == SupplyBufferRole.PROVIDER) {
             tickProvider();
@@ -228,24 +244,25 @@ public class SupplyBufferBlockEntity extends BlockEntity
                             SupplyBufferDatabase.ResourceType.ITEM,
                             filterIndex,
                             item.getHoverName().getString(),
+                            registryKey(ForgeRegistries.ITEMS.getKey(item.getItem())),
                             getConfiguredSupplyItemCount(filterIndex),
-                            getConfiguredSupplyItemCapacity(filterIndex),
+                            getItemTargetAmount(filterIndex),
                             itemRefillBelowPercent,
-                            itemRefillToPercent
+                            100
                     ));
                 }
 
                 FluidStack fluid = getConfiguredFluidStack(filterIndex);
                 if (!fluid.isEmpty()) {
-                    FluidTank tank = fluidTanks[filterIndex];
                     resources.add(new SupplyBufferDatabase.ResourceSnapshot(
                             SupplyBufferDatabase.ResourceType.FLUID,
                             filterIndex,
                             fluid.getDisplayName().getString(),
-                            tank.getFluidAmount(),
-                            tank.getCapacity(),
+                            registryKey(ForgeRegistries.FLUIDS.getKey(fluid.getFluid())),
+                            getConfiguredFluidAmount(filterIndex),
+                            getFluidTargetAmount(filterIndex),
                             fluidRefillBelowPercent,
-                            fluidRefillToPercent
+                            100
                     ));
                 }
             }
@@ -270,6 +287,10 @@ public class SupplyBufferBlockEntity extends BlockEntity
                 getPendingTransferCount(),
                 resources
         );
+    }
+
+    private static String registryKey(net.minecraft.resources.ResourceLocation key) {
+        return key == null ? "" : key.toString();
     }
 
     private void tickProvider() {
@@ -487,17 +508,30 @@ public class SupplyBufferBlockEntity extends BlockEntity
             return;
         }
 
+        processRequestedFilterClears();
         prepareRemotePendingTransfers();
 
         if (remoteSyncFuture == null && tickCounter % REMOTE_SYNC_INTERVAL_TICKS == 0) {
             List<SupplyBufferDatabase.PendingDescriptor> descriptors =
                     new ArrayList<>(1 + REQUEST_FILTER_COUNT * 2);
             addDescriptor(descriptors, pendingOutbound);
-            for (PendingTransfer pending : pendingItemRequests) {
-                addDescriptor(descriptors, pending);
-            }
-            for (PendingTransfer pending : pendingFluidRequests) {
-                addDescriptor(descriptors, pending);
+            for (int filterIndex = 0; filterIndex < REQUEST_FILTER_COUNT; filterIndex++) {
+                PendingTransfer itemPending = pendingItemRequests[filterIndex];
+                PendingTransfer fluidPending = pendingFluidRequests[filterIndex];
+
+                // While a filter is being removed, an old MAIN_TO_REMOTE request must not
+                // be resubmitted after cancellation. A REMOTE_TO_MAIN return operation,
+                // however, is exactly what completes the removal and must stay in the sync.
+                if (!itemClearRequested[filterIndex]
+                        || (itemPending != null
+                        && itemPending.direction() == SupplyBufferDatabase.TransferDirection.REMOTE_TO_MAIN)) {
+                    addDescriptor(descriptors, itemPending);
+                }
+                if (!fluidClearRequested[filterIndex]
+                        || (fluidPending != null
+                        && fluidPending.direction() == SupplyBufferDatabase.TransferDirection.REMOTE_TO_MAIN)) {
+                    addDescriptor(descriptors, fluidPending);
+                }
             }
 
             remoteSyncFuture = SupplyBufferService.syncRemote(
@@ -521,19 +555,209 @@ public class SupplyBufferBlockEntity extends BlockEntity
         }
 
         for (int filterIndex = 0; filterIndex < REQUEST_FILTER_COUNT; filterIndex++) {
-            if (pendingItemRequests[filterIndex] == null) {
+            if (!itemClearRequested[filterIndex] && pendingItemRequests[filterIndex] == null) {
                 pendingItemRequests[filterIndex] = createItemRequestIfNeeded(filterIndex);
                 if (pendingItemRequests[filterIndex] != null) {
                     markDirty();
                 }
             }
-            if (pendingFluidRequests[filterIndex] == null) {
+            if (!fluidClearRequested[filterIndex] && pendingFluidRequests[filterIndex] == null) {
                 pendingFluidRequests[filterIndex] = createFluidRequestIfNeeded(filterIndex);
                 if (pendingFluidRequests[filterIndex] != null) {
                     markDirty();
                 }
             }
         }
+    }
+
+    private void processRequestedFilterClears() {
+        for (int filterIndex = 0; filterIndex < REQUEST_FILTER_COUNT; filterIndex++) {
+            processRequestedItemFilterClear(filterIndex);
+            processRequestedFluidFilterClear(filterIndex);
+        }
+    }
+
+    private void processRequestedItemFilterClear(int filterIndex) {
+        if (!itemClearRequested[filterIndex]) {
+            return;
+        }
+
+        PendingTransfer pending = pendingItemRequests[filterIndex];
+        CompletableFuture<SupplyBufferDatabase.CancelResult> future = itemCancelFutures[filterIndex];
+
+        if (future != null) {
+            if (!future.isDone()) {
+                return;
+            }
+            try {
+                SupplyBufferDatabase.CancelResult cancelResult = future.join();
+                PendingTransfer current = pendingItemRequests[filterIndex];
+                if (current != null && pending != null
+                        && current.operationId().equals(pending.operationId())) {
+                    if (cancelResult.cancelled()) {
+                        pendingItemRequests[filterIndex] = null;
+                    } else if (cancelResult.result() != null) {
+                        pendingItemRequests[filterIndex] = processItemTransferResult(
+                                filterIndex,
+                                current,
+                                cancelResult.result()
+                        );
+                    }
+                }
+            } catch (CompletionException exception) {
+                logAsyncError("cancel item request", exception);
+            } finally {
+                itemCancelFutures[filterIndex] = null;
+            }
+            markDirty();
+        }
+
+        pending = pendingItemRequests[filterIndex];
+        if (pending != null
+                && pending.direction() == SupplyBufferDatabase.TransferDirection.REMOTE_TO_MAIN) {
+            // The local stock is already reserved by the return operation. Keep the
+            // filter intact until MAIN confirms that it accepted everything.
+            return;
+        }
+
+        if (pending == null) {
+            if (hasSupplyItems(filterIndex)) {
+                if (!remoteProviderOnline) {
+                    return;
+                }
+                PendingTransfer returnTransfer = reserveItemReturnForClear(filterIndex);
+                if (returnTransfer != null) {
+                    pendingItemRequests[filterIndex] = returnTransfer;
+                    markDirty();
+                }
+                return;
+            }
+
+            itemFilterPayloads[filterIndex] = "";
+            itemTargetAmounts[filterIndex] = 0L;
+            itemClearRequested[filterIndex] = false;
+            setChangedAndSync();
+            return;
+        }
+
+        // Never race a cancellation against an already running remote sync, because
+        // that sync could otherwise reinsert the MAIN_TO_REMOTE operation after DELETE.
+        if (pending.direction() == SupplyBufferDatabase.TransferDirection.MAIN_TO_REMOTE
+                && remoteSyncFuture == null
+                && itemCancelFutures[filterIndex] == null
+                && tickCounter % REMOTE_SYNC_INTERVAL_TICKS == 0) {
+            itemCancelFutures[filterIndex] = SupplyBufferService.tryCancelPending(
+                    pending.operationId()
+            );
+        }
+    }
+
+    private void processRequestedFluidFilterClear(int filterIndex) {
+        if (!fluidClearRequested[filterIndex]) {
+            return;
+        }
+
+        PendingTransfer pending = pendingFluidRequests[filterIndex];
+        CompletableFuture<SupplyBufferDatabase.CancelResult> future = fluidCancelFutures[filterIndex];
+
+        if (future != null) {
+            if (!future.isDone()) {
+                return;
+            }
+            try {
+                SupplyBufferDatabase.CancelResult cancelResult = future.join();
+                PendingTransfer current = pendingFluidRequests[filterIndex];
+                if (current != null && pending != null
+                        && current.operationId().equals(pending.operationId())) {
+                    if (cancelResult.cancelled()) {
+                        pendingFluidRequests[filterIndex] = null;
+                    } else if (cancelResult.result() != null) {
+                        pendingFluidRequests[filterIndex] = processFluidTransferResult(
+                                filterIndex,
+                                current,
+                                cancelResult.result()
+                        );
+                    }
+                }
+            } catch (CompletionException exception) {
+                logAsyncError("cancel fluid request", exception);
+            } finally {
+                fluidCancelFutures[filterIndex] = null;
+            }
+            markDirty();
+        }
+
+        pending = pendingFluidRequests[filterIndex];
+        if (pending != null
+                && pending.direction() == SupplyBufferDatabase.TransferDirection.REMOTE_TO_MAIN) {
+            return;
+        }
+
+        if (pending == null) {
+            if (virtualFluidAmounts[filterIndex] > 0L) {
+                if (!remoteProviderOnline) {
+                    return;
+                }
+                PendingTransfer returnTransfer = reserveFluidReturnForClear(filterIndex);
+                if (returnTransfer != null) {
+                    pendingFluidRequests[filterIndex] = returnTransfer;
+                    markDirty();
+                }
+                return;
+            }
+
+            fluidFilterPayloads[filterIndex] = "";
+            fluidTargetAmounts[filterIndex] = 0L;
+            fluidClearRequested[filterIndex] = false;
+            setChangedAndSync();
+            return;
+        }
+
+        if (pending.direction() == SupplyBufferDatabase.TransferDirection.MAIN_TO_REMOTE
+                && remoteSyncFuture == null
+                && fluidCancelFutures[filterIndex] == null
+                && tickCounter % REMOTE_SYNC_INTERVAL_TICKS == 0) {
+            fluidCancelFutures[filterIndex] = SupplyBufferService.tryCancelPending(
+                    pending.operationId()
+            );
+        }
+    }
+
+    @Nullable
+    private PendingTransfer reserveItemReturnForClear(int filterIndex) {
+        AEItemKey key = getConfiguredItemKey(filterIndex);
+        long amount = validFilterIndex(filterIndex) ? virtualItemAmounts[filterIndex] : 0L;
+        if (key == null || amount <= 0L) {
+            return null;
+        }
+
+        // Reserve the whole virtual stock before publishing the operation. This makes
+        // cancellation atomic from the player's point of view and prevents extraction
+        // from duplicating items while MAIN is accepting them.
+        virtualItemAmounts[filterIndex] = 0L;
+        return PendingTransfer.create(
+                SupplyBufferDatabase.TransferDirection.REMOTE_TO_MAIN,
+                SupplyBufferDatabase.ResourceType.ITEM,
+                SupplyKeyCodec.encode(key),
+                amount
+        );
+    }
+
+    @Nullable
+    private PendingTransfer reserveFluidReturnForClear(int filterIndex) {
+        AEFluidKey key = getConfiguredFluidKey(filterIndex);
+        long amount = validFilterIndex(filterIndex) ? virtualFluidAmounts[filterIndex] : 0L;
+        if (key == null || amount <= 0L) {
+            return null;
+        }
+
+        virtualFluidAmounts[filterIndex] = 0L;
+        return PendingTransfer.create(
+                SupplyBufferDatabase.TransferDirection.REMOTE_TO_MAIN,
+                SupplyBufferDatabase.ResourceType.FLUID,
+                SupplyKeyCodec.encode(key),
+                amount
+        );
     }
 
     private PendingTransfer reserveOutboundItems() {
@@ -581,11 +805,10 @@ public class SupplyBufferBlockEntity extends BlockEntity
             return null;
         }
 
-        long current = countSupplyItems(filterIndex, key);
-        long capacity = getConfiguredSupplyItemCapacity(filterIndex);
-        long threshold = percentage(capacity, itemRefillBelowPercent);
-        long target = percentage(capacity, itemRefillToPercent);
-        if (current >= threshold || target <= current) {
+        long current = getConfiguredSupplyItemCount(filterIndex);
+        long target = getItemTargetAmount(filterIndex);
+        long threshold = percentage(target, itemRefillBelowPercent);
+        if (target <= 0L || current >= threshold || target <= current) {
             return null;
         }
 
@@ -603,16 +826,10 @@ public class SupplyBufferBlockEntity extends BlockEntity
             return null;
         }
 
-        FluidTank tank = fluidTanks[filterIndex];
-        FluidStack currentFluid = tank.getFluid();
-        if (!currentFluid.isEmpty() && !key.matches(currentFluid)) {
-            return null;
-        }
-
-        long current = tank.getFluidAmount();
-        long threshold = percentage(tank.getCapacity(), fluidRefillBelowPercent);
-        long target = percentage(tank.getCapacity(), fluidRefillToPercent);
-        if (current >= threshold || target <= current) {
+        long current = getConfiguredFluidAmount(filterIndex);
+        long target = getFluidTargetAmount(filterIndex);
+        long threshold = percentage(target, fluidRefillBelowPercent);
+        if (target <= 0L || current >= threshold || target <= current) {
             return null;
         }
 
@@ -642,13 +859,15 @@ public class SupplyBufferBlockEntity extends BlockEntity
             );
             for (int filterIndex = 0; filterIndex < REQUEST_FILTER_COUNT; filterIndex++) {
                 PendingTransfer itemPending = pendingItemRequests[filterIndex];
-                pendingItemRequests[filterIndex] = processItemRequestResult(
+                pendingItemRequests[filterIndex] = processItemTransferResult(
+                        filterIndex,
                         itemPending,
                         itemPending == null ? null : syncResult.results().get(itemPending.operationId())
                 );
 
                 PendingTransfer fluidPending = pendingFluidRequests[filterIndex];
-                pendingFluidRequests[filterIndex] = processFluidRequestResult(
+                pendingFluidRequests[filterIndex] = processFluidTransferResult(
+                        filterIndex,
                         fluidPending,
                         fluidPending == null ? null : syncResult.results().get(fluidPending.operationId())
                 );
@@ -698,12 +917,16 @@ public class SupplyBufferBlockEntity extends BlockEntity
         );
     }
 
-    private PendingTransfer processItemRequestResult(
+    private PendingTransfer processItemTransferResult(
+            int filterIndex,
             @Nullable PendingTransfer pending,
             @Nullable SupplyBufferDatabase.OperationResult result
     ) {
         if (pending == null || result == null) {
             return pending;
+        }
+        if (pending.direction() == SupplyBufferDatabase.TransferDirection.REMOTE_TO_MAIN) {
+            return processVirtualReturnResult(filterIndex, pending, result);
         }
         if (result.failed()) {
             pendingAcknowledgements.add(pending.operationId());
@@ -730,33 +953,28 @@ public class SupplyBufferBlockEntity extends BlockEntity
             return null;
         }
 
-        int filterIndex = findItemFilterIndex(key);
-        if (filterIndex < 0 || !canFitSupplyItems(filterIndex, key, delivered)) {
+        int actualFilter = findItemFilterIndex(key);
+        if (actualFilter < 0) {
             // Do not ACK yet. The provider has already reserved/extracted the resource.
             return pending;
         }
 
-        long inserted = insertSupplyItems(filterIndex, key, delivered);
-        if (inserted != delivered) {
-            LOGGER.error(
-                    "Supply Buffer at {} simulated {} items fitting but inserted only {}",
-                    worldPosition,
-                    delivered,
-                    inserted
-            );
-            return pending;
-        }
-
+        virtualItemAmounts[actualFilter] = saturatingAdd(virtualItemAmounts[actualFilter], delivered);
+        markDirty();
         pendingAcknowledgements.add(pending.operationId());
         return null;
     }
 
-    private PendingTransfer processFluidRequestResult(
+    private PendingTransfer processFluidTransferResult(
+            int filterIndex,
             @Nullable PendingTransfer pending,
             @Nullable SupplyBufferDatabase.OperationResult result
     ) {
         if (pending == null || result == null) {
             return pending;
+        }
+        if (pending.direction() == SupplyBufferDatabase.TransferDirection.REMOTE_TO_MAIN) {
+            return processVirtualReturnResult(filterIndex, pending, result);
         }
         if (result.failed()) {
             pendingAcknowledgements.add(pending.operationId());
@@ -766,11 +984,10 @@ public class SupplyBufferBlockEntity extends BlockEntity
             return pending;
         }
 
-        long deliveredLong = Math.max(0L, Math.min(pending.amount(), result.deliveredAmount()));
-        if (deliveredLong <= 0L) {
+        long delivered = Math.max(0L, Math.min(pending.amount(), result.deliveredAmount()));
+        if (delivered <= 0L) {
             return pending;
         }
-        int delivered = (int) Math.min(Integer.MAX_VALUE, deliveredLong);
 
         AEKey decoded;
         try {
@@ -784,36 +1001,68 @@ public class SupplyBufferBlockEntity extends BlockEntity
             return null;
         }
 
-        int filterIndex = findFluidFilterIndex(key);
-        if (filterIndex < 0) {
+        int actualFilter = findFluidFilterIndex(key);
+        if (actualFilter < 0) {
             return pending;
         }
 
-        FluidStack stack = key.toStack(delivered);
-        if (stack.isEmpty()) {
+        virtualFluidAmounts[actualFilter] = saturatingAdd(virtualFluidAmounts[actualFilter], delivered);
+        markDirty();
+        pendingAcknowledgements.add(pending.operationId());
+        return null;
+    }
+
+    private PendingTransfer processVirtualReturnResult(
+            int filterIndex,
+            PendingTransfer pending,
+            SupplyBufferDatabase.OperationResult result
+    ) {
+        if (result.failed()) {
+            restoreVirtualReturnReservation(filterIndex, pending);
             pendingAcknowledgements.add(pending.operationId());
             return null;
         }
-
-        FluidTank tank = fluidTanks[filterIndex];
-        if (tank.fill(stack, IFluidHandler.FluidAction.SIMULATE) < delivered) {
-            // External automation can only drain these tanks, so waiting is safe.
+        if (!result.applied()) {
             return pending;
         }
 
-        int filled = tank.fill(stack, IFluidHandler.FluidAction.EXECUTE);
-        if (filled != delivered) {
-            LOGGER.error(
-                    "Supply Buffer at {} simulated {} mB fitting but filled only {} mB",
-                    worldPosition,
-                    delivered,
-                    filled
-            );
+        long delivered = Math.max(0L, Math.min(pending.amount(), result.deliveredAmount()));
+        if (delivered <= 0L) {
             return pending;
         }
 
         pendingAcknowledgements.add(pending.operationId());
-        return null;
+        long remainder = pending.amount() - delivered;
+        if (remainder <= 0L) {
+            return null;
+        }
+
+        // The remainder is still reserved locally; only the already delivered part has
+        // actually left the buffer. Continue it as a fresh id after ACKing this result.
+        return PendingTransfer.create(
+                pending.direction(),
+                pending.resourceType(),
+                pending.keyPayload(),
+                remainder
+        );
+    }
+
+    private void restoreVirtualReturnReservation(int filterIndex, PendingTransfer pending) {
+        if (!validFilterIndex(filterIndex)) {
+            return;
+        }
+        if (pending.resourceType() == SupplyBufferDatabase.ResourceType.ITEM) {
+            virtualItemAmounts[filterIndex] = saturatingAdd(
+                    virtualItemAmounts[filterIndex],
+                    pending.amount()
+            );
+        } else {
+            virtualFluidAmounts[filterIndex] = saturatingAdd(
+                    virtualFluidAmounts[filterIndex],
+                    pending.amount()
+            );
+        }
+        markDirty();
     }
 
     private void restoreOutboundReservation(PendingTransfer pending) {
@@ -953,7 +1202,19 @@ public class SupplyBufferBlockEntity extends BlockEntity
     }
 
     private static long percentage(long capacity, int percent) {
-        return Math.max(0L, capacity) * Math.max(0, Math.min(100, percent)) / 100L;
+        long safeCapacity = Math.max(0L, capacity);
+        int safePercent = Math.max(0, Math.min(100, percent));
+        return (safeCapacity / 100L) * safePercent
+                + ((safeCapacity % 100L) * safePercent) / 100L;
+    }
+
+    private static long saturatingAdd(long current, long added) {
+        long safeCurrent = Math.max(0L, current);
+        long safeAdded = Math.max(0L, added);
+        if (safeCurrent >= MAX_VIRTUAL_AMOUNT || safeAdded >= MAX_VIRTUAL_AMOUNT - safeCurrent) {
+            return MAX_VIRTUAL_AMOUNT;
+        }
+        return safeCurrent + safeAdded;
     }
 
     @Nullable
@@ -1009,8 +1270,8 @@ public class SupplyBufferBlockEntity extends BlockEntity
         return count;
     }
 
-    public ItemStackHandler getSupplyItems() {
-        return supplyItems;
+    public IItemHandler getSupplyItems() {
+        return virtualSupplyItems;
     }
 
     public ItemStackHandler getExportItems() {
@@ -1058,13 +1319,31 @@ public class SupplyBufferBlockEntity extends BlockEntity
     }
 
     public long getConfiguredSupplyItemCount(int filterIndex) {
-        AEItemKey key = getConfiguredItemKey(filterIndex);
-        return key == null ? 0L : countSupplyItems(filterIndex, key);
+        return validFilterIndex(filterIndex) && getConfiguredItemKey(filterIndex) != null
+                ? Math.max(0L, virtualItemAmounts[filterIndex])
+                : 0L;
     }
 
     public long getConfiguredSupplyItemCapacity(int filterIndex) {
-        AEItemKey key = getConfiguredItemKey(filterIndex);
-        return key == null ? 0L : (long) SUPPLY_SLOTS_PER_FILTER * Math.max(1, key.getMaxStackSize());
+        return getItemTargetAmount(filterIndex);
+    }
+
+    public long getConfiguredFluidAmount(int filterIndex) {
+        return validFilterIndex(filterIndex) && getConfiguredFluidKey(filterIndex) != null
+                ? Math.max(0L, virtualFluidAmounts[filterIndex])
+                : 0L;
+    }
+
+    public long getItemTargetAmount(int filterIndex) {
+        return validFilterIndex(filterIndex) && getConfiguredItemKey(filterIndex) != null
+                ? Math.max(1L, itemTargetAmounts[filterIndex])
+                : 0L;
+    }
+
+    public long getFluidTargetAmount(int filterIndex) {
+        return validFilterIndex(filterIndex) && getConfiguredFluidKey(filterIndex) != null
+                ? Math.max(1L, fluidTargetAmounts[filterIndex])
+                : 0L;
     }
 
     public long getConfiguredSupplyItemCount() {
@@ -1171,40 +1450,126 @@ public class SupplyBufferBlockEntity extends BlockEntity
             if (decoded != null && !(decoded instanceof AEItemKey)) {
                 return false;
             }
-            if (pendingItemRequests[filterIndex] != null) {
-                player.displayClientMessage(Component.literal("§eПодожди завершения запроса для этого предмета."), true);
-                return false;
-            }
+
             AEItemKey oldKey = getConfiguredItemKey(filterIndex);
             AEItemKey newKey = decoded instanceof AEItemKey itemKey ? itemKey : null;
+
+            if (newKey == null) {
+                if (oldKey == null && pendingItemRequests[filterIndex] == null) {
+                    itemClearRequested[filterIndex] = false;
+                    return true;
+                }
+
+                itemClearRequested[filterIndex] = true;
+                markDirty();
+
+                if (pendingItemRequests[filterIndex] != null) {
+                    player.displayClientMessage(Component.literal(
+                            "§eОтменяю запрос; остаток автоматически вернётся в главную ME..."
+                    ), true);
+                } else if (hasSupplyItems(filterIndex)) {
+                    player.displayClientMessage(Component.literal(
+                            "§eВозвращаю весь остаток в главную ME и удаляю фильтр..."
+                    ), true);
+                } else {
+                    itemFilterPayloads[filterIndex] = "";
+                    itemTargetAmounts[filterIndex] = 0L;
+                    itemClearRequested[filterIndex] = false;
+                    setChangedAndSync();
+                }
+                return true;
+            }
+
+            if (itemClearRequested[filterIndex]) {
+                player.displayClientMessage(Component.literal(
+                        "§eСначала дождись завершения удаления этого фильтра."
+                ), true);
+                return false;
+            }
+            if (pendingItemRequests[filterIndex] != null) {
+                player.displayClientMessage(Component.literal(
+                        "§eПодожди завершения запроса для этого предмета."
+                ), true);
+                return false;
+            }
             if (!sameKey(oldKey, newKey) && hasSupplyItems(filterIndex)) {
-                player.displayClientMessage(Component.literal("§cСначала забери предметы из этого буфера."), true);
+                player.displayClientMessage(Component.literal(
+                        "§cСначала забери предметы из этого буфера."
+                ), true);
                 return false;
             }
-            if (newKey != null && isDuplicateItemFilter(filterIndex, newKey)) {
-                player.displayClientMessage(Component.literal("§eЭтот предмет уже добавлен в другой фильтр."), true);
+            if (isDuplicateItemFilter(filterIndex, newKey)) {
+                player.displayClientMessage(Component.literal(
+                        "§eЭтот предмет уже добавлен в другой фильтр."
+                ), true);
                 return false;
             }
-            itemFilterPayloads[filterIndex] = newKey == null ? "" : SupplyKeyCodec.encode(newKey);
+            itemFilterPayloads[filterIndex] = SupplyKeyCodec.encode(newKey);
+            if (itemTargetAmounts[filterIndex] <= 0L) {
+                itemTargetAmounts[filterIndex] = defaultItemTarget(newKey);
+            }
         } else {
             if (decoded != null && !(decoded instanceof AEFluidKey)) {
                 return false;
             }
-            if (pendingFluidRequests[filterIndex] != null) {
-                player.displayClientMessage(Component.literal("§eПодожди завершения запроса для этой жидкости."), true);
-                return false;
-            }
+
             AEFluidKey oldKey = getConfiguredFluidKey(filterIndex);
             AEFluidKey newKey = decoded instanceof AEFluidKey fluidKey ? fluidKey : null;
-            if (!sameKey(oldKey, newKey) && !fluidTanks[filterIndex].isEmpty()) {
-                player.displayClientMessage(Component.literal("§cСначала опустоши этот бак Supply Buffer."), true);
+
+            if (newKey == null) {
+                if (oldKey == null && pendingFluidRequests[filterIndex] == null) {
+                    fluidClearRequested[filterIndex] = false;
+                    return true;
+                }
+
+                fluidClearRequested[filterIndex] = true;
+                markDirty();
+
+                if (pendingFluidRequests[filterIndex] != null) {
+                    player.displayClientMessage(Component.literal(
+                            "§eОтменяю запрос жидкости; остаток автоматически вернётся в главную ME..."
+                    ), true);
+                } else if (virtualFluidAmounts[filterIndex] > 0L) {
+                    player.displayClientMessage(Component.literal(
+                            "§eВозвращаю всю жидкость в главную ME и удаляю фильтр..."
+                    ), true);
+                } else {
+                    fluidFilterPayloads[filterIndex] = "";
+                    fluidTargetAmounts[filterIndex] = 0L;
+                    fluidClearRequested[filterIndex] = false;
+                    setChangedAndSync();
+                }
+                return true;
+            }
+
+            if (fluidClearRequested[filterIndex]) {
+                player.displayClientMessage(Component.literal(
+                        "§eСначала дождись завершения удаления этого фильтра."
+                ), true);
                 return false;
             }
-            if (newKey != null && isDuplicateFluidFilter(filterIndex, newKey)) {
-                player.displayClientMessage(Component.literal("§eЭта жидкость уже добавлена в другой фильтр."), true);
+            if (pendingFluidRequests[filterIndex] != null) {
+                player.displayClientMessage(Component.literal(
+                        "§eПодожди завершения запроса для этой жидкости."
+                ), true);
                 return false;
             }
-            fluidFilterPayloads[filterIndex] = newKey == null ? "" : SupplyKeyCodec.encode(newKey);
+            if (!sameKey(oldKey, newKey) && virtualFluidAmounts[filterIndex] > 0L) {
+                player.displayClientMessage(Component.literal(
+                        "§cСначала опустоши этот бак Supply Buffer."
+                ), true);
+                return false;
+            }
+            if (isDuplicateFluidFilter(filterIndex, newKey)) {
+                player.displayClientMessage(Component.literal(
+                        "§eЭта жидкость уже добавлена в другой фильтр."
+                ), true);
+                return false;
+            }
+            fluidFilterPayloads[filterIndex] = SupplyKeyCodec.encode(newKey);
+            if (fluidTargetAmounts[filterIndex] <= 0L) {
+                fluidTargetAmounts[filterIndex] = DEFAULT_FLUID_TARGET;
+            }
         }
 
         setChangedAndSync();
@@ -1212,14 +1577,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
     }
 
     private boolean hasSupplyItems(int filterIndex) {
-        int start = supplyRegionStart(filterIndex);
-        int end = start + SUPPLY_SLOTS_PER_FILTER;
-        for (int slot = start; slot < end; slot++) {
-            if (!supplyItems.getStackInSlot(slot).isEmpty()) {
-                return true;
-            }
-        }
-        return false;
+        return validFilterIndex(filterIndex) && virtualItemAmounts[filterIndex] > 0L;
     }
 
     private boolean isDuplicateItemFilter(int exceptIndex, AEItemKey key) {
@@ -1242,6 +1600,107 @@ public class SupplyBufferBlockEntity extends BlockEntity
 
     private static boolean sameKey(@Nullable AEKey first, @Nullable AEKey second) {
         return first == null ? second == null : first.equals(second);
+    }
+
+    public boolean setTargetAmount(
+            SupplyBufferDatabase.ResourceType resourceType,
+            int filterIndex,
+            long targetAmount,
+            Player player
+    ) {
+        if (!canEdit(player) || role != SupplyBufferRole.REMOTE || !validFilterIndex(filterIndex)) {
+            return false;
+        }
+        long normalized = Math.max(1L, Math.min(MAX_VIRTUAL_AMOUNT, targetAmount));
+        if (resourceType == SupplyBufferDatabase.ResourceType.ITEM) {
+            if (getConfiguredItemKey(filterIndex) == null) {
+                return false;
+            }
+            itemTargetAmounts[filterIndex] = normalized;
+        } else {
+            if (getConfiguredFluidKey(filterIndex) == null) {
+                return false;
+            }
+            fluidTargetAmounts[filterIndex] = normalized;
+        }
+        setChangedAndSync();
+        return true;
+    }
+
+    public boolean hasStoredSupplyResources() {
+        for (long amount : virtualItemAmounts) {
+            if (amount > 0L) return true;
+        }
+        for (long amount : virtualFluidAmounts) {
+            if (amount > 0L) return true;
+        }
+        return false;
+    }
+
+    private static long defaultItemTarget(AEItemKey key) {
+        long stackSize = key == null ? 64L : Math.max(1, key.getMaxStackSize());
+        return Math.max(1L, Math.min(MAX_VIRTUAL_AMOUNT, stackSize * SUPPLY_SLOTS_PER_FILTER));
+    }
+
+    private static void copyLongArray(long[] source, long[] target) {
+        int length = Math.min(source.length, target.length);
+        for (int index = 0; index < length; index++) {
+            target[index] = Math.max(0L, Math.min(MAX_VIRTUAL_AMOUNT, source[index]));
+        }
+    }
+
+    private void migratePhysicalSupplyItemsToVirtual() {
+        for (int filterIndex = 0; filterIndex < REQUEST_FILTER_COUNT; filterIndex++) {
+            AEItemKey key = getConfiguredItemKey(filterIndex);
+            if (key == null) continue;
+            virtualItemAmounts[filterIndex] = Math.min(
+                    MAX_VIRTUAL_AMOUNT,
+                    Math.max(0L, countSupplyItems(filterIndex, key))
+            );
+        }
+    }
+
+    private void migratePhysicalFluidTanksToVirtual() {
+        for (int filterIndex = 0; filterIndex < REQUEST_FILTER_COUNT; filterIndex++) {
+            AEFluidKey key = getConfiguredFluidKey(filterIndex);
+            if (key == null) continue;
+            FluidStack fluid = fluidTanks[filterIndex].getFluid();
+            if (!fluid.isEmpty() && key.matches(fluid)) {
+                virtualFluidAmounts[filterIndex] = Math.min(MAX_VIRTUAL_AMOUNT, fluid.getAmount());
+            }
+        }
+    }
+
+    private void clearLegacyPhysicalSupplyStorage() {
+        for (int slot = 0; slot < supplyItems.getSlots(); slot++) {
+            supplyItems.setStackInSlot(slot, ItemStack.EMPTY);
+        }
+        for (FluidTank tank : fluidTanks) {
+            tank.setFluid(FluidStack.EMPTY);
+        }
+    }
+
+    private void sanitizeVirtualState() {
+        for (int index = 0; index < REQUEST_FILTER_COUNT; index++) {
+            virtualItemAmounts[index] = Math.max(0L, Math.min(MAX_VIRTUAL_AMOUNT, virtualItemAmounts[index]));
+            virtualFluidAmounts[index] = Math.max(0L, Math.min(MAX_VIRTUAL_AMOUNT, virtualFluidAmounts[index]));
+            if (getConfiguredItemKey(index) == null) {
+                virtualItemAmounts[index] = 0L;
+                itemTargetAmounts[index] = 0L;
+            } else if (itemTargetAmounts[index] <= 0L) {
+                itemTargetAmounts[index] = defaultItemTarget(getConfiguredItemKey(index));
+            } else {
+                itemTargetAmounts[index] = Math.min(MAX_VIRTUAL_AMOUNT, itemTargetAmounts[index]);
+            }
+            if (getConfiguredFluidKey(index) == null) {
+                virtualFluidAmounts[index] = 0L;
+                fluidTargetAmounts[index] = 0L;
+            } else if (fluidTargetAmounts[index] <= 0L) {
+                fluidTargetAmounts[index] = DEFAULT_FLUID_TARGET;
+            } else {
+                fluidTargetAmounts[index] = Math.min(MAX_VIRTUAL_AMOUNT, fluidTargetAmounts[index]);
+            }
+        }
     }
 
     public void setOwner(Player player) {
@@ -1347,9 +1806,9 @@ public class SupplyBufferBlockEntity extends BlockEntity
     public void cycleSetting(int action) {
         switch (action) {
             case 0 -> itemRefillBelowPercent = nextThreshold(itemRefillBelowPercent, itemRefillToPercent);
-            case 1 -> itemRefillToPercent = nextTarget(itemRefillToPercent, itemRefillBelowPercent);
+            case 1 -> itemRefillToPercent = 100;
             case 2 -> fluidRefillBelowPercent = nextThreshold(fluidRefillBelowPercent, fluidRefillToPercent);
-            case 3 -> fluidRefillToPercent = nextTarget(fluidRefillToPercent, fluidRefillBelowPercent);
+            case 3 -> fluidRefillToPercent = 100;
             default -> {
                 return;
             }
@@ -1400,14 +1859,9 @@ public class SupplyBufferBlockEntity extends BlockEntity
             return;
         }
 
-        SimpleContainer container = new SimpleContainer(supplyItems.getSlots() + exportItems.getSlots());
-        int index = 0;
-        for (int slot = 0; slot < supplyItems.getSlots(); slot++) {
-            container.setItem(index++, supplyItems.getStackInSlot(slot));
-            supplyItems.setStackInSlot(slot, ItemStack.EMPTY);
-        }
+        SimpleContainer container = new SimpleContainer(exportItems.getSlots());
         for (int slot = 0; slot < exportItems.getSlots(); slot++) {
-            container.setItem(index++, exportItems.getStackInSlot(slot));
+            container.setItem(slot, exportItems.getStackInSlot(slot));
             exportItems.setStackInSlot(slot, ItemStack.EMPTY);
         }
         Containers.dropContents(level, worldPosition, container);
@@ -1550,6 +2004,12 @@ public class SupplyBufferBlockEntity extends BlockEntity
         tag.putInt("FluidRefillTo", fluidRefillToPercent);
         tag.put("ItemFilters", writeFilterPayloads(itemFilterPayloads));
         tag.put("FluidFilters", writeFilterPayloads(fluidFilterPayloads));
+        tag.putLongArray("VirtualItemAmounts", virtualItemAmounts);
+        tag.putLongArray("VirtualFluidAmounts", virtualFluidAmounts);
+        tag.putLongArray("ItemTargetAmounts", itemTargetAmounts);
+        tag.putLongArray("FluidTargetAmounts", fluidTargetAmounts);
+        tag.putInt("ItemClearMask", clearRequestMask(itemClearRequested));
+        tag.putInt("FluidClearMask", clearRequestMask(fluidClearRequested));
         tag.put("SupplyItems", supplyItems.serializeNBT());
         tag.put("ExportItems", exportItems.serializeNBT());
         ListTag fluidTankTags = new ListTag();
@@ -1591,11 +2051,13 @@ public class SupplyBufferBlockEntity extends BlockEntity
         ownerUuid = tag.hasUUID("OwnerUuid") ? tag.getUUID("OwnerUuid") : null;
         ownerName = tag.getString("OwnerName");
         itemRefillBelowPercent = sanitizePercent(tag.getInt("ItemRefillBelow"), 50);
-        itemRefillToPercent = sanitizePercent(tag.getInt("ItemRefillTo"), 100);
+        int legacyItemTargetPercent = sanitizePercent(tag.getInt("ItemRefillTo"), 100);
         fluidRefillBelowPercent = sanitizePercent(tag.getInt("FluidRefillBelow"), 50);
-        fluidRefillToPercent = sanitizePercent(tag.getInt("FluidRefillTo"), 100);
-        if (itemRefillBelowPercent >= itemRefillToPercent) itemRefillBelowPercent = 50;
-        if (fluidRefillBelowPercent >= fluidRefillToPercent) fluidRefillBelowPercent = 50;
+        int legacyFluidTargetPercent = sanitizePercent(tag.getInt("FluidRefillTo"), 100);
+        itemRefillToPercent = 100;
+        fluidRefillToPercent = 100;
+        if (itemRefillBelowPercent >= 100) itemRefillBelowPercent = 50;
+        if (fluidRefillBelowPercent >= 100) fluidRefillBelowPercent = 50;
 
         Arrays.fill(itemFilterPayloads, "");
         Arrays.fill(fluidFilterPayloads, "");
@@ -1632,6 +2094,47 @@ public class SupplyBufferBlockEntity extends BlockEntity
         } else if (tag.contains("FluidTank", Tag.TAG_COMPOUND)) {
             fluidTanks[0].readFromNBT(tag.getCompound("FluidTank"));
         }
+
+        Arrays.fill(virtualItemAmounts, 0L);
+        Arrays.fill(virtualFluidAmounts, 0L);
+        Arrays.fill(itemTargetAmounts, 0L);
+        Arrays.fill(fluidTargetAmounts, 0L);
+
+        if (tag.contains("VirtualItemAmounts", Tag.TAG_LONG_ARRAY)) {
+            copyLongArray(tag.getLongArray("VirtualItemAmounts"), virtualItemAmounts);
+        } else {
+            migratePhysicalSupplyItemsToVirtual();
+        }
+        if (tag.contains("VirtualFluidAmounts", Tag.TAG_LONG_ARRAY)) {
+            copyLongArray(tag.getLongArray("VirtualFluidAmounts"), virtualFluidAmounts);
+        } else {
+            migratePhysicalFluidTanksToVirtual();
+        }
+        if (tag.contains("ItemTargetAmounts", Tag.TAG_LONG_ARRAY)) {
+            copyLongArray(tag.getLongArray("ItemTargetAmounts"), itemTargetAmounts);
+        } else {
+            for (int index = 0; index < REQUEST_FILTER_COUNT; index++) {
+                AEItemKey key = getConfiguredItemKey(index);
+                if (key != null) {
+                    long legacyCapacity = (long) SUPPLY_SLOTS_PER_FILTER * Math.max(1, key.getMaxStackSize());
+                    itemTargetAmounts[index] = Math.max(1L, percentage(legacyCapacity, legacyItemTargetPercent));
+                }
+            }
+        }
+        if (tag.contains("FluidTargetAmounts", Tag.TAG_LONG_ARRAY)) {
+            copyLongArray(tag.getLongArray("FluidTargetAmounts"), fluidTargetAmounts);
+        } else {
+            for (int index = 0; index < REQUEST_FILTER_COUNT; index++) {
+                if (getConfiguredFluidKey(index) != null) {
+                    fluidTargetAmounts[index] = Math.max(1L, percentage(FLUID_CAPACITY_PER_FILTER, legacyFluidTargetPercent));
+                }
+            }
+        }
+        sanitizeVirtualState();
+        clearLegacyPhysicalSupplyStorage();
+        applyClearRequestMask(tag.getInt("ItemClearMask"), itemClearRequested);
+        applyClearRequestMask(tag.getInt("FluidClearMask"), fluidClearRequested);
+
         mainNode.loadFromNBT(tag);
 
         pendingOutbound = readPending(tag, "PendingOutbound");
@@ -1646,6 +2149,18 @@ public class SupplyBufferBlockEntity extends BlockEntity
             readPendingArray(tag.getList("PendingFluidRequests", Tag.TAG_COMPOUND), pendingFluidRequests);
         } else {
             assignLegacyPending(readPending(tag, "PendingFluidRequest"), pendingFluidRequests);
+        }
+        for (int index = 0; index < REQUEST_FILTER_COUNT; index++) {
+            PendingTransfer itemPending = pendingItemRequests[index];
+            PendingTransfer fluidPending = pendingFluidRequests[index];
+            if (itemPending != null
+                    && itemPending.direction() == SupplyBufferDatabase.TransferDirection.REMOTE_TO_MAIN) {
+                itemClearRequested[index] = true;
+            }
+            if (fluidPending != null
+                    && fluidPending.direction() == SupplyBufferDatabase.TransferDirection.REMOTE_TO_MAIN) {
+                fluidClearRequested[index] = true;
+            }
         }
         providerJournal = null;
         if (tag.contains("ProviderJournal", Tag.TAG_COMPOUND)) {
@@ -1732,6 +2247,23 @@ public class SupplyBufferBlockEntity extends BlockEntity
             if (!stack.isEmpty()) {
                 supplyItems.setStackInSlot(slot, stack.copy());
             }
+        }
+    }
+
+    private static int clearRequestMask(boolean[] values) {
+        int mask = 0;
+        for (int index = 0; index < values.length && index < Integer.SIZE; index++) {
+            if (values[index]) {
+                mask |= 1 << index;
+            }
+        }
+        return mask;
+    }
+
+    private static void applyClearRequestMask(int mask, boolean[] target) {
+        Arrays.fill(target, false);
+        for (int index = 0; index < target.length && index < Integer.SIZE; index++) {
+            target[index] = (mask & (1 << index)) != 0;
         }
     }
 
@@ -1894,23 +2426,99 @@ public class SupplyBufferBlockEntity extends BlockEntity
         @Override public boolean isItemValid(int slot, @NotNull ItemStack stack) { return false; }
     }
 
-    private static final class DrainOnlyFluidHandler implements IFluidHandler {
-        private final FluidTank[] tanks;
+    private static final class VirtualSupplyItemHandler implements IItemHandler {
+        private final SupplyBufferBlockEntity owner;
 
-        private DrainOnlyFluidHandler(FluidTank[] tanks) {
-            this.tanks = tanks;
+        private VirtualSupplyItemHandler(SupplyBufferBlockEntity owner) {
+            this.owner = owner;
         }
 
-        @Override public int getTanks() { return tanks.length; }
+        @Override
+        public int getSlots() {
+            return REQUEST_FILTER_COUNT;
+        }
+
+        @Override
+        public @NotNull ItemStack getStackInSlot(int slot) {
+            if (!validFilterIndex(slot) || owner.itemClearRequested[slot]) {
+                return ItemStack.EMPTY;
+            }
+            AEItemKey key = owner.getConfiguredItemKey(slot);
+            long stored = owner.virtualItemAmounts[slot];
+            if (key == null || stored <= 0L) {
+                return ItemStack.EMPTY;
+            }
+            int count = (int) Math.min((long) Math.max(1, key.getMaxStackSize()), stored);
+            return key.toStack(count);
+        }
+
+        @Override
+        public @NotNull ItemStack insertItem(int slot, @NotNull ItemStack stack, boolean simulate) {
+            return stack;
+        }
+
+        @Override
+        public @NotNull ItemStack extractItem(int slot, int amount, boolean simulate) {
+            if (!validFilterIndex(slot) || amount <= 0 || owner.itemClearRequested[slot]) {
+                return ItemStack.EMPTY;
+            }
+            AEItemKey key = owner.getConfiguredItemKey(slot);
+            long stored = owner.virtualItemAmounts[slot];
+            if (key == null || stored <= 0L) {
+                return ItemStack.EMPTY;
+            }
+            int taken = (int) Math.min(
+                    Math.min((long) amount, stored),
+                    (long) Math.max(1, key.getMaxStackSize())
+            );
+            ItemStack result = key.toStack(taken);
+            if (!simulate && !result.isEmpty()) {
+                owner.virtualItemAmounts[slot] = Math.max(0L, stored - taken);
+                owner.markDirty();
+            }
+            return result;
+        }
+
+        @Override
+        public int getSlotLimit(int slot) {
+            AEItemKey key = validFilterIndex(slot) ? owner.getConfiguredItemKey(slot) : null;
+            return key == null ? 64 : Math.max(1, key.getMaxStackSize());
+        }
+
+        @Override
+        public boolean isItemValid(int slot, @NotNull ItemStack stack) {
+            return false;
+        }
+    }
+
+    private static final class VirtualDrainFluidHandler implements IFluidHandler {
+        private final SupplyBufferBlockEntity owner;
+
+        private VirtualDrainFluidHandler(SupplyBufferBlockEntity owner) {
+            this.owner = owner;
+        }
+
+        @Override public int getTanks() { return REQUEST_FILTER_COUNT; }
 
         @Override
         public @NotNull FluidStack getFluidInTank(int tank) {
-            return tank >= 0 && tank < tanks.length ? tanks[tank].getFluid() : FluidStack.EMPTY;
+            if (!validFilterIndex(tank) || owner.fluidClearRequested[tank]) {
+                return FluidStack.EMPTY;
+            }
+            AEFluidKey key = owner.getConfiguredFluidKey(tank);
+            long stored = owner.virtualFluidAmounts[tank];
+            if (key == null || stored <= 0L) {
+                return FluidStack.EMPTY;
+            }
+            return key.toStack((int) Math.min((long) Integer.MAX_VALUE, stored));
         }
 
         @Override
         public int getTankCapacity(int tank) {
-            return tank >= 0 && tank < tanks.length ? tanks[tank].getCapacity() : 0;
+            if (!validFilterIndex(tank)) {
+                return 0;
+            }
+            return (int) Math.min((long) Integer.MAX_VALUE, owner.getFluidTargetAmount(tank));
         }
 
         @Override public boolean isFluidValid(int tank, @NotNull FluidStack stack) { return false; }
@@ -1921,10 +2529,13 @@ public class SupplyBufferBlockEntity extends BlockEntity
             if (resource == null || resource.isEmpty()) {
                 return FluidStack.EMPTY;
             }
-            for (FluidTank tank : tanks) {
-                FluidStack stored = tank.getFluid();
-                if (!stored.isEmpty() && stored.isFluidEqual(resource)) {
-                    return tank.drain(resource, action);
+            for (int tank = 0; tank < REQUEST_FILTER_COUNT; tank++) {
+                AEFluidKey key = owner.getConfiguredFluidKey(tank);
+                if (!owner.fluidClearRequested[tank]
+                        && key != null
+                        && owner.virtualFluidAmounts[tank] > 0L
+                        && key.matches(resource)) {
+                    return drainFromTank(tank, resource.getAmount(), action);
                 }
             }
             return FluidStack.EMPTY;
@@ -1935,13 +2546,34 @@ public class SupplyBufferBlockEntity extends BlockEntity
             if (maxDrain <= 0) {
                 return FluidStack.EMPTY;
             }
-            for (FluidTank tank : tanks) {
-                if (!tank.isEmpty()) {
-                    return tank.drain(maxDrain, action);
+            for (int tank = 0; tank < REQUEST_FILTER_COUNT; tank++) {
+                if (!owner.fluidClearRequested[tank]
+                        && owner.virtualFluidAmounts[tank] > 0L
+                        && owner.getConfiguredFluidKey(tank) != null) {
+                    return drainFromTank(tank, maxDrain, action);
                 }
             }
             return FluidStack.EMPTY;
         }
+
+        private @NotNull FluidStack drainFromTank(int tank, int maxDrain, FluidAction action) {
+            AEFluidKey key = owner.getConfiguredFluidKey(tank);
+            if (owner.fluidClearRequested[tank] || key == null || maxDrain <= 0) {
+                return FluidStack.EMPTY;
+            }
+            long stored = owner.virtualFluidAmounts[tank];
+            int drained = (int) Math.min(Math.min(stored, (long) maxDrain), (long) Integer.MAX_VALUE);
+            if (drained <= 0) {
+                return FluidStack.EMPTY;
+            }
+            FluidStack result = key.toStack(drained);
+            if (!result.isEmpty() && action == FluidAction.EXECUTE) {
+                owner.virtualFluidAmounts[tank] = Math.max(0L, stored - drained);
+                owner.markDirty();
+            }
+            return result;
+        }
     }
+
 }
 

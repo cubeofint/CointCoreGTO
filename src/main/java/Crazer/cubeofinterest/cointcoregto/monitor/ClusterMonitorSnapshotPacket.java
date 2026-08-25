@@ -13,6 +13,7 @@ public record ClusterMonitorSnapshotPacket(ClusterMonitorSnapshot snapshot) {
     private static final int MAX_NODES = 256;
     private static final int MAX_BUFFERS = 1024;
     private static final int MAX_RESOURCES = 18;
+    private static final int MAX_OPERATIONS = 50;
 
     public static void encode(ClusterMonitorSnapshotPacket packet, FriendlyByteBuf buffer) {
         ClusterMonitorSnapshot snapshot = packet.snapshot();
@@ -59,11 +60,32 @@ public record ClusterMonitorSnapshotPacket(ClusterMonitorSnapshot snapshot) {
                 buffer.writeUtf(resource.type(), 16);
                 buffer.writeVarInt(Math.max(0, resource.filterIndex()));
                 buffer.writeUtf(resource.displayName(), 256);
+                buffer.writeUtf(resource.resourceKey(), 256);
                 buffer.writeVarLong(Math.max(0L, resource.amount()));
                 buffer.writeVarLong(Math.max(0L, resource.capacity()));
                 buffer.writeVarInt(Math.max(0, Math.min(100, resource.refillBelowPercent())));
                 buffer.writeVarInt(Math.max(0, Math.min(100, resource.refillToPercent())));
             }
+        }
+
+        int operationCount = Math.min(MAX_OPERATIONS, snapshot.operations().size());
+        buffer.writeVarInt(operationCount);
+        for (int i = 0; i < operationCount; i++) {
+            ClusterMonitorSnapshot.OperationEntry operation = snapshot.operations().get(i);
+            buffer.writeUtf(operation.operationId(), 64);
+            buffer.writeUtf(operation.linkId(), 64);
+            buffer.writeUtf(operation.sourceNode(), 64);
+            buffer.writeUtf(operation.providerNode(), 64);
+            buffer.writeUtf(operation.direction(), 24);
+            buffer.writeUtf(operation.resourceType(), 16);
+            buffer.writeUtf(operation.displayName(), 256);
+            buffer.writeUtf(operation.resourceKey(), 256);
+            buffer.writeVarLong(Math.max(0L, operation.requestedAmount()));
+            buffer.writeVarLong(Math.max(0L, operation.deliveredAmount()));
+            buffer.writeUtf(operation.status(), 16);
+            buffer.writeUtf(operation.errorText(), 512);
+            buffer.writeVarLong(Math.max(0L, operation.createdAgeSeconds()));
+            buffer.writeVarLong(Math.max(0L, operation.updatedAgeSeconds()));
         }
     }
 
@@ -111,6 +133,7 @@ public record ClusterMonitorSnapshotPacket(ClusterMonitorSnapshot snapshot) {
                         buffer.readUtf(16),
                         buffer.readVarInt(),
                         buffer.readUtf(256),
+                        buffer.readUtf(256),
                         buffer.readVarLong(),
                         buffer.readVarLong(),
                         buffer.readVarInt(),
@@ -136,6 +159,27 @@ public record ClusterMonitorSnapshotPacket(ClusterMonitorSnapshot snapshot) {
             ));
         }
 
+        int operationCount = Math.min(MAX_OPERATIONS, Math.max(0, buffer.readVarInt()));
+        List<ClusterMonitorSnapshot.OperationEntry> operations = new ArrayList<>(operationCount);
+        for (int i = 0; i < operationCount; i++) {
+            operations.add(new ClusterMonitorSnapshot.OperationEntry(
+                    buffer.readUtf(64),
+                    buffer.readUtf(64),
+                    buffer.readUtf(64),
+                    buffer.readUtf(64),
+                    buffer.readUtf(24),
+                    buffer.readUtf(16),
+                    buffer.readUtf(256),
+                    buffer.readUtf(256),
+                    buffer.readVarLong(),
+                    buffer.readVarLong(),
+                    buffer.readUtf(16),
+                    buffer.readUtf(512),
+                    buffer.readVarLong(),
+                    buffer.readVarLong()
+            ));
+        }
+
         return new ClusterMonitorSnapshotPacket(new ClusterMonitorSnapshot(
                 clusterEnabled,
                 currentNodeId,
@@ -143,6 +187,7 @@ public record ClusterMonitorSnapshotPacket(ClusterMonitorSnapshot snapshot) {
                 activeOperations,
                 nodes,
                 buffers,
+                operations,
                 error
         ));
     }

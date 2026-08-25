@@ -8,13 +8,14 @@ import net.minecraftforge.network.PacketDistributor;
 
 import java.util.function.Supplier;
 
-public record ClusterMonitorRequestPacket(BlockPos pos) {
+public record ClusterMonitorRequestPacket(BlockPos pos, boolean includeOperations) {
     public static void encode(ClusterMonitorRequestPacket packet, FriendlyByteBuf buffer) {
         buffer.writeBlockPos(packet.pos());
+        buffer.writeBoolean(packet.includeOperations());
     }
 
     public static ClusterMonitorRequestPacket decode(FriendlyByteBuf buffer) {
-        return new ClusterMonitorRequestPacket(buffer.readBlockPos());
+        return new ClusterMonitorRequestPacket(buffer.readBlockPos(), buffer.readBoolean());
     }
 
     public static void handle(
@@ -41,7 +42,7 @@ public record ClusterMonitorRequestPacket(BlockPos pos) {
                 return;
             }
 
-            ClusterMonitorService.readSnapshot().whenComplete((snapshot, error) -> {
+            ClusterMonitorService.readSnapshot(packet.includeOperations()).whenComplete((snapshot, error) -> {
                 player.server.execute(() -> {
                     if (!(player.containerMenu instanceof ClusterMonitorMenu currentMenu)
                             || !currentMenu.getBlockPos().equals(packet.pos())) {

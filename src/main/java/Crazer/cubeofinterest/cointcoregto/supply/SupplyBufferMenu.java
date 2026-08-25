@@ -1,6 +1,7 @@
 package Crazer.cubeofinterest.cointcoregto.supply;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
@@ -8,7 +9,9 @@ import net.minecraft.world.inventory.SimpleContainerData;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraftforge.items.IItemHandler;
 import net.minecraftforge.items.SlotItemHandler;
+import net.minecraftforge.network.PacketDistributor;
 import org.jetbrains.annotations.NotNull;
 
 public class SupplyBufferMenu extends AbstractContainerMenu {
@@ -31,13 +34,9 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
     private static final int DATA_LINK_ONLINE = 5;
     private static final int DATA_PENDING = 6;
     private static final int DATA_CLUSTER_ENABLED = 7;
-    private static final int DATA_ITEM_COUNTS = 8;
-    private static final int DATA_ITEM_CAPACITIES = DATA_ITEM_COUNTS + FILTER_COUNT;
-    private static final int DATA_FLUID_AMOUNTS = DATA_ITEM_CAPACITIES + FILTER_COUNT;
-    private static final int DATA_FLUID_CAPACITIES = DATA_FLUID_AMOUNTS + FILTER_COUNT;
-    private static final int DATA_COUNT = DATA_FLUID_CAPACITIES + FILTER_COUNT;
+    private static final int DATA_COUNT = 8;
 
-    // These coordinates are shared with SupplyBufferScreen.
+    // Shared with SupplyBufferScreen.
     public static final int FILTER_ROW_X = 35;
     public static final int SUPPLY_ROW_Y = 133;
     public static final int EXPORT_ROW_Y = 172;
@@ -49,7 +48,15 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
     private final boolean canEdit;
     private final String initialLinkId;
     private final String initialProviderNode;
+    private final Player menuPlayer;
     private final SimpleContainerData syncedData = new SimpleContainerData(DATA_COUNT);
+
+    private final long[] clientItemAmounts = new long[FILTER_COUNT];
+    private final long[] clientItemTargets = new long[FILTER_COUNT];
+    private final long[] clientFluidAmounts = new long[FILTER_COUNT];
+    private final long[] clientFluidTargets = new long[FILTER_COUNT];
+    private int stateSyncTicks;
+    private boolean clientStateReceived;
 
     public SupplyBufferMenu(
             int windowId,
@@ -99,15 +106,15 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
         this.canEdit = canEdit;
         this.initialLinkId = linkId == null ? "" : linkId;
         this.initialProviderNode = providerNode == null ? "" : providerNode;
+        this.menuPlayer = playerInventory.player;
         addDataSlots(syncedData);
 
-        // One visible extraction slot per configured item filter. Internally every
-        // filter has 9 stacks of storage; the block entity compacts the first
-        // non-empty stack into this representative slot.
+        // One real menu slot per virtual item buffer. The handler only exposes a
+        // stack-sized extraction window while the backing amount is a long.
         for (int filter = 0; filter < FILTER_COUNT; filter++) {
             addSlot(new SupplyOutputSlot(
                     supplyBuffer,
-                    SupplyBufferBlockEntity.supplyRegionStart(filter),
+                    filter,
                     FILTER_ROW_X + filter * 18,
                     SUPPLY_ROW_Y
             ));
@@ -200,28 +207,52 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
         return syncedData.get(DATA_FLUID_TARGET);
     }
 
-    public int getSupplyItemCount(int filterIndex) {
-        return validFilterIndex(filterIndex)
-                ? Math.max(0, syncedData.get(DATA_ITEM_COUNTS + filterIndex))
-                : 0;
+    public long getSupplyItemCount(int filterIndex) {
+        if (!validFilterIndex(filterIndex)) return 0L;
+        if (isServerMenu()) {
+            return supplyBuffer.getConfiguredSupplyItemCount(filterIndex);
+        }
+        return clientStateReceived
+                ? clientItemAmounts[filterIndex]
+                : supplyBuffer.getConfiguredSupplyItemCount(filterIndex);
     }
 
-    public int getSupplyItemCapacity(int filterIndex) {
-        return validFilterIndex(filterIndex)
-                ? Math.max(0, syncedData.get(DATA_ITEM_CAPACITIES + filterIndex))
-                : 0;
+    public long getSupplyItemCapacity(int filterIndex) {
+        return getItemTargetAmount(filterIndex);
     }
 
-    public int getFluidAmount(int filterIndex) {
-        return validFilterIndex(filterIndex)
-                ? Math.max(0, syncedData.get(DATA_FLUID_AMOUNTS + filterIndex))
-                : 0;
+    public long getItemTargetAmount(int filterIndex) {
+        if (!validFilterIndex(filterIndex)) return 0L;
+        if (isServerMenu()) {
+            return supplyBuffer.getItemTargetAmount(filterIndex);
+        }
+        return clientStateReceived
+                ? clientItemTargets[filterIndex]
+                : supplyBuffer.getItemTargetAmount(filterIndex);
     }
 
-    public int getFluidCapacity(int filterIndex) {
-        return validFilterIndex(filterIndex)
-                ? Math.max(0, syncedData.get(DATA_FLUID_CAPACITIES + filterIndex))
-                : 0;
+    public long getFluidAmount(int filterIndex) {
+        if (!validFilterIndex(filterIndex)) return 0L;
+        if (isServerMenu()) {
+            return supplyBuffer.getConfiguredFluidAmount(filterIndex);
+        }
+        return clientStateReceived
+                ? clientFluidAmounts[filterIndex]
+                : supplyBuffer.getConfiguredFluidAmount(filterIndex);
+    }
+
+    public long getFluidCapacity(int filterIndex) {
+        return getFluidTargetAmount(filterIndex);
+    }
+
+    public long getFluidTargetAmount(int filterIndex) {
+        if (!validFilterIndex(filterIndex)) return 0L;
+        if (isServerMenu()) {
+            return supplyBuffer.getFluidTargetAmount(filterIndex);
+        }
+        return clientStateReceived
+                ? clientFluidTargets[filterIndex]
+                : supplyBuffer.getFluidTargetAmount(filterIndex);
     }
 
     public boolean isLinkOnline() {
@@ -236,14 +267,27 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
         return syncedData.get(DATA_CLUSTER_ENABLED) != 0;
     }
 
+    public void applyClientState(
+            long[] itemAmounts,
+            long[] itemTargets,
+            long[] fluidAmounts,
+            long[] fluidTargets
+    ) {
+        copyState(itemAmounts, clientItemAmounts);
+        copyState(itemTargets, clientItemTargets);
+        copyState(fluidAmounts, clientFluidAmounts);
+        copyState(fluidTargets, clientFluidTargets);
+        clientStateReceived = true;
+    }
+
     @Override
     public void broadcastChanges() {
-        if (supplyBuffer.getLevel() != null && !supplyBuffer.getLevel().isClientSide) {
+        if (isServerMenu()) {
             syncedData.set(DATA_ROLE, supplyBuffer.getRole().ordinal());
             syncedData.set(DATA_ITEM_BELOW, supplyBuffer.getItemRefillBelowPercent());
-            syncedData.set(DATA_ITEM_TARGET, supplyBuffer.getItemRefillToPercent());
+            syncedData.set(DATA_ITEM_TARGET, 100);
             syncedData.set(DATA_FLUID_BELOW, supplyBuffer.getFluidRefillBelowPercent());
-            syncedData.set(DATA_FLUID_TARGET, supplyBuffer.getFluidRefillToPercent());
+            syncedData.set(DATA_FLUID_TARGET, 100);
 
             boolean online = supplyBuffer.getRole() == SupplyBufferRole.PROVIDER
                     ? supplyBuffer.isProviderAeOnline()
@@ -251,31 +295,30 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
             syncedData.set(DATA_LINK_ONLINE, online ? 1 : 0);
             syncedData.set(DATA_PENDING, supplyBuffer.getPendingTransferCount());
             syncedData.set(DATA_CLUSTER_ENABLED, SupplyBufferService.clusterEnabled() ? 1 : 0);
+        }
 
-            for (int filter = 0; filter < FILTER_COUNT; filter++) {
-                syncedData.set(
-                        DATA_ITEM_COUNTS + filter,
-                        clampToInt(supplyBuffer.getConfiguredSupplyItemCount(filter))
-                );
-                syncedData.set(
-                        DATA_ITEM_CAPACITIES + filter,
-                        clampToInt(supplyBuffer.getConfiguredSupplyItemCapacity(filter))
-                );
-                syncedData.set(
-                        DATA_FLUID_AMOUNTS + filter,
-                        supplyBuffer.getFluidTank(filter).getFluidAmount()
-                );
-                syncedData.set(
-                        DATA_FLUID_CAPACITIES + filter,
-                        supplyBuffer.getFluidTank(filter).getCapacity()
+        super.broadcastChanges();
+
+        if (isServerMenu() && menuPlayer instanceof ServerPlayer serverPlayer) {
+            stateSyncTicks++;
+            if (stateSyncTicks == 1 || stateSyncTicks % 10 == 0) {
+                SupplyBufferNetwork.CHANNEL.send(
+                        PacketDistributor.PLAYER.with(() -> serverPlayer),
+                        SupplyBufferStatePacket.from(supplyBuffer)
                 );
             }
         }
-        super.broadcastChanges();
     }
 
-    private static int clampToInt(long value) {
-        return (int) Math.max(0L, Math.min((long) Integer.MAX_VALUE, value));
+    private boolean isServerMenu() {
+        return supplyBuffer.getLevel() != null && !supplyBuffer.getLevel().isClientSide;
+    }
+
+    private static void copyState(long[] source, long[] target) {
+        for (int index = 0; index < target.length; index++) {
+            long value = source != null && index < source.length ? source[index] : 0L;
+            target[index] = Math.max(0L, Math.min(SupplyBufferBlockEntity.MAX_VIRTUAL_AMOUNT, value));
+        }
     }
 
     private static boolean validFilterIndex(int filterIndex) {
@@ -298,6 +341,25 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
             return ItemStack.EMPTY;
         }
 
+        if (index >= SUPPLY_START && index < SUPPLY_END) {
+            int virtualSlot = index - SUPPLY_START;
+            IItemHandler handler = supplyBuffer.getSupplyItems();
+            ItemStack simulated = handler.extractItem(virtualSlot, Integer.MAX_VALUE, true);
+            if (simulated.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+            ItemStack moving = simulated.copy();
+            if (!moveItemStackTo(moving, PLAYER_INVENTORY_START, HOTBAR_END, true)) {
+                return ItemStack.EMPTY;
+            }
+            int moved = simulated.getCount() - moving.getCount();
+            if (moved <= 0) {
+                return ItemStack.EMPTY;
+            }
+            ItemStack extracted = handler.extractItem(virtualSlot, moved, false);
+            return extracted.isEmpty() ? ItemStack.EMPTY : extracted.copy();
+        }
+
         Slot slot = slots.get(index);
         if (!slot.hasItem()) {
             return ItemStack.EMPTY;
@@ -306,11 +368,7 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
         ItemStack source = slot.getItem();
         ItemStack original = source.copy();
 
-        if (index >= SUPPLY_START && index < SUPPLY_END) {
-            if (!moveItemStackTo(source, PLAYER_INVENTORY_START, HOTBAR_END, true)) {
-                return ItemStack.EMPTY;
-            }
-        } else if (index >= EXPORT_START && index < EXPORT_END) {
+        if (index >= EXPORT_START && index < EXPORT_END) {
             if (!moveItemStackTo(source, PLAYER_INVENTORY_START, HOTBAR_END, true)) {
                 return ItemStack.EMPTY;
             }

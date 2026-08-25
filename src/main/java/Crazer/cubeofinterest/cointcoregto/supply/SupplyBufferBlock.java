@@ -141,15 +141,25 @@ public class SupplyBufferBlock extends BaseEntityBlock {
     ) {
         BlockEntity blockEntity = level.getBlockEntity(pos);
         if (!level.isClientSide
-                && blockEntity instanceof SupplyBufferBlockEntity supplyBuffer
-                && supplyBuffer.hasPendingTransfers()) {
-            player.displayClientMessage(
-                    net.minecraft.network.chat.Component.literal(
-                            "§cSupply Buffer нельзя ломать, пока есть незавершённые межсерверные операции."
-                    ),
-                    true
-            );
-            return false;
+                && blockEntity instanceof SupplyBufferBlockEntity supplyBuffer) {
+            if (supplyBuffer.hasPendingTransfers()) {
+                player.displayClientMessage(
+                        net.minecraft.network.chat.Component.literal(
+                                "§cSupply Buffer нельзя ломать, пока есть незавершённые межсерверные операции."
+                        ),
+                        true
+                );
+                return false;
+            }
+            if (supplyBuffer.hasStoredSupplyResources()) {
+                player.displayClientMessage(
+                        net.minecraft.network.chat.Component.literal(
+                                "§cСначала забери предметы и жидкости из виртуального запаса Supply Buffer."
+                        ),
+                        true
+                );
+                return false;
+            }
         }
         return super.onDestroyedByPlayer(state, level, pos, player, willHarvest, fluid);
     }
