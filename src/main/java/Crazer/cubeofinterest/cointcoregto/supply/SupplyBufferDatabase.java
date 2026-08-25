@@ -1,6 +1,10 @@
 package Crazer.cubeofinterest.cointcoregto.supply;
 
 import Crazer.cubeofinterest.cointcoregto.ClusterConfig;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -82,6 +86,183 @@ public final class SupplyBufferDatabase {
             Map<UUID, OperationResult> results,
             List<UUID> acknowledged
     ) {
+    }
+
+    public record ResourceSnapshot(
+            ResourceType resourceType,
+            int filterIndex,
+            String displayName,
+            long amount,
+            long capacity,
+            int refillBelowPercent,
+            int refillToPercent
+    ) {
+        public ResourceSnapshot {
+            resourceType = resourceType == null ? ResourceType.ITEM : resourceType;
+            filterIndex = Math.max(0, filterIndex);
+            displayName = displayName == null ? "" : displayName;
+            amount = Math.max(0L, amount);
+            capacity = Math.max(0L, capacity);
+            refillBelowPercent = Math.max(0, Math.min(100, refillBelowPercent));
+            refillToPercent = Math.max(0, Math.min(100, refillToPercent));
+        }
+    }
+
+    public record EndpointStatus(
+            String endpointId,
+            String linkId,
+            String role,
+            String nodeId,
+            String providerNode,
+            String dimensionId,
+            String blockPosition,
+            String ownerName,
+            boolean online,
+            boolean aeOnline,
+            boolean linkOnline,
+            int pendingCount,
+            long heartbeatAgeSeconds,
+            List<ResourceSnapshot> resources
+    ) {
+        public EndpointStatus {
+            endpointId = endpointId == null ? "" : endpointId;
+            linkId = linkId == null ? "" : linkId;
+            role = role == null ? "" : role;
+            nodeId = nodeId == null ? "" : nodeId;
+            providerNode = providerNode == null ? "" : providerNode;
+            dimensionId = dimensionId == null ? "" : dimensionId;
+            blockPosition = blockPosition == null ? "" : blockPosition;
+            ownerName = ownerName == null ? "" : ownerName;
+            pendingCount = Math.max(0, pendingCount);
+            heartbeatAgeSeconds = Math.max(0L, heartbeatAgeSeconds);
+            resources = resources == null ? List.of() : List.copyOf(resources);
+        }
+    }
+
+    public static void touchEndpoint(
+            ClusterConfig config,
+            String endpointId,
+            String linkId,
+            String role,
+            String nodeId,
+            String providerNode,
+            String dimensionId,
+            String blockPosition,
+            UUID ownerUuid,
+            String ownerName,
+            boolean aeOnline,
+            boolean linkOnline,
+            int pendingCount,
+            Collection<ResourceSnapshot> resources
+    ) throws SQLException {
+        ensureSchema(config);
+        String resourceJson = encodeResources(resources);
+
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     INSERT INTO cluster_supply_endpoints (
+                         endpoint_id, link_id, endpoint_role, node_id, provider_node,
+                         dimension_id, block_position, owner_uuid, owner_name,
+                         ae_online, link_online, pending_count, resource_snapshot, last_seen
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
+                     ON DUPLICATE KEY UPDATE
+                         link_id = VALUES(link_id),
+                         endpoint_role = VALUES(endpoint_role),
+                         node_id = VALUES(node_id),
+                         provider_node = VALUES(provider_node),
+                         dimension_id = VALUES(dimension_id),
+                         block_position = VALUES(block_position),
+                         owner_uuid = VALUES(owner_uuid),
+                         owner_name = VALUES(owner_name),
+                         ae_online = VALUES(ae_online),
+                         link_online = VALUES(link_online),
+                         pending_count = VALUES(pending_count),
+                         resource_snapshot = VALUES(resource_snapshot),
+                         last_seen = CURRENT_TIMESTAMP(3)
+                     """)) {
+            statement.setString(1, truncate(endpointId, 64));
+            statement.setString(2, truncate(linkId, 64));
+            statement.setString(3, truncate(role, 24));
+            statement.setString(4, truncate(nodeId, 64));
+            statement.setString(5, truncate(providerNode, 64));
+            statement.setString(6, truncate(dimensionId, 160));
+            statement.setString(7, truncate(blockPosition, 64));
+            if (ownerUuid == null) {
+                statement.setNull(8, java.sql.Types.CHAR);
+            } else {
+                statement.setString(8, ownerUuid.toString());
+            }
+            statement.setString(9, truncate(ownerName, 64));
+            statement.setBoolean(10, aeOnline);
+            statement.setBoolean(11, linkOnline);
+            statement.setInt(12, Math.max(0, pendingCount));
+            statement.setString(13, resourceJson);
+            statement.executeUpdate();
+        }
+    }
+
+    public static List<EndpointStatus> listEndpoints(ClusterConfig config) throws SQLException {
+        ensureSchema(config);
+        String sql = """
+                SELECT endpoints.endpoint_id, endpoints.link_id, endpoints.endpoint_role,
+                       endpoints.node_id, endpoints.provider_node, endpoints.dimension_id,
+                       endpoints.block_position, endpoints.owner_name, endpoints.ae_online,
+                       endpoints.link_online, endpoints.pending_count, endpoints.resource_snapshot,
+                       GREATEST(0, TIMESTAMPDIFF(SECOND, endpoints.last_seen, CURRENT_TIMESTAMP(3))) AS heartbeat_age_seconds,
+                       CASE
+                           WHEN endpoints.last_seen >= TIMESTAMPADD(SECOND, -?, CURRENT_TIMESTAMP(3))
+                            AND nodes.node_id IS NOT NULL
+                            AND nodes.stopped_at IS NULL
+                            AND nodes.last_seen >= TIMESTAMPADD(SECOND, -?, CURRENT_TIMESTAMP(3))
+                           THEN 1 ELSE 0
+                       END AS endpoint_online
+                FROM cluster_supply_endpoints AS endpoints
+                LEFT JOIN cluster_nodes AS nodes ON BINARY nodes.node_id = BINARY endpoints.node_id
+                WHERE endpoints.last_seen >= TIMESTAMPADD(MINUTE, -30, CURRENT_TIMESTAMP(3))
+                ORDER BY endpoints.node_id, endpoints.endpoint_role, endpoints.owner_name, endpoints.endpoint_id
+                """;
+
+        List<EndpointStatus> endpoints = new ArrayList<>();
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            int timeout = Math.max(5, config.nodeTimeoutSeconds());
+            statement.setInt(1, timeout);
+            statement.setInt(2, timeout);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    endpoints.add(new EndpointStatus(
+                            resultSet.getString("endpoint_id"),
+                            resultSet.getString("link_id"),
+                            resultSet.getString("endpoint_role"),
+                            resultSet.getString("node_id"),
+                            resultSet.getString("provider_node"),
+                            resultSet.getString("dimension_id"),
+                            resultSet.getString("block_position"),
+                            resultSet.getString("owner_name"),
+                            resultSet.getBoolean("endpoint_online"),
+                            resultSet.getBoolean("ae_online"),
+                            resultSet.getBoolean("link_online"),
+                            resultSet.getInt("pending_count"),
+                            resultSet.getLong("heartbeat_age_seconds"),
+                            decodeResources(resultSet.getString("resource_snapshot"))
+                    ));
+                }
+            }
+        }
+        return List.copyOf(endpoints);
+    }
+
+    public static int countActiveOperations(ClusterConfig config) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT COUNT(*)
+                     FROM cluster_supply_operations
+                     WHERE status IN ('PENDING', 'CLAIMED', 'APPLIED')
+                     """);
+             ResultSet resultSet = statement.executeQuery()) {
+            return resultSet.next() ? resultSet.getInt(1) : 0;
+        }
     }
 
     public static void touchProvider(
@@ -543,6 +724,28 @@ public final class SupplyBufferDatabase {
                         """);
 
                 statement.executeUpdate("""
+                        CREATE TABLE IF NOT EXISTS cluster_supply_endpoints (
+                            endpoint_id VARCHAR(64) NOT NULL PRIMARY KEY,
+                            link_id VARCHAR(64) NOT NULL,
+                            endpoint_role VARCHAR(24) NOT NULL,
+                            node_id VARCHAR(64) NOT NULL,
+                            provider_node VARCHAR(64) NOT NULL DEFAULT '',
+                            dimension_id VARCHAR(160) NOT NULL,
+                            block_position VARCHAR(64) NOT NULL,
+                            owner_uuid CHAR(36) NULL,
+                            owner_name VARCHAR(64) NOT NULL DEFAULT '',
+                            ae_online BOOLEAN NOT NULL DEFAULT FALSE,
+                            link_online BOOLEAN NOT NULL DEFAULT FALSE,
+                            pending_count INT NOT NULL DEFAULT 0,
+                            resource_snapshot LONGTEXT NOT NULL,
+                            last_seen TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                            INDEX idx_supply_endpoint_link (link_id, endpoint_role),
+                            INDEX idx_supply_endpoint_node (node_id, last_seen),
+                            INDEX idx_supply_endpoint_seen (last_seen)
+                        ) ENGINE=InnoDB
+                        """);
+
+                statement.executeUpdate("""
                         CREATE TABLE IF NOT EXISTS cluster_supply_operations (
                             operation_id CHAR(36) NOT NULL PRIMARY KEY,
                             link_id VARCHAR(64) NOT NULL,
@@ -566,6 +769,95 @@ public final class SupplyBufferDatabase {
             }
 
             initializedSchemaKey = schemaKey;
+        }
+    }
+
+    private static String encodeResources(Collection<ResourceSnapshot> resources) {
+        JsonArray array = new JsonArray();
+        if (resources != null) {
+            for (ResourceSnapshot resource : resources) {
+                if (resource == null || resource.displayName().isBlank()) {
+                    continue;
+                }
+                JsonObject object = new JsonObject();
+                object.addProperty("type", resource.resourceType().name());
+                object.addProperty("index", resource.filterIndex());
+                object.addProperty("name", truncate(resource.displayName(), 256));
+                object.addProperty("amount", Math.max(0L, resource.amount()));
+                object.addProperty("capacity", Math.max(0L, resource.capacity()));
+                object.addProperty("below", Math.max(0, Math.min(100, resource.refillBelowPercent())));
+                object.addProperty("target", Math.max(0, Math.min(100, resource.refillToPercent())));
+                array.add(object);
+            }
+        }
+        return array.toString();
+    }
+
+    private static List<ResourceSnapshot> decodeResources(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+
+        try {
+            JsonElement root = JsonParser.parseString(json);
+            if (!root.isJsonArray()) {
+                return List.of();
+            }
+
+            List<ResourceSnapshot> result = new ArrayList<>();
+            for (JsonElement element : root.getAsJsonArray()) {
+                if (!element.isJsonObject()) {
+                    continue;
+                }
+                JsonObject object = element.getAsJsonObject();
+                ResourceType type;
+                try {
+                    type = ResourceType.valueOf(readString(object, "type", "ITEM"));
+                } catch (IllegalArgumentException ignored) {
+                    type = ResourceType.ITEM;
+                }
+                result.add(new ResourceSnapshot(
+                        type,
+                        readInt(object, "index", 0),
+                        readString(object, "name", ""),
+                        readLong(object, "amount", 0L),
+                        readLong(object, "capacity", 0L),
+                        readInt(object, "below", 0),
+                        readInt(object, "target", 0)
+                ));
+            }
+            return List.copyOf(result);
+        } catch (RuntimeException ignored) {
+            return List.of();
+        }
+    }
+
+    private static String readString(JsonObject object, String key, String fallback) {
+        JsonElement element = object.get(key);
+        return element == null || element.isJsonNull() ? fallback : element.getAsString();
+    }
+
+    private static int readInt(JsonObject object, String key, int fallback) {
+        JsonElement element = object.get(key);
+        if (element == null || element.isJsonNull()) {
+            return fallback;
+        }
+        try {
+            return element.getAsInt();
+        } catch (RuntimeException ignored) {
+            return fallback;
+        }
+    }
+
+    private static long readLong(JsonObject object, String key, long fallback) {
+        JsonElement element = object.get(key);
+        if (element == null || element.isJsonNull()) {
+            return fallback;
+        }
+        try {
+            return element.getAsLong();
+        } catch (RuntimeException ignored) {
+            return fallback;
         }
     }
 

@@ -38,6 +38,45 @@ public final class SupplyBufferService {
         return config != null && config.enabled();
     }
 
+    public static CompletableFuture<Void> touchEndpoint(
+            String endpointId,
+            String linkId,
+            String role,
+            String providerNode,
+            String dimensionId,
+            String blockPosition,
+            UUID ownerUuid,
+            String ownerName,
+            boolean aeOnline,
+            boolean linkOnline,
+            int pendingCount,
+            Collection<SupplyBufferDatabase.ResourceSnapshot> resources
+    ) {
+        return CompletableFuture.runAsync(() -> {
+            ClusterConfig config = requireConfig();
+            try {
+                SupplyBufferDatabase.touchEndpoint(
+                        config,
+                        endpointId,
+                        linkId,
+                        role,
+                        config.nodeId(),
+                        providerNode,
+                        dimensionId,
+                        blockPosition,
+                        ownerUuid,
+                        ownerName,
+                        aeOnline,
+                        linkOnline,
+                        pendingCount,
+                        resources
+                );
+            } catch (Exception exception) {
+                throw new SupplyServiceException(exception);
+            }
+        }, EXECUTOR);
+    }
+
     public static CompletableFuture<Void> touchProvider(
             String linkId,
             String dimensionId,

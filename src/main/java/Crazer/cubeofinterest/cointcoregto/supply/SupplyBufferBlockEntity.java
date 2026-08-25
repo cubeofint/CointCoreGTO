@@ -74,6 +74,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
     private static final int REMOTE_SYNC_INTERVAL_TICKS = 10;
     private static final int PROVIDER_POLL_INTERVAL_TICKS = 10;
     private static final int PROVIDER_HEARTBEAT_INTERVAL_TICKS = 100;
+    private static final int MONITOR_HEARTBEAT_INTERVAL_TICKS = 100;
     private static final long MAX_OUTBOUND_BATCH = 4096L;
 
     private static final IGridNodeListener<SupplyBufferBlockEntity> NODE_LISTENER =
@@ -126,6 +127,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
     private LazyOptional<IFluidHandler> fluidOutputCapability = LazyOptional.of(() -> fluidOutputView);
 
     private SupplyBufferRole role = SupplyBufferRole.UNLINKED;
+    private UUID endpointId = UUID.randomUUID();
     private UUID ownerUuid;
     private String ownerName = "";
     private String linkId = "";
@@ -143,6 +145,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
 
     private transient CompletableFuture<SupplyBufferDatabase.RemoteSyncResult> remoteSyncFuture;
     private transient CompletableFuture<Void> providerHeartbeatFuture;
+    private transient CompletableFuture<Void> monitorHeartbeatFuture;
     private transient CompletableFuture<SupplyBufferDatabase.Operation> providerClaimFuture;
     private transient CompletableFuture<Void> providerOperationFuture;
     private transient ProviderFutureKind providerFutureKind = ProviderFutureKind.NONE;
@@ -192,6 +195,81 @@ public class SupplyBufferBlockEntity extends BlockEntity
         } else if (role == SupplyBufferRole.REMOTE) {
             tickRemote();
         }
+
+        tickMonitorHeartbeat();
+    }
+
+    private void tickMonitorHeartbeat() {
+        if (monitorHeartbeatFuture != null && monitorHeartbeatFuture.isDone()) {
+            try {
+                monitorHeartbeatFuture.join();
+            } catch (CompletionException exception) {
+                logAsyncError("monitor heartbeat", exception);
+            } finally {
+                monitorHeartbeatFuture = null;
+            }
+        }
+
+        if (monitorHeartbeatFuture != null
+                || (tickCounter != 1 && tickCounter % MONITOR_HEARTBEAT_INTERVAL_TICKS != 0)
+                || role == SupplyBufferRole.UNLINKED
+                || linkId.isBlank()
+                || level == null
+                || !SupplyBufferService.clusterEnabled()) {
+            return;
+        }
+
+        List<SupplyBufferDatabase.ResourceSnapshot> resources = new ArrayList<>();
+        if (role == SupplyBufferRole.REMOTE) {
+            for (int filterIndex = 0; filterIndex < REQUEST_FILTER_COUNT; filterIndex++) {
+                ItemStack item = getConfiguredItemStack(filterIndex);
+                if (!item.isEmpty()) {
+                    resources.add(new SupplyBufferDatabase.ResourceSnapshot(
+                            SupplyBufferDatabase.ResourceType.ITEM,
+                            filterIndex,
+                            item.getHoverName().getString(),
+                            getConfiguredSupplyItemCount(filterIndex),
+                            getConfiguredSupplyItemCapacity(filterIndex),
+                            itemRefillBelowPercent,
+                            itemRefillToPercent
+                    ));
+                }
+
+                FluidStack fluid = getConfiguredFluidStack(filterIndex);
+                if (!fluid.isEmpty()) {
+                    FluidTank tank = fluidTanks[filterIndex];
+                    resources.add(new SupplyBufferDatabase.ResourceSnapshot(
+                            SupplyBufferDatabase.ResourceType.FLUID,
+                            filterIndex,
+                            fluid.getDisplayName().getString(),
+                            tank.getFluidAmount(),
+                            tank.getCapacity(),
+                            fluidRefillBelowPercent,
+                            fluidRefillToPercent
+                    ));
+                }
+            }
+        }
+
+        boolean aeOnline = role == SupplyBufferRole.PROVIDER && isProviderAeOnline();
+        boolean linkOnline = role == SupplyBufferRole.PROVIDER
+                ? aeOnline
+                : isRemoteProviderOnline();
+
+        monitorHeartbeatFuture = SupplyBufferService.touchEndpoint(
+                endpointId.toString(),
+                linkId,
+                role.name(),
+                providerNode,
+                level.dimension().location().toString(),
+                worldPosition.getX() + "," + worldPosition.getY() + "," + worldPosition.getZ(),
+                ownerUuid,
+                ownerName,
+                aeOnline,
+                linkOnline,
+                getPendingTransferCount(),
+                resources
+        );
     }
 
     private void tickProvider() {
@@ -1459,6 +1537,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
     protected void saveAdditional(CompoundTag tag) {
         super.saveAdditional(tag);
         tag.putString("Role", role.name());
+        tag.putUUID("EndpointId", endpointId);
         tag.putString("LinkId", getLinkId());
         tag.putString("ProviderNode", getProviderNode());
         if (ownerUuid != null) {
@@ -1506,6 +1585,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
     public void load(CompoundTag tag) {
         super.load(tag);
         role = SupplyBufferRole.fromName(tag.getString("Role"));
+        endpointId = tag.hasUUID("EndpointId") ? tag.getUUID("EndpointId") : UUID.randomUUID();
         linkId = tag.getString("LinkId");
         providerNode = tag.getString("ProviderNode");
         ownerUuid = tag.hasUUID("OwnerUuid") ? tag.getUUID("OwnerUuid") : null;
