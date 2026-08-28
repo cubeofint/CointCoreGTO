@@ -77,6 +77,7 @@ public record ClusterMonitorSnapshot(
             boolean aeOnline,
             boolean linkOnline,
             int pendingCount,
+            int priority,
             long heartbeatAgeSeconds,
             List<ResourceEntry> resources
     ) {
@@ -89,6 +90,7 @@ public record ClusterMonitorSnapshot(
             dimensionId = dimensionId == null ? "" : dimensionId;
             blockPosition = blockPosition == null ? "" : blockPosition;
             ownerName = ownerName == null ? "" : ownerName;
+            priority = Math.max(0, priority);
             resources = resources == null ? List.of() : List.copyOf(resources);
         }
     }
@@ -104,6 +106,7 @@ public record ClusterMonitorSnapshot(
             String resourceKey,
             long requestedAmount,
             long deliveredAmount,
+            int priority,
             String status,
             String errorText,
             long createdAgeSeconds,
@@ -122,6 +125,7 @@ public record ClusterMonitorSnapshot(
             errorText = errorText == null ? "" : errorText;
             requestedAmount = Math.max(0L, requestedAmount);
             deliveredAmount = Math.max(0L, deliveredAmount);
+            priority = Math.max(0, priority);
             createdAgeSeconds = Math.max(0L, createdAgeSeconds);
             updatedAgeSeconds = Math.max(0L, updatedAgeSeconds);
         }

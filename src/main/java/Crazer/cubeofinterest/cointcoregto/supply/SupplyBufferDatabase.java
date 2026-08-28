@@ -13,6 +13,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -42,13 +45,67 @@ public final class SupplyBufferDatabase {
         FLUID
     }
 
+    public record WirelessCatalogEntry(
+            ResourceType resourceType,
+            String keyPayload,
+            long amount,
+            long revision
+    ) {
+        public WirelessCatalogEntry {
+            resourceType = resourceType == null ? ResourceType.ITEM : resourceType;
+            keyPayload = keyPayload == null ? "" : keyPayload;
+            amount = Math.max(0L, amount);
+            revision = Math.max(0L, revision);
+        }
+
+        public WirelessCatalogEntry(ResourceType resourceType, String keyPayload, long amount) {
+            this(resourceType, keyPayload, amount, 0L);
+        }
+    }
+
+    public record WirelessCatalogDelta(
+            String providerNode,
+            long revision,
+            List<WirelessCatalogEntry> entries
+    ) {
+        public WirelessCatalogDelta {
+            providerNode = providerNode == null ? "" : providerNode;
+            revision = Math.max(0L, revision);
+            entries = entries == null ? List.of() : List.copyOf(entries);
+        }
+    }
+
+    public record GtoWirelessNetworkSnapshot(
+            String networkId,
+            UUID ownerUuid,
+            String nickname,
+            int maxOutputsPerInput,
+            int inputCount,
+            int outputCount,
+            int totalCapacity
+    ) {
+        public GtoWirelessNetworkSnapshot {
+            networkId = networkId == null ? "" : networkId;
+            ownerUuid = ownerUuid == null ? new UUID(0L, 0L) : ownerUuid;
+            nickname = nickname == null ? "" : nickname;
+            maxOutputsPerInput = Math.max(1, maxOutputsPerInput);
+            inputCount = Math.max(0, inputCount);
+            outputCount = Math.max(0, outputCount);
+            totalCapacity = Math.max(0, totalCapacity);
+        }
+    }
+
     public record PendingDescriptor(
             UUID operationId,
             TransferDirection direction,
             ResourceType resourceType,
             String keyPayload,
-            long amount
+            long amount,
+            int priority
     ) {
+        public PendingDescriptor {
+            priority = Math.max(0, priority);
+        }
     }
 
     public record Operation(
@@ -60,10 +117,14 @@ public final class SupplyBufferDatabase {
             String keyPayload,
             long requestedAmount,
             long deliveredAmount,
+            int priority,
             String status,
             String claimedBy,
             String errorText
     ) {
+        public Operation {
+            priority = Math.max(0, priority);
+        }
     }
 
     public record MonitorOperation(
@@ -76,6 +137,7 @@ public final class SupplyBufferDatabase {
             String keyPayload,
             long requestedAmount,
             long deliveredAmount,
+            int priority,
             String status,
             String errorText,
             long createdAgeSeconds,
@@ -90,6 +152,7 @@ public final class SupplyBufferDatabase {
             errorText = errorText == null ? "" : errorText;
             requestedAmount = Math.max(0L, requestedAmount);
             deliveredAmount = Math.max(0L, deliveredAmount);
+            priority = Math.max(0, priority);
             createdAgeSeconds = Math.max(0L, createdAgeSeconds);
             updatedAgeSeconds = Math.max(0L, updatedAgeSeconds);
         }
@@ -164,6 +227,7 @@ public final class SupplyBufferDatabase {
             boolean aeOnline,
             boolean linkOnline,
             int pendingCount,
+            int priority,
             long heartbeatAgeSeconds,
             List<ResourceSnapshot> resources
     ) {
@@ -177,6 +241,7 @@ public final class SupplyBufferDatabase {
             blockPosition = blockPosition == null ? "" : blockPosition;
             ownerName = ownerName == null ? "" : ownerName;
             pendingCount = Math.max(0, pendingCount);
+            priority = Math.max(0, priority);
             heartbeatAgeSeconds = Math.max(0L, heartbeatAgeSeconds);
             resources = resources == null ? List.of() : List.copyOf(resources);
         }
@@ -196,6 +261,7 @@ public final class SupplyBufferDatabase {
             boolean aeOnline,
             boolean linkOnline,
             int pendingCount,
+            int priority,
             Collection<ResourceSnapshot> resources
     ) throws SQLException {
         ensureSchema(config);
@@ -206,8 +272,8 @@ public final class SupplyBufferDatabase {
                      INSERT INTO cluster_supply_endpoints (
                          endpoint_id, link_id, endpoint_role, node_id, provider_node,
                          dimension_id, block_position, owner_uuid, owner_name,
-                         ae_online, link_online, pending_count, resource_snapshot, last_seen
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
+                         ae_online, link_online, pending_count, priority, resource_snapshot, last_seen
+                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
                      ON DUPLICATE KEY UPDATE
                          link_id = VALUES(link_id),
                          endpoint_role = VALUES(endpoint_role),
@@ -220,6 +286,7 @@ public final class SupplyBufferDatabase {
                          ae_online = VALUES(ae_online),
                          link_online = VALUES(link_online),
                          pending_count = VALUES(pending_count),
+                         priority = VALUES(priority),
                          resource_snapshot = VALUES(resource_snapshot),
                          last_seen = CURRENT_TIMESTAMP(3)
                      """)) {
@@ -239,7 +306,8 @@ public final class SupplyBufferDatabase {
             statement.setBoolean(10, aeOnline);
             statement.setBoolean(11, linkOnline);
             statement.setInt(12, Math.max(0, pendingCount));
-            statement.setString(13, resourceJson);
+            statement.setInt(13, Math.max(0, priority));
+            statement.setString(14, resourceJson);
             statement.executeUpdate();
         }
     }
@@ -250,7 +318,7 @@ public final class SupplyBufferDatabase {
                 SELECT endpoints.endpoint_id, endpoints.link_id, endpoints.endpoint_role,
                        endpoints.node_id, endpoints.provider_node, endpoints.dimension_id,
                        endpoints.block_position, endpoints.owner_name, endpoints.ae_online,
-                       endpoints.link_online, endpoints.pending_count, endpoints.resource_snapshot,
+                       endpoints.link_online, endpoints.pending_count, endpoints.priority, endpoints.resource_snapshot,
                        GREATEST(0, TIMESTAMPDIFF(SECOND, endpoints.last_seen, CURRENT_TIMESTAMP(3))) AS heartbeat_age_seconds,
                        CASE
                            WHEN endpoints.last_seen >= TIMESTAMPADD(SECOND, -?, CURRENT_TIMESTAMP(3))
@@ -286,6 +354,7 @@ public final class SupplyBufferDatabase {
                             resultSet.getBoolean("ae_online"),
                             resultSet.getBoolean("link_online"),
                             resultSet.getInt("pending_count"),
+                            resultSet.getInt("priority"),
                             resultSet.getLong("heartbeat_age_seconds"),
                             decodeResources(resultSet.getString("resource_snapshot"))
                     ));
@@ -318,7 +387,7 @@ public final class SupplyBufferDatabase {
                 SELECT operations.operation_id, operations.link_id, operations.source_node,
                        COALESCE(NULLIF(operations.claimed_by, ''), providers.node_id, '') AS provider_node,
                        operations.direction, operations.resource_type, operations.resource_nbt,
-                       operations.requested_amount, operations.delivered_amount, operations.status,
+                       operations.requested_amount, operations.delivered_amount, operations.priority, operations.status,
                        COALESCE(operations.error_text, '') AS error_text,
                        GREATEST(0, TIMESTAMPDIFF(SECOND, operations.created_at, CURRENT_TIMESTAMP(3))) AS created_age_seconds,
                        GREATEST(0, TIMESTAMPDIFF(SECOND, operations.updated_at, CURRENT_TIMESTAMP(3))) AS updated_age_seconds
@@ -361,6 +430,7 @@ public final class SupplyBufferDatabase {
                             resultSet.getString("resource_nbt"),
                             resultSet.getLong("requested_amount"),
                             resultSet.getLong("delivered_amount"),
+                            resultSet.getInt("priority"),
                             resultSet.getString("status"),
                             resultSet.getString("error_text"),
                             resultSet.getLong("created_age_seconds"),
@@ -404,6 +474,365 @@ public final class SupplyBufferDatabase {
         cleanupConsumed(config);
     }
 
+    public static String findMainNode(ClusterConfig config) throws SQLException {
+        ensureSchema(config);
+        if (isMainRole(config.nodeRole())) {
+            return config.nodeId();
+        }
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT node_id
+                     FROM cluster_nodes
+                     WHERE LOWER(node_role) IN ('general', 'main')
+                       AND last_seen >= TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP(3))
+                     ORDER BY last_seen DESC, node_id ASC
+                     LIMIT 1
+                     """)) {
+            statement.setInt(1, -Math.max(5, config.nodeTimeoutSeconds() * 2));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? resultSet.getString(1) : "";
+            }
+        }
+    }
+
+    public static void replaceGtoWirelessNetworks(
+            ClusterConfig config,
+            String providerNode,
+            Collection<GtoWirelessNetworkSnapshot> networks
+    ) throws SQLException {
+        ensureSchema(config);
+        String node = truncate(providerNode, 64);
+        if (node.isBlank()) {
+            return;
+        }
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement clear = connection.prepareStatement("""
+                        DELETE FROM cluster_gto_wireless_networks
+                        WHERE BINARY provider_node = BINARY ?
+                        """)) {
+                    clear.setString(1, node);
+                    clear.executeUpdate();
+                }
+
+                if (networks != null && !networks.isEmpty()) {
+                    try (PreparedStatement statement = connection.prepareStatement("""
+                            INSERT INTO cluster_gto_wireless_networks (
+                                provider_node, network_id, owner_uuid, nickname, max_outputs_per_input,
+                                input_count, output_count, total_capacity, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
+                            """)) {
+                        for (GtoWirelessNetworkSnapshot network : networks) {
+                            if (network == null || network.networkId().isBlank()) {
+                                continue;
+                            }
+                            statement.setString(1, node);
+                            statement.setString(2, truncate(network.networkId(), 64));
+                            statement.setString(3, network.ownerUuid().toString());
+                            statement.setString(4, truncate(network.nickname(), 128));
+                            statement.setInt(5, Math.max(1, network.maxOutputsPerInput()));
+                            statement.setInt(6, Math.max(0, network.inputCount()));
+                            statement.setInt(7, Math.max(0, network.outputCount()));
+                            statement.setInt(8, Math.max(0, network.totalCapacity()));
+                            statement.addBatch();
+                        }
+                        statement.executeBatch();
+                    }
+                }
+                connection.commit();
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static List<GtoWirelessNetworkSnapshot> readGtoWirelessNetworks(
+            ClusterConfig config,
+            String providerNode
+    ) throws SQLException {
+        ensureSchema(config);
+        String node = truncate(providerNode, 64);
+
+        // Only the current MAIN node publishes this table. PERSONAL nodes never
+        // publish their local GTO networks, so an empty provider can read the fresh
+        // publisher rows directly. This intentionally avoids coupling native GTO
+        // registry visibility to cluster_nodes role/heartbeat joins: the 30-second
+        // freshness window already drops rows left by an old MAIN after failover.
+        String sql = node.isBlank()
+                ? """
+                  SELECT network_id, owner_uuid, nickname, max_outputs_per_input,
+                         input_count, output_count, total_capacity
+                  FROM cluster_gto_wireless_networks
+                  WHERE updated_at >= TIMESTAMPADD(SECOND, -30, CURRENT_TIMESTAMP(3))
+                  ORDER BY updated_at DESC, nickname ASC, network_id ASC
+                  """
+                : """
+                  SELECT network_id, owner_uuid, nickname, max_outputs_per_input,
+                         input_count, output_count, total_capacity
+                  FROM cluster_gto_wireless_networks
+                  WHERE BINARY provider_node = BINARY ?
+                    AND updated_at >= TIMESTAMPADD(SECOND, -30, CURRENT_TIMESTAMP(3))
+                  ORDER BY nickname ASC, network_id ASC
+                  """;
+
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            if (!node.isBlank()) {
+                statement.setString(1, node);
+            }
+
+            List<GtoWirelessNetworkSnapshot> result = new ArrayList<>();
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    UUID owner;
+                    try {
+                        owner = UUID.fromString(rs.getString(2));
+                    } catch (RuntimeException ignored) {
+                        owner = new UUID(0L, 0L);
+                    }
+                    result.add(new GtoWirelessNetworkSnapshot(
+                            rs.getString(1),
+                            owner,
+                            rs.getString(3),
+                            rs.getInt(4),
+                            rs.getInt(5),
+                            rs.getInt(6),
+                            rs.getInt(7)
+                    ));
+                }
+            }
+            return result;
+        }
+    }
+
+    public static long replaceWirelessCatalog(
+            ClusterConfig config,
+            String providerNode,
+            Collection<WirelessCatalogEntry> entries
+    ) throws SQLException {
+        ensureSchema(config);
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                long revision = nextWirelessCatalogRevision(connection, providerNode);
+                try (PreparedStatement clear = connection.prepareStatement("""
+                        UPDATE cluster_wireless_catalog
+                        SET amount = 0, revision = ?, updated_at = CURRENT_TIMESTAMP(3)
+                        WHERE BINARY provider_node = BINARY ? AND amount <> 0
+                        """)) {
+                    clear.setLong(1, revision);
+                    clear.setString(2, truncate(providerNode, 64));
+                    clear.executeUpdate();
+                }
+                upsertWirelessCatalogEntries(connection, providerNode, revision, entries);
+                connection.commit();
+                return revision;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static long updateWirelessCatalog(
+            ClusterConfig config,
+            String providerNode,
+            Collection<WirelessCatalogEntry> entries
+    ) throws SQLException {
+        ensureSchema(config);
+        if (entries == null || entries.isEmpty()) {
+            return currentWirelessCatalogRevision(config, providerNode);
+        }
+        try (Connection connection = open(config)) {
+            connection.setAutoCommit(false);
+            try {
+                long revision = nextWirelessCatalogRevision(connection, providerNode);
+                upsertWirelessCatalogEntries(connection, providerNode, revision, entries);
+                connection.commit();
+                return revision;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                throw exception;
+            } finally {
+                restoreAutoCommit(connection);
+            }
+        }
+    }
+
+    public static WirelessCatalogDelta readWirelessCatalogDelta(
+            ClusterConfig config,
+            String providerNode,
+            long afterRevision
+    ) throws SQLException {
+        ensureSchema(config);
+        String node = truncate(providerNode, 64);
+        if (node.isBlank()) {
+            return new WirelessCatalogDelta("", 0L, List.of());
+        }
+        try (Connection connection = open(config)) {
+            long current = 0L;
+            try (PreparedStatement meta = connection.prepareStatement("""
+                    SELECT revision FROM cluster_wireless_catalog_meta
+                    WHERE BINARY provider_node = BINARY ?
+                    """)) {
+                meta.setString(1, node);
+                try (ResultSet rs = meta.executeQuery()) {
+                    if (rs.next()) {
+                        current = Math.max(0L, rs.getLong(1));
+                    }
+                }
+            }
+            boolean full = afterRevision <= 0L || afterRevision > current;
+            List<WirelessCatalogEntry> result = new ArrayList<>();
+            String sql = full
+                    ? """
+                      SELECT resource_type, resource_nbt, amount, revision
+                      FROM cluster_wireless_catalog
+                      WHERE BINARY provider_node = BINARY ? AND amount > 0
+                      """
+                    : """
+                      SELECT resource_type, resource_nbt, amount, revision
+                      FROM cluster_wireless_catalog
+                      WHERE BINARY provider_node = BINARY ? AND revision > ?
+                      """;
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, node);
+                if (!full) {
+                    statement.setLong(2, afterRevision);
+                }
+                try (ResultSet rs = statement.executeQuery()) {
+                    while (rs.next()) {
+                        ResourceType type;
+                        try {
+                            type = ResourceType.valueOf(rs.getString(1));
+                        } catch (RuntimeException ignored) {
+                            continue;
+                        }
+                        result.add(new WirelessCatalogEntry(
+                                type,
+                                rs.getString(2),
+                                Math.max(0L, rs.getLong(3)),
+                                Math.max(0L, rs.getLong(4))
+                        ));
+                    }
+                }
+            }
+            return new WirelessCatalogDelta(node, current, result);
+        }
+    }
+
+    private static long currentWirelessCatalogRevision(ClusterConfig config, String providerNode) throws SQLException {
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement("""
+                     SELECT revision FROM cluster_wireless_catalog_meta
+                     WHERE BINARY provider_node = BINARY ?
+                     """)) {
+            statement.setString(1, truncate(providerNode, 64));
+            try (ResultSet rs = statement.executeQuery()) {
+                return rs.next() ? Math.max(0L, rs.getLong(1)) : 0L;
+            }
+        }
+    }
+
+    private static long nextWirelessCatalogRevision(Connection connection, String providerNode) throws SQLException {
+        String node = truncate(providerNode, 64);
+        try (PreparedStatement ensure = connection.prepareStatement("""
+                INSERT INTO cluster_wireless_catalog_meta (provider_node, revision, updated_at)
+                VALUES (?, 0, CURRENT_TIMESTAMP(3))
+                ON DUPLICATE KEY UPDATE provider_node = provider_node
+                """)) {
+            ensure.setString(1, node);
+            ensure.executeUpdate();
+        }
+        long current;
+        try (PreparedStatement lock = connection.prepareStatement("""
+                SELECT revision FROM cluster_wireless_catalog_meta
+                WHERE BINARY provider_node = BINARY ? FOR UPDATE
+                """)) {
+            lock.setString(1, node);
+            try (ResultSet rs = lock.executeQuery()) {
+                current = rs.next() ? rs.getLong(1) : 0L;
+            }
+        }
+        long next = current >= Long.MAX_VALUE - 1L ? 1L : current + 1L;
+        try (PreparedStatement update = connection.prepareStatement("""
+                UPDATE cluster_wireless_catalog_meta
+                SET revision = ?, updated_at = CURRENT_TIMESTAMP(3)
+                WHERE BINARY provider_node = BINARY ?
+                """)) {
+            update.setLong(1, next);
+            update.setString(2, node);
+            update.executeUpdate();
+        }
+        return next;
+    }
+
+    private static void upsertWirelessCatalogEntries(
+            Connection connection,
+            String providerNode,
+            long revision,
+            Collection<WirelessCatalogEntry> entries
+    ) throws SQLException {
+        if (entries == null || entries.isEmpty()) {
+            return;
+        }
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO cluster_wireless_catalog (
+                    provider_node, resource_hash, resource_type, resource_nbt, amount, revision, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
+                ON DUPLICATE KEY UPDATE
+                    resource_type = VALUES(resource_type),
+                    resource_nbt = VALUES(resource_nbt),
+                    amount = VALUES(amount),
+                    revision = VALUES(revision),
+                    updated_at = CURRENT_TIMESTAMP(3)
+                """)) {
+            String node = truncate(providerNode, 64);
+            for (WirelessCatalogEntry entry : entries) {
+                if (entry == null || entry.keyPayload().isBlank()) {
+                    continue;
+                }
+                statement.setString(1, node);
+                statement.setString(2, sha256(entry.keyPayload()));
+                statement.setString(3, entry.resourceType().name());
+                statement.setString(4, entry.keyPayload());
+                statement.setLong(5, Math.max(0L, entry.amount()));
+                statement.setLong(6, Math.max(0L, revision));
+                statement.addBatch();
+            }
+            statement.executeBatch();
+        }
+    }
+
+    private static boolean isMainRole(String role) {
+        if (role == null) {
+            return false;
+        }
+        String normalized = role.trim().toLowerCase(java.util.Locale.ROOT);
+        return "general".equals(normalized) || "main".equals(normalized);
+    }
+
+    private static String sha256(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder result = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                result.append(Character.forDigit((b >>> 4) & 0xF, 16));
+                result.append(Character.forDigit(b & 0xF, 16));
+            }
+            return result.toString();
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        }
+    }
+
     public static Operation claimNext(
             ClusterConfig config,
             String linkId,
@@ -419,11 +848,14 @@ public final class SupplyBufferDatabase {
                 Operation selected = null;
                 try (PreparedStatement statement = connection.prepareStatement("""
                         SELECT operation_id, link_id, source_node, direction, resource_type,
-                               resource_nbt, requested_amount, delivered_amount, status,
+                               resource_nbt, requested_amount, delivered_amount, priority, status,
                                claimed_by, error_text
                         FROM cluster_supply_operations
-                        WHERE link_id = ? AND status = 'PENDING'
-                        ORDER BY updated_at ASC, created_at ASC
+                        WHERE link_id = ?
+                          AND status = 'PENDING'
+                          AND (error_text IS NULL
+                               OR updated_at < TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(3)))
+                        ORDER BY priority DESC, created_at ASC
                         LIMIT 1
                         FOR UPDATE
                         """)) {
@@ -466,6 +898,7 @@ public final class SupplyBufferDatabase {
                         selected.keyPayload(),
                         selected.requestedAmount(),
                         selected.deliveredAmount(),
+                        selected.priority(),
                         "CLAIMED",
                         providerNode,
                         selected.errorText()
@@ -705,10 +1138,11 @@ public final class SupplyBufferDatabase {
         try (PreparedStatement statement = connection.prepareStatement("""
                 INSERT INTO cluster_supply_operations (
                     operation_id, link_id, source_node, direction, resource_type,
-                    resource_nbt, requested_amount, delivered_amount, status,
+                    resource_nbt, requested_amount, delivered_amount, priority, status,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'PENDING', CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
-                ON DUPLICATE KEY UPDATE operation_id = operation_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'PENDING', CURRENT_TIMESTAMP(3), CURRENT_TIMESTAMP(3))
+                ON DUPLICATE KEY UPDATE
+                    priority = IF(status = 'PENDING', VALUES(priority), priority)
                 """)) {
             statement.setString(1, descriptor.operationId().toString());
             statement.setString(2, truncate(linkId, 64));
@@ -717,6 +1151,7 @@ public final class SupplyBufferDatabase {
             statement.setString(5, descriptor.resourceType().name());
             statement.setString(6, descriptor.keyPayload());
             statement.setLong(7, Math.max(1L, descriptor.amount()));
+            statement.setInt(8, Math.max(0, descriptor.priority()));
             statement.executeUpdate();
         }
     }
@@ -833,6 +1268,7 @@ public final class SupplyBufferDatabase {
                 resultSet.getString("resource_nbt"),
                 resultSet.getLong("requested_amount"),
                 resultSet.getLong("delivered_amount"),
+                resultSet.getInt("priority"),
                 resultSet.getString("status"),
                 resultSet.getString("claimed_by"),
                 resultSet.getString("error_text")
@@ -918,6 +1354,7 @@ public final class SupplyBufferDatabase {
                             ae_online BOOLEAN NOT NULL DEFAULT FALSE,
                             link_online BOOLEAN NOT NULL DEFAULT FALSE,
                             pending_count INT NOT NULL DEFAULT 0,
+                            priority INT NOT NULL DEFAULT 0,
                             resource_snapshot LONGTEXT NOT NULL,
                             last_seen TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
                             INDEX idx_supply_endpoint_link (link_id, endpoint_role),
@@ -936,6 +1373,7 @@ public final class SupplyBufferDatabase {
                             resource_nbt LONGTEXT NOT NULL,
                             requested_amount BIGINT NOT NULL,
                             delivered_amount BIGINT NOT NULL DEFAULT 0,
+                            priority INT NOT NULL DEFAULT 0,
                             status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
                             claimed_by VARCHAR(64) NULL,
                             claimed_at TIMESTAMP(3) NULL,
@@ -947,9 +1385,80 @@ public final class SupplyBufferDatabase {
                             INDEX idx_supply_source (source_node, status)
                         ) ENGINE=InnoDB
                         """);
+
+                statement.executeUpdate("""
+                        CREATE TABLE IF NOT EXISTS cluster_wireless_catalog_meta (
+                            provider_node VARCHAR(64) NOT NULL PRIMARY KEY,
+                            revision BIGINT NOT NULL DEFAULT 0,
+                            updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+                        ) ENGINE=InnoDB
+                        """);
+
+                statement.executeUpdate("""
+                        CREATE TABLE IF NOT EXISTS cluster_wireless_catalog (
+                            provider_node VARCHAR(64) NOT NULL,
+                            resource_hash CHAR(64) NOT NULL,
+                            resource_type VARCHAR(16) NOT NULL,
+                            resource_nbt LONGTEXT NOT NULL,
+                            amount BIGINT NOT NULL DEFAULT 0,
+                            revision BIGINT NOT NULL DEFAULT 0,
+                            updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                            PRIMARY KEY (provider_node, resource_hash),
+                            INDEX idx_wireless_catalog_revision (provider_node, revision)
+                        ) ENGINE=InnoDB
+                        """);
+
+                statement.executeUpdate("""
+                        CREATE TABLE IF NOT EXISTS cluster_gto_wireless_networks (
+                            provider_node VARCHAR(64) NOT NULL,
+                            network_id VARCHAR(64) NOT NULL,
+                            owner_uuid CHAR(36) NOT NULL,
+                            nickname VARCHAR(128) NOT NULL DEFAULT '',
+                            max_outputs_per_input INT NOT NULL DEFAULT 1,
+                            input_count INT NOT NULL DEFAULT 0,
+                            output_count INT NOT NULL DEFAULT 0,
+                            total_capacity INT NOT NULL DEFAULT 0,
+                            updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+                            PRIMARY KEY (provider_node, network_id),
+                            INDEX idx_gto_wireless_seen (provider_node, updated_at)
+                        ) ENGINE=InnoDB
+                        """);
+
+                ensureIntColumn(connection, "cluster_supply_endpoints", "priority");
+                ensureIntColumn(connection, "cluster_supply_operations", "priority");
             }
 
             initializedSchemaKey = schemaKey;
+        }
+    }
+
+    private static void ensureIntColumn(Connection connection, String table, String column) throws SQLException {
+        boolean exists;
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT 1
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = ?
+                  AND COLUMN_NAME = ?
+                LIMIT 1
+                """)) {
+            statement.setString(1, table);
+            statement.setString(2, column);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                exists = resultSet.next();
+            }
+        }
+        if (exists) {
+            return;
+        }
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("ALTER TABLE " + table
+                    + " ADD COLUMN " + column + " INT NOT NULL DEFAULT 0");
+        } catch (SQLException exception) {
+            // Two cluster nodes may start at the same time and race the one-time schema migration.
+            if (exception.getErrorCode() != 1060 && !"42S21".equals(exception.getSQLState())) {
+                throw exception;
+            }
         }
     }
 

@@ -60,7 +60,7 @@ public record SupplyBufferFilterPacket(
             BlockEntity blockEntity = player.level().getBlockEntity(packet.pos());
             if (blockEntity instanceof SupplyBufferBlockEntity supplyBuffer
                     && supplyBuffer.canEdit(player)
-                    && supplyBuffer.getRole() == SupplyBufferRole.REMOTE) {
+                    && supplyBuffer.getRole() != SupplyBufferRole.UNLINKED) {
                 supplyBuffer.setFilterPayload(
                         packet.resourceType(),
                         packet.filterIndex(),

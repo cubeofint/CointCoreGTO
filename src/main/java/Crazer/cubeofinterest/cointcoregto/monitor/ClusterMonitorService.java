@@ -97,6 +97,7 @@ public final class ClusterMonitorService {
                             endpoint.aeOnline(),
                             endpoint.linkOnline(),
                             endpoint.pendingCount(),
+                            endpoint.priority(),
                             endpoint.heartbeatAgeSeconds(),
                             resources
                     ));
@@ -159,6 +160,7 @@ public final class ClusterMonitorService {
                     resourceKey,
                     operation.requestedAmount(),
                     operation.deliveredAmount(),
+                    operation.priority(),
                     operation.status(),
                     operation.errorText(),
                     operation.createdAgeSeconds(),

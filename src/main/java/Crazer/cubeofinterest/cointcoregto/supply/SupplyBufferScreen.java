@@ -32,6 +32,7 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
     private Button fluidBelowButton;
     private EditBox itemTargetBox;
     private EditBox fluidTargetBox;
+    private EditBox priorityBox;
     private int selectedItemFilter = 0;
     private int selectedFluidFilter = 0;
 
@@ -85,6 +86,17 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
         fluidTargetBox.setMaxLength(24);
         fluidTargetBox.setHint(Component.literal("mB"));
 
+        priorityBox = addRenderableWidget(new EditBox(
+                font,
+                leftPos + 171,
+                topPos + 15,
+                51,
+                16,
+                Component.literal("Приоритет")
+        ));
+        priorityBox.setMaxLength(7);
+        priorityBox.setHint(Component.literal("0"));
+
         selectedItemFilter = firstConfiguredItemFilter();
         selectedFluidFilter = firstConfiguredFluidFilter();
         refreshControls(true);
@@ -119,7 +131,7 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
             int filterIndex,
             String payload
     ) {
-        if (!menu.canEdit() || menu.getRole() != SupplyBufferRole.REMOTE) {
+        if (!menu.canEdit() || menu.getRole() == SupplyBufferRole.UNLINKED) {
             return;
         }
         SupplyBufferNetwork.CHANNEL.sendToServer(new SupplyBufferFilterPacket(
@@ -136,7 +148,7 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
             long target
     ) {
         if (!menu.canEdit()
-                || menu.getRole() != SupplyBufferRole.REMOTE
+                || menu.getRole() == SupplyBufferRole.UNLINKED
                 || !validFilterIndex(filterIndex)
                 || target <= 0L) {
             return;
@@ -154,7 +166,7 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
                 || stack == null
                 || stack.isEmpty()
                 || !menu.canEdit()
-                || menu.getRole() != SupplyBufferRole.REMOTE) {
+                || menu.getRole() == SupplyBufferRole.UNLINKED) {
             return false;
         }
         AEItemKey key = AEItemKey.of(stack);
@@ -175,7 +187,7 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
                 || stack == null
                 || stack.isEmpty()
                 || !menu.canEdit()
-                || menu.getRole() != SupplyBufferRole.REMOTE) {
+                || menu.getRole() == SupplyBufferRole.UNLINKED) {
             return false;
         }
         AEFluidKey key = AEFluidKey.of(stack);
@@ -192,7 +204,7 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
     }
 
     public boolean canAcceptEmiFilterDrops() {
-        return menu.canEdit() && menu.getRole() == SupplyBufferRole.REMOTE;
+        return menu.canEdit() && menu.getRole() != SupplyBufferRole.UNLINKED;
     }
 
     public int getFilterScreenX(int filterIndex) {
@@ -250,14 +262,15 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
     }
 
     private void refreshControls(boolean forceText) {
-        boolean active = menu.canEdit() && menu.getRole() == SupplyBufferRole.REMOTE;
+        boolean active = menu.canEdit() && menu.getRole() != SupplyBufferRole.UNLINKED;
+        boolean thresholdActive = menu.canEdit() && menu.getRole() == SupplyBufferRole.REMOTE;
         if (itemBelowButton != null) {
-            itemBelowButton.active = active;
-            itemBelowButton.setMessage(Component.literal("< " + menu.getItemRefillBelowPercent() + "%"));
+            itemBelowButton.active = thresholdActive;
+            itemBelowButton.setMessage(Component.literal(menu.getRole() == SupplyBufferRole.PROVIDER ? "РЕЗЕРВ" : "< " + menu.getItemRefillBelowPercent() + "%"));
         }
         if (fluidBelowButton != null) {
-            fluidBelowButton.active = active;
-            fluidBelowButton.setMessage(Component.literal("< " + menu.getFluidRefillBelowPercent() + "%"));
+            fluidBelowButton.active = thresholdActive;
+            fluidBelowButton.setMessage(Component.literal(menu.getRole() == SupplyBufferRole.PROVIDER ? "РЕЗЕРВ" : "< " + menu.getFluidRefillBelowPercent() + "%"));
         }
 
         boolean itemConfigured = validFilterIndex(selectedItemFilter)
@@ -269,6 +282,16 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
                 itemTargetBox.setTextColor(0xFFFFFF);
             } else if ((forceText || !itemTargetBox.isFocused()) && !itemConfigured) {
                 setBoxValueIfDifferent(itemTargetBox, "");
+            }
+        }
+
+        if (priorityBox != null) {
+            boolean priorityVisible = menu.getRole() == SupplyBufferRole.REMOTE;
+            priorityBox.visible = priorityVisible;
+            priorityBox.setEditable(priorityVisible && menu.canEdit());
+            if (priorityVisible && (forceText || !priorityBox.isFocused())) {
+                setBoxValueIfDifferent(priorityBox, Integer.toString(menu.getPriority()));
+                priorityBox.setTextColor(0xFFFFFF);
             }
         }
 
@@ -321,6 +344,44 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
         return true;
     }
 
+    private void sendPriority(int priority) {
+        if (!menu.canEdit() || menu.getRole() != SupplyBufferRole.REMOTE) {
+            return;
+        }
+        SupplyBufferNetwork.CHANNEL.sendToServer(new SupplyBufferPriorityPacket(
+                menu.getBlockPos(),
+                Math.max(0, Math.min(SupplyBufferBlockEntity.MAX_PRIORITY, priority))
+        ));
+    }
+
+    private boolean commitPriority() {
+        if (priorityBox == null || menu.getRole() != SupplyBufferRole.REMOTE) {
+            return false;
+        }
+        int value = parsePriority(priorityBox.getValue());
+        if (value < 0) {
+            priorityBox.setTextColor(0xFF5555);
+            return false;
+        }
+        priorityBox.setTextColor(0xFFFFFF);
+        priorityBox.setValue(Integer.toString(value));
+        sendPriority(value);
+        return true;
+    }
+
+    private static int parsePriority(String text) {
+        if (text == null) return -1;
+        String value = text.trim().replace(" ", "").replace("_", "").replace(",", "");
+        if (value.isEmpty()) return -1;
+        try {
+            long parsed = Long.parseLong(value);
+            if (parsed < 0L) return -1;
+            return (int) Math.min((long) SupplyBufferBlockEntity.MAX_PRIORITY, parsed);
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
     private static long parseAmount(String text) {
         if (text == null) return -1L;
         String value = text.trim().toLowerCase(Locale.ROOT)
@@ -371,8 +432,12 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
             commitFluidTarget();
             fluidTargetBox.setFocused(false);
         }
+        if (priorityBox != null && priorityBox.isFocused() && !priorityBox.isMouseOver(mouseX, mouseY)) {
+            commitPriority();
+            priorityBox.setFocused(false);
+        }
 
-        if (menu.canEdit() && menu.getRole() == SupplyBufferRole.REMOTE) {
+        if (menu.canEdit() && menu.getRole() != SupplyBufferRole.UNLINKED) {
             int itemFilter = itemFilterAt(mouseX, mouseY);
             if (itemFilter >= 0) {
                 selectedItemFilter = itemFilter;
@@ -428,6 +493,11 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
                 fluidTargetBox.setFocused(false);
                 return true;
             }
+            if (priorityBox != null && priorityBox.isFocused()) {
+                commitPriority();
+                priorityBox.setFocused(false);
+                return true;
+            }
         }
         return super.keyPressed(keyCode, scanCode, modifiers);
     }
@@ -436,7 +506,9 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         renderBackground(graphics);
         super.render(graphics, mouseX, mouseY, partialTick);
-        renderVirtualSupplySlots(graphics);
+        if (menu.getRole() == SupplyBufferRole.REMOTE) {
+            renderVirtualSupplySlots(graphics);
+        }
         if (supplySlotAt(mouseX, mouseY) < 0) {
             renderTooltip(graphics, mouseX, mouseY);
         }
@@ -590,21 +662,22 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
         String status = statusText();
         int statusColor = menu.isLinkOnline() ? 0x55FF55 : 0xFF5555;
         graphics.drawString(font, status, 8, 19, statusColor, false);
+        if (menu.getRole() == SupplyBufferRole.REMOTE) {
+            graphics.drawString(font, Component.literal("P:"), 158, 19, 0xC8D1DA, false);
+        }
 
         graphics.drawString(font, Component.literal("Предметы"), 8, 37, 0xC8D1DA, false);
         graphics.drawString(font, Component.literal("Жидкости"), 8, 78, 0xC8D1DA, false);
 
-        graphics.drawString(font, Component.literal("Виртуальный запас предметов"), 35, 122, 0xFFFFFF, false);
-        graphics.drawString(font, Component.literal("Отправка в главную ME"), 35, 161, 0xFFFFFF, false);
-
-        graphics.drawString(
-                font,
-                Component.literal("ЛКМ выбор • ПКМ удалить • Enter цель • EMI drag"),
-                8,
-                216,
-                0x8F99A6,
-                false
-        );
+        if (menu.getRole() == SupplyBufferRole.PROVIDER) {
+            graphics.drawString(font, Component.literal("Резерв MAIN ME"), 35, 122, 0xFFFFFF, false);
+            graphics.drawString(font, Component.literal("MAIN не отдаёт ресурс ниже указанного количества."), 35, 136, 0x8F99A6, false);
+            graphics.drawString(font, Component.literal("ЛКМ выбор • ПКМ удалить • Enter резерв • EMI drag"), 8, 216, 0x8F99A6, false);
+        } else {
+            graphics.drawString(font, Component.literal("Виртуальный запас предметов"), 35, 122, 0xFFFFFF, false);
+            graphics.drawString(font, Component.literal("Отправка в главную ME"), 35, 161, 0xFFFFFF, false);
+            graphics.drawString(font, Component.literal("ЛКМ выбор • ПКМ удалить • Enter цель • EMI drag"), 8, 216, 0x8F99A6, false);
+        }
 
         graphics.drawString(font, Component.literal("Инвентарь"), 35, 229, 0xC8D1DA, false);
 
@@ -625,15 +698,16 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
         if (itemFilter >= 0) {
             ItemStack stack = menu.getSupplyBuffer().getConfiguredItemStack(itemFilter);
             String name = stack.isEmpty() ? "Пустой фильтр предмета" : stack.getHoverName().getString();
-            long count = menu.getSupplyItemCount(itemFilter);
             long target = menu.getItemTargetAmount(itemFilter);
-            String amount = target <= 0L ? "не настроено" : formatNumber(count) + " / " + formatNumber(target);
-            graphics.renderTooltip(
-                    font,
-                    Component.literal(name + " • запас: " + amount + " • порог: " + menu.getItemRefillBelowPercent() + "%"),
-                    mouseX,
-                    mouseY
-            );
+            String text;
+            if (menu.getRole() == SupplyBufferRole.PROVIDER) {
+                text = name + " • резерв MAIN: " + (target <= 0L ? "не настроен" : formatNumber(target));
+            } else {
+                long count = menu.getSupplyItemCount(itemFilter);
+                String amount = target <= 0L ? "не настроено" : formatNumber(count) + " / " + formatNumber(target);
+                text = name + " • запас: " + amount + " • порог: " + menu.getItemRefillBelowPercent() + "%";
+            }
+            graphics.renderTooltip(font, Component.literal(text), mouseX, mouseY);
             return;
         }
 
@@ -641,15 +715,17 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
         if (fluidFilter >= 0) {
             FluidStack fluid = menu.getSupplyBuffer().getConfiguredFluidStack(fluidFilter);
             String name = fluid.isEmpty() ? "Пустой фильтр жидкости" : fluid.getDisplayName().getString();
-            String amount = formatFluid(menu.getFluidAmount(fluidFilter))
-                    + " / "
-                    + formatFluid(menu.getFluidTargetAmount(fluidFilter));
-            graphics.renderTooltip(
-                    font,
-                    Component.literal(name + " • запас: " + amount + " • порог: " + menu.getFluidRefillBelowPercent() + "%"),
-                    mouseX,
-                    mouseY
-            );
+            String text;
+            if (menu.getRole() == SupplyBufferRole.PROVIDER) {
+                long target = menu.getFluidTargetAmount(fluidFilter);
+                text = name + " • резерв MAIN: " + (target <= 0L ? "не настроен" : formatFluid(target));
+            } else {
+                String amount = formatFluid(menu.getFluidAmount(fluidFilter))
+                        + " / "
+                        + formatFluid(menu.getFluidTargetAmount(fluidFilter));
+                text = name + " • запас: " + amount + " • порог: " + menu.getFluidRefillBelowPercent() + "%";
+            }
+            graphics.renderTooltip(font, Component.literal(text), mouseX, mouseY);
             return;
         }
 
@@ -670,17 +746,24 @@ public class SupplyBufferScreen extends AbstractContainerScreen<SupplyBufferMenu
     }
 
     private void renderControlTooltips(GuiGraphics graphics, int mouseX, int mouseY) {
-        if (itemTargetBox != null && itemTargetBox.isMouseOver(mouseX, mouseY)) {
+        if (priorityBox != null && priorityBox.visible && priorityBox.isMouseOver(mouseX, mouseY)) {
             graphics.renderTooltip(
                     font,
-                    Component.literal("Целевой запас выбранного предмета. Можно писать 250000, 250k, 2m. Enter — применить."),
+                    Component.literal("Приоритет REMOTE: чем больше число, тем раньше Provider обслужит запрос. 0.." + SupplyBufferBlockEntity.MAX_PRIORITY + ". При равенстве — FIFO."),
+                    mouseX,
+                    mouseY
+            );
+        } else if (itemTargetBox != null && itemTargetBox.isMouseOver(mouseX, mouseY)) {
+            graphics.renderTooltip(
+                    font,
+                    Component.literal(menu.getRole() == SupplyBufferRole.PROVIDER ? "Неснимаемый резерв MAIN для предмета. Можно писать 250000, 250k, 2m." : "Целевой запас выбранного предмета. Можно писать 250000, 250k, 2m. Enter — применить."),
                     mouseX,
                     mouseY
             );
         } else if (fluidTargetBox != null && fluidTargetBox.isMouseOver(mouseX, mouseY)) {
             graphics.renderTooltip(
                     font,
-                    Component.literal("Целевой запас выбранной жидкости в mB. Можно писать 12000000, 12m. Enter — применить."),
+                    Component.literal(menu.getRole() == SupplyBufferRole.PROVIDER ? "Неснимаемый резерв MAIN для жидкости в mB. Можно писать 12000000, 12m." : "Целевой запас выбранной жидкости в mB. Можно писать 12000000, 12m. Enter — применить."),
                     mouseX,
                     mouseY
             );

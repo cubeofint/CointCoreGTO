@@ -454,9 +454,11 @@ public class ClusterMonitorScreen extends AbstractContainerScreen<ClusterMonitor
             int statusColor = operationStatusColor(operation.status());
 
             graphics.drawString(font, Component.literal("●"), 14, y, statusColor, false);
+            String operationState = operationStatusLabel(operation.status())
+                    + (operation.priority() > 0 ? " P:" + operation.priority() : "");
             graphics.drawString(
                     font,
-                    Component.literal(cropPixels(operationStatusLabel(operation.status()), 48)),
+                    Component.literal(cropPixels(operationState, 48)),
                     26,
                     y,
                     statusColor,
@@ -537,7 +539,8 @@ public class ClusterMonitorScreen extends AbstractContainerScreen<ClusterMonitor
         String shortId = operation.operationId().length() > 8
                 ? operation.operationId().substring(0, 8)
                 : operation.operationId();
-        String header = "Operation " + shortId + "  •  " + operationStatusLabel(operation.status());
+        String header = "Operation " + shortId + "  •  " + operationStatusLabel(operation.status())
+                + "  •  P:" + operation.priority();
         graphics.drawString(font, Component.literal(header), 18, OPERATION_DETAILS_Y + 8, statusColor, false);
 
         renderOperationIcon(graphics, operation, 18, OPERATION_DETAILS_Y + 23);
@@ -861,9 +864,12 @@ public class ClusterMonitorScreen extends AbstractContainerScreen<ClusterMonitor
                     linkBufferColor,
                     false
             );
+            String nodeHealthText = "REMOTE".equalsIgnoreCase(buffer.role())
+                    ? "P:" + buffer.priority() + " • " + health.text()
+                    : health.text();
             graphics.drawString(
                     font,
-                    Component.literal(cropPixels(health.text(), 92)),
+                    Component.literal(cropPixels(nodeHealthText, 92)),
                     330,
                     y,
                     health.color(),
@@ -934,9 +940,12 @@ public class ClusterMonitorScreen extends AbstractContainerScreen<ClusterMonitor
                     MUTED,
                     false
             );
+            String healthText = "REMOTE".equalsIgnoreCase(buffer.role())
+                    ? "P:" + buffer.priority() + " • " + health.text()
+                    : health.text();
             graphics.drawString(
                     font,
-                    Component.literal(cropPixels(health.text(), 100)),
+                    Component.literal(cropPixels(healthText, 100)),
                     322,
                     y,
                     health.color(),
@@ -967,7 +976,8 @@ public class ClusterMonitorScreen extends AbstractContainerScreen<ClusterMonitor
         String owner = selected.ownerName().isBlank() ? "-" : selected.ownerName();
         String header = shortRole(selected.role())
                 + "  •  " + selected.nodeId()
-                + "  •  " + owner;
+                + "  •  " + owner
+                + ("REMOTE".equalsIgnoreCase(selected.role()) ? "  •  P:" + selected.priority() : "");
         graphics.drawString(
                 font,
                 Component.literal(cropPixels(header, imageWidth - 36)),

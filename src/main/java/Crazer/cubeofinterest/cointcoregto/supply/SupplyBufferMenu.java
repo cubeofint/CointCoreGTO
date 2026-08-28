@@ -34,7 +34,8 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
     private static final int DATA_LINK_ONLINE = 5;
     private static final int DATA_PENDING = 6;
     private static final int DATA_CLUSTER_ENABLED = 7;
-    private static final int DATA_COUNT = 8;
+    private static final int DATA_PRIORITY = 8;
+    private static final int DATA_COUNT = 9;
 
     // Shared with SupplyBufferScreen.
     public static final int FILTER_ROW_X = 35;
@@ -267,6 +268,13 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
         return syncedData.get(DATA_CLUSTER_ENABLED) != 0;
     }
 
+    public int getPriority() {
+        if (isServerMenu()) {
+            return supplyBuffer.getPriority();
+        }
+        return Math.max(0, syncedData.get(DATA_PRIORITY));
+    }
+
     public void applyClientState(
             long[] itemAmounts,
             long[] itemTargets,
@@ -295,6 +303,7 @@ public class SupplyBufferMenu extends AbstractContainerMenu {
             syncedData.set(DATA_LINK_ONLINE, online ? 1 : 0);
             syncedData.set(DATA_PENDING, supplyBuffer.getPendingTransferCount());
             syncedData.set(DATA_CLUSTER_ENABLED, SupplyBufferService.clusterEnabled() ? 1 : 0);
+            syncedData.set(DATA_PRIORITY, supplyBuffer.getPriority());
         }
 
         super.broadcastChanges();

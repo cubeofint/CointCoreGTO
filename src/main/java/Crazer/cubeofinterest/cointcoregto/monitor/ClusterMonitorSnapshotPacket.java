@@ -51,6 +51,7 @@ public record ClusterMonitorSnapshotPacket(ClusterMonitorSnapshot snapshot) {
             buffer.writeBoolean(entry.aeOnline());
             buffer.writeBoolean(entry.linkOnline());
             buffer.writeVarInt(Math.max(0, entry.pendingCount()));
+            buffer.writeVarInt(Math.max(0, entry.priority()));
             buffer.writeVarLong(Math.max(0L, entry.heartbeatAgeSeconds()));
 
             int resourceCount = Math.min(MAX_RESOURCES, entry.resources().size());
@@ -82,6 +83,7 @@ public record ClusterMonitorSnapshotPacket(ClusterMonitorSnapshot snapshot) {
             buffer.writeUtf(operation.resourceKey(), 256);
             buffer.writeVarLong(Math.max(0L, operation.requestedAmount()));
             buffer.writeVarLong(Math.max(0L, operation.deliveredAmount()));
+            buffer.writeVarInt(Math.max(0, operation.priority()));
             buffer.writeUtf(operation.status(), 16);
             buffer.writeUtf(operation.errorText(), 512);
             buffer.writeVarLong(Math.max(0L, operation.createdAgeSeconds()));
@@ -124,6 +126,7 @@ public record ClusterMonitorSnapshotPacket(ClusterMonitorSnapshot snapshot) {
             boolean aeOnline = buffer.readBoolean();
             boolean linkOnline = buffer.readBoolean();
             int pendingCount = buffer.readVarInt();
+            int priority = buffer.readVarInt();
             long heartbeatAgeSeconds = buffer.readVarLong();
 
             int resourceCount = Math.min(MAX_RESOURCES, Math.max(0, buffer.readVarInt()));
@@ -154,6 +157,7 @@ public record ClusterMonitorSnapshotPacket(ClusterMonitorSnapshot snapshot) {
                     aeOnline,
                     linkOnline,
                     pendingCount,
+                    priority,
                     heartbeatAgeSeconds,
                     resources
             ));
@@ -173,6 +177,7 @@ public record ClusterMonitorSnapshotPacket(ClusterMonitorSnapshot snapshot) {
                     buffer.readUtf(256),
                     buffer.readVarLong(),
                     buffer.readVarLong(),
+                    buffer.readVarInt(),
                     buffer.readUtf(16),
                     buffer.readUtf(512),
                     buffer.readVarLong(),

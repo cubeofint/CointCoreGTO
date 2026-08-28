@@ -6,7 +6,7 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class SupplyBufferNetwork {
-    private static final String PROTOCOL = "3";
+    private static final String PROTOCOL = "4";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(CointCoreGTO.MODID, "supply_buffer"),
@@ -47,6 +47,12 @@ public final class SupplyBufferNetwork {
                 .encoder(SupplyBufferStatePacket::encode)
                 .decoder(SupplyBufferStatePacket::decode)
                 .consumerMainThread(SupplyBufferStatePacket::handle)
+                .add();
+
+        CHANNEL.messageBuilder(SupplyBufferPriorityPacket.class, 4)
+                .encoder(SupplyBufferPriorityPacket::encode)
+                .decoder(SupplyBufferPriorityPacket::decode)
+                .consumerMainThread(SupplyBufferPriorityPacket::handle)
                 .add();
 
         registered = true;

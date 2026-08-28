@@ -73,6 +73,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
     public static final long DEFAULT_FLUID_TARGET = 16_000_000L;
     // Keeps percentage arithmetic and monitor progress calculations comfortably inside signed long.
     public static final long MAX_VIRTUAL_AMOUNT = 9_000_000_000_000_000L;
+    public static final int MAX_PRIORITY = 1_000_000;
 
     private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO-SupplyBuffer");
     private static final int[] THRESHOLD_OPTIONS = {10, 25, 50, 75, 90};
@@ -143,6 +144,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
     private String ownerName = "";
     private String linkId = "";
     private String providerNode = "";
+    private int priority;
     private int itemRefillBelowPercent = 50;
     private int itemRefillToPercent = 100;
     private int fluidRefillBelowPercent = 50;
@@ -285,6 +287,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
                 aeOnline,
                 linkOnline,
                 getPendingTransferCount(),
+                getPriority(),
                 resources
         );
     }
@@ -413,18 +416,26 @@ public class SupplyBufferBlockEntity extends BlockEntity
                         source
                 );
             } else {
-                simulated = storage.extract(key, requested, Actionable.SIMULATE, source);
-                if (simulated <= 0L) {
+                long reserve = getProviderReserveAmount(key);
+                long probeAmount = reserve > Long.MAX_VALUE - requested
+                        ? Long.MAX_VALUE
+                        : reserve + requested;
+                simulated = storage.extract(key, probeAmount, Actionable.SIMULATE, source);
+                long availableAboveReserve = Math.max(0L, simulated - reserve);
+                if (availableAboveReserve <= 0L) {
                     providerFutureKind = ProviderFutureKind.RELEASE;
+                    String reason = reserve > 0L
+                            ? "MAIN reserve protects this resource (reserve=" + reserve + ")"
+                            : "Requested resource is not available in provider ME network";
                     providerOperationFuture = SupplyBufferService.releaseClaim(
                             operation.operationId(),
-                            "Requested resource is not available in provider ME network"
+                            reason
                     );
                     return;
                 }
                 delivered = storage.extract(
                         key,
-                        Math.min(requested, simulated),
+                        Math.min(requested, availableAboveReserve),
                         Actionable.MODULATE,
                         source
                 );
@@ -1197,7 +1208,8 @@ public class SupplyBufferBlockEntity extends BlockEntity
                 pending.direction(),
                 pending.resourceType(),
                 pending.keyPayload(),
-                pending.amount()
+                pending.amount(),
+                priority
         ));
     }
 
@@ -1286,6 +1298,10 @@ public class SupplyBufferBlockEntity extends BlockEntity
         return role;
     }
 
+    public long getClusterReserveAmount(@Nullable AEKey key) {
+        return getProviderReserveAmount(key);
+    }
+
     public String getLinkId() {
         return linkId == null ? "" : linkId;
     }
@@ -1300,6 +1316,23 @@ public class SupplyBufferBlockEntity extends BlockEntity
 
     public String getOwnerName() {
         return ownerName == null ? "" : ownerName;
+    }
+
+    public int getPriority() {
+        return role == SupplyBufferRole.REMOTE ? Math.max(0, priority) : 0;
+    }
+
+    public boolean setPriority(int newPriority, Player player) {
+        if (!canEdit(player) || role != SupplyBufferRole.REMOTE) {
+            return false;
+        }
+        int normalized = Math.max(0, Math.min(MAX_PRIORITY, newPriority));
+        if (priority == normalized) {
+            return true;
+        }
+        priority = normalized;
+        setChangedAndSync();
+        return true;
     }
 
     public int getItemRefillBelowPercent() {
@@ -1432,7 +1465,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
             String payload,
             Player player
     ) {
-        if (!canEdit(player) || role != SupplyBufferRole.REMOTE || !validFilterIndex(filterIndex)) {
+        if (!canEdit(player) || role == SupplyBufferRole.UNLINKED || !validFilterIndex(filterIndex)) {
             return false;
         }
 
@@ -1444,6 +1477,10 @@ public class SupplyBufferBlockEntity extends BlockEntity
             } catch (RuntimeException exception) {
                 return false;
             }
+        }
+
+        if (role == SupplyBufferRole.PROVIDER) {
+            return setProviderReserveFilter(resourceType, filterIndex, decoded, player);
         }
 
         if (resourceType == SupplyBufferDatabase.ResourceType.ITEM) {
@@ -1576,6 +1613,72 @@ public class SupplyBufferBlockEntity extends BlockEntity
         return true;
     }
 
+    private boolean setProviderReserveFilter(
+            SupplyBufferDatabase.ResourceType resourceType,
+            int filterIndex,
+            @Nullable AEKey decoded,
+            Player player
+    ) {
+        if (resourceType == SupplyBufferDatabase.ResourceType.ITEM) {
+            if (decoded != null && !(decoded instanceof AEItemKey)) {
+                return false;
+            }
+            AEItemKey newKey = decoded instanceof AEItemKey itemKey ? itemKey : null;
+            if (newKey == null) {
+                itemFilterPayloads[filterIndex] = "";
+                itemTargetAmounts[filterIndex] = 0L;
+                itemClearRequested[filterIndex] = false;
+                setChangedAndSync();
+                return true;
+            }
+            if (isDuplicateItemFilter(filterIndex, newKey)) {
+                player.displayClientMessage(Component.literal("§eЭтот предмет уже есть в резерве MAIN."), true);
+                return false;
+            }
+            itemFilterPayloads[filterIndex] = SupplyKeyCodec.encode(newKey);
+            if (itemTargetAmounts[filterIndex] <= 0L) {
+                itemTargetAmounts[filterIndex] = 1L;
+            }
+        } else {
+            if (decoded != null && !(decoded instanceof AEFluidKey)) {
+                return false;
+            }
+            AEFluidKey newKey = decoded instanceof AEFluidKey fluidKey ? fluidKey : null;
+            if (newKey == null) {
+                fluidFilterPayloads[filterIndex] = "";
+                fluidTargetAmounts[filterIndex] = 0L;
+                fluidClearRequested[filterIndex] = false;
+                setChangedAndSync();
+                return true;
+            }
+            if (isDuplicateFluidFilter(filterIndex, newKey)) {
+                player.displayClientMessage(Component.literal("§eЭта жидкость уже есть в резерве MAIN."), true);
+                return false;
+            }
+            fluidFilterPayloads[filterIndex] = SupplyKeyCodec.encode(newKey);
+            if (fluidTargetAmounts[filterIndex] <= 0L) {
+                fluidTargetAmounts[filterIndex] = 1L;
+            }
+        }
+        setChangedAndSync();
+        return true;
+    }
+
+    private long getProviderReserveAmount(@Nullable AEKey key) {
+        if (role != SupplyBufferRole.PROVIDER || key == null) {
+            return 0L;
+        }
+        if (key instanceof AEItemKey itemKey) {
+            int index = findItemFilterIndex(itemKey);
+            return index < 0 ? 0L : Math.max(0L, itemTargetAmounts[index]);
+        }
+        if (key instanceof AEFluidKey fluidKey) {
+            int index = findFluidFilterIndex(fluidKey);
+            return index < 0 ? 0L : Math.max(0L, fluidTargetAmounts[index]);
+        }
+        return 0L;
+    }
+
     private boolean hasSupplyItems(int filterIndex) {
         return validFilterIndex(filterIndex) && virtualItemAmounts[filterIndex] > 0L;
     }
@@ -1608,7 +1711,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
             long targetAmount,
             Player player
     ) {
-        if (!canEdit(player) || role != SupplyBufferRole.REMOTE || !validFilterIndex(filterIndex)) {
+        if (!canEdit(player) || role == SupplyBufferRole.UNLINKED || !validFilterIndex(filterIndex)) {
             return false;
         }
         long normalized = Math.max(1L, Math.min(MAX_VIRTUAL_AMOUNT, targetAmount));
@@ -1994,6 +2097,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
         tag.putUUID("EndpointId", endpointId);
         tag.putString("LinkId", getLinkId());
         tag.putString("ProviderNode", getProviderNode());
+        tag.putInt("Priority", getPriority());
         if (ownerUuid != null) {
             tag.putUUID("OwnerUuid", ownerUuid);
         }
@@ -2048,6 +2152,7 @@ public class SupplyBufferBlockEntity extends BlockEntity
         endpointId = tag.hasUUID("EndpointId") ? tag.getUUID("EndpointId") : UUID.randomUUID();
         linkId = tag.getString("LinkId");
         providerNode = tag.getString("ProviderNode");
+        priority = Math.max(0, Math.min(MAX_PRIORITY, tag.getInt("Priority")));
         ownerUuid = tag.hasUUID("OwnerUuid") ? tag.getUUID("OwnerUuid") : null;
         ownerName = tag.getString("OwnerName");
         itemRefillBelowPercent = sanitizePercent(tag.getInt("ItemRefillBelow"), 50);

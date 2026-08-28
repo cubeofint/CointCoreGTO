@@ -33,6 +33,16 @@ public final class SupplyBufferService {
         return config == null ? "" : config.nodeId();
     }
 
+    public static String currentNodeRole() {
+        ClusterConfig config = currentConfig();
+        return config == null ? "" : config.nodeRole();
+    }
+
+    public static boolean isMainNode() {
+        String role = currentNodeRole().trim().toLowerCase(java.util.Locale.ROOT);
+        return "general".equals(role) || "main".equals(role);
+    }
+
     public static boolean clusterEnabled() {
         ClusterConfig config = currentConfig();
         return config != null && config.enabled();
@@ -50,6 +60,7 @@ public final class SupplyBufferService {
             boolean aeOnline,
             boolean linkOnline,
             int pendingCount,
+            int priority,
             Collection<SupplyBufferDatabase.ResourceSnapshot> resources
     ) {
         return CompletableFuture.runAsync(() -> {
@@ -69,6 +80,7 @@ public final class SupplyBufferService {
                         aeOnline,
                         linkOnline,
                         pendingCount,
+                        priority,
                         resources
                 );
             } catch (Exception exception) {
@@ -189,6 +201,86 @@ public final class SupplyBufferService {
                         pending,
                         acknowledgements
                 );
+            } catch (Exception exception) {
+                throw new SupplyServiceException(exception);
+            }
+        }, EXECUTOR);
+    }
+
+    public static CompletableFuture<String> findMainNode() {
+        return CompletableFuture.supplyAsync(() -> {
+            ClusterConfig config = requireConfig();
+            try {
+                return SupplyBufferDatabase.findMainNode(config);
+            } catch (Exception exception) {
+                throw new SupplyServiceException(exception);
+            }
+        }, EXECUTOR);
+    }
+
+    public static CompletableFuture<Void> replaceGtoWirelessNetworks(
+            String providerNode,
+            Collection<SupplyBufferDatabase.GtoWirelessNetworkSnapshot> networks
+    ) {
+        return CompletableFuture.runAsync(() -> {
+            ClusterConfig config = requireConfig();
+            try {
+                SupplyBufferDatabase.replaceGtoWirelessNetworks(config, providerNode, networks);
+            } catch (Exception exception) {
+                throw new SupplyServiceException(exception);
+            }
+        }, EXECUTOR);
+    }
+
+    public static CompletableFuture<java.util.List<SupplyBufferDatabase.GtoWirelessNetworkSnapshot>> readGtoWirelessNetworks(
+            String providerNode
+    ) {
+        return CompletableFuture.supplyAsync(() -> {
+            ClusterConfig config = requireConfig();
+            try {
+                return SupplyBufferDatabase.readGtoWirelessNetworks(config, providerNode);
+            } catch (Exception exception) {
+                throw new SupplyServiceException(exception);
+            }
+        }, EXECUTOR);
+    }
+
+    public static CompletableFuture<Long> replaceWirelessCatalog(
+            String providerNode,
+            Collection<SupplyBufferDatabase.WirelessCatalogEntry> entries
+    ) {
+        return CompletableFuture.supplyAsync(() -> {
+            ClusterConfig config = requireConfig();
+            try {
+                return SupplyBufferDatabase.replaceWirelessCatalog(config, providerNode, entries);
+            } catch (Exception exception) {
+                throw new SupplyServiceException(exception);
+            }
+        }, EXECUTOR);
+    }
+
+    public static CompletableFuture<Long> updateWirelessCatalog(
+            String providerNode,
+            Collection<SupplyBufferDatabase.WirelessCatalogEntry> entries
+    ) {
+        return CompletableFuture.supplyAsync(() -> {
+            ClusterConfig config = requireConfig();
+            try {
+                return SupplyBufferDatabase.updateWirelessCatalog(config, providerNode, entries);
+            } catch (Exception exception) {
+                throw new SupplyServiceException(exception);
+            }
+        }, EXECUTOR);
+    }
+
+    public static CompletableFuture<SupplyBufferDatabase.WirelessCatalogDelta> readWirelessCatalogDelta(
+            String providerNode,
+            long afterRevision
+    ) {
+        return CompletableFuture.supplyAsync(() -> {
+            ClusterConfig config = requireConfig();
+            try {
+                return SupplyBufferDatabase.readWirelessCatalogDelta(config, providerNode, afterRevision);
             } catch (Exception exception) {
                 throw new SupplyServiceException(exception);
             }
