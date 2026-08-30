@@ -12,7 +12,10 @@
     "ClusterDimensionTickGuardMixin",
     "BlockedBlockLevelSetMixin",
     "BlockedBlockPlacementMixin",
-    "Ae2SpatialStorageBlockGuardMixin"
+    "Ae2SpatialStorageBlockGuardMixin",
+    "BotaniaBoreLensBlockedItemMixin",
+    "BotaniaEntropicLensBlockedItemMixin",
+    "BotaniaForceLensBlockedItemMixin"
   ],
   "client": [
     "CointCoreGTOChatComponentMixin",
