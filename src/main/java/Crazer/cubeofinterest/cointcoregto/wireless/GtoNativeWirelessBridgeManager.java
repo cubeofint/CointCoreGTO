@@ -67,12 +67,16 @@ public final class GtoNativeWirelessBridgeManager {
 
     private static final Logger LOGGER = LogManager.getLogger("CointCoreGTO-GtoNativeWireless");
     private static final String LINK_PREFIX = "gto:";
+    private static final String GTO_CHILD_ROLE = "gto-child";
     private static final int NETWORK_PUBLISH_TICKS = 60;
     private static final int NETWORK_READ_TICKS = 60;
     private static final int MAIN_DISCOVERY_TICKS = 100;
     private static final int PROVIDER_HEARTBEAT_TICKS = 100;
     private static final int PROVIDER_CLAIM_TICKS = 5;
     private static final int REMOTE_SYNC_TICKS = 10;
+    private static final int REMOTE_PRESENCE_TICKS = 40;
+    private static final int MAIN_REMOTE_CHILD_READ_TICKS = 40;
+    private static final int MAIN_SUMMARY_PATCH_TICKS = 20;
     private static final int MAX_PENDING_PER_ENDPOINT = 32;
     private static final long MAX_OPERATION_AMOUNT = 1_000_000_000_000L;
 
@@ -84,6 +88,9 @@ public final class GtoNativeWirelessBridgeManager {
     private CompletableFuture<Void> publishFuture;
     private CompletableFuture<String> mainDiscoveryFuture;
     private CompletableFuture<List<SupplyBufferDatabase.GtoWirelessNetworkSnapshot>> networkReadFuture;
+    private CompletableFuture<Map<String, Integer>> remoteChildCountFuture;
+    private Map<String, Integer> remoteChildCounts = Map.of();
+    private Map<String, SupplyBufferDatabase.GtoWirelessNetworkSnapshot> remoteNetworkSnapshots = Map.of();
     private String mainNode = "";
     private Set<String> lastPublishedNetworkIds = Set.of();
     private Set<String> lastRemoteNetworkIds = Set.of();
@@ -140,7 +147,10 @@ public final class GtoNativeWirelessBridgeManager {
         }
         for (BlockPos pos : chunk.getBlockEntities().keySet()) {
             EndpointKey key = EndpointKey.of(level, pos);
-            endpoints.remove(key);
+            NativeEndpoint removed = endpoints.remove(key);
+            if (removed != null) {
+                removed.publishPresenceOffline();
+            }
             wirelessMachines.remove(key);
         }
     }
@@ -180,6 +190,7 @@ public final class GtoNativeWirelessBridgeManager {
             return;
         }
 
+        endpoint.publishPresenceOffline();
         endpoints.remove(key);
         if (wirelessMachines.remove(key) != null) {
             wirelessMachineListDirty = true;
@@ -233,7 +244,11 @@ public final class GtoNativeWirelessBridgeManager {
     private void removeDeadEndpoints() {
         endpoints.entrySet().removeIf(entry -> {
             NativeEndpoint endpoint = entry.getValue();
-            return endpoint.owner.isRemoved() || endpoint.owner.getLevel() == null;
+            boolean dead = endpoint.owner.isRemoved() || endpoint.owner.getLevel() == null;
+            if (dead) {
+                endpoint.publishPresenceOffline();
+            }
+            return dead;
         });
         boolean removedWireless = wirelessMachines.entrySet().removeIf(entry -> {
             KnownWirelessMachine known = entry.getValue();
@@ -252,6 +267,15 @@ public final class GtoNativeWirelessBridgeManager {
         }
 
         processPublishFuture();
+        processRemoteChildCountFuture();
+        if (remoteChildCountFuture == null
+                && (tickCounter == 1L || tickCounter % MAIN_REMOTE_CHILD_READ_TICKS == 0L)) {
+            remoteChildCountFuture = SupplyBufferService.readGtoWirelessRemoteChildCounts();
+        }
+        if (tickCounter == 1L || tickCounter % MAIN_SUMMARY_PATCH_TICKS == 0L) {
+            patchMainNetworkSummaries();
+        }
+
         Map<String, Object> networks = api.networksById();
         syncProviderRuntimes(networks);
         for (ProviderRuntime runtime : List.copyOf(providerRuntimes.values())) {
@@ -287,6 +311,62 @@ public final class GtoNativeWirelessBridgeManager {
         }
     }
 
+    private void processRemoteChildCountFuture() {
+        if (remoteChildCountFuture == null || !remoteChildCountFuture.isDone()) {
+            return;
+        }
+        try {
+            Map<String, Integer> counts = remoteChildCountFuture.join();
+            Map<String, Integer> normalized = counts == null ? Map.of() : Map.copyOf(counts);
+            if (!normalized.equals(remoteChildCounts)) {
+                remoteChildCounts = normalized;
+                LOGGER.info("Node {} sees remote GTO wireless CHILD count(s): {}",
+                        SupplyBufferService.currentNodeId(), remoteChildCounts);
+                if (SupplyBufferService.isMainNode()) {
+                    patchMainNetworkSummaries();
+                } else {
+                    patchRemoteNetworkSummaries();
+                }
+            }
+        } catch (CompletionException exception) {
+            logAsync("read remote GTO wireless CHILD counts", exception);
+        } finally {
+            remoteChildCountFuture = null;
+        }
+    }
+
+    private void patchMainNetworkSummaries() {
+        if (!SupplyBufferService.isMainNode()) {
+            return;
+        }
+        Set<Object> machines = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (KnownWirelessMachine known : wirelessMachines.values()) {
+            machines.add(known.machine);
+        }
+        for (NativeEndpoint endpoint : endpoints.values()) {
+            machines.add(endpoint.machine);
+        }
+        for (Object machine : machines) {
+            api.patchNetworkSummaryChildCounts(machine, remoteChildCounts);
+        }
+    }
+
+    private void patchRemoteNetworkSummaries() {
+        if (SupplyBufferService.isMainNode() || remoteNetworkSnapshots.isEmpty()) {
+            return;
+        }
+        Set<Object> machines = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (KnownWirelessMachine known : wirelessMachines.values()) {
+            machines.add(known.machine);
+        }
+        for (NativeEndpoint endpoint : endpoints.values()) {
+            machines.add(endpoint.machine);
+        }
+        for (Object machine : machines) {
+            api.patchRemoteMirrorSummaryCounts(machine, remoteNetworkSnapshots, remoteChildCounts);
+        }
+    }
+
     private void syncProviderRuntimes(Map<String, Object> networks) {
         providerRuntimes.keySet().removeIf(id -> !networks.containsKey(id));
         for (Map.Entry<String, Object> entry : networks.entrySet()) {
@@ -296,11 +376,18 @@ public final class GtoNativeWirelessBridgeManager {
 
     private void tickRemote(MinecraftServer server, ClusterWirelessSavedData data) {
         processNetworkReadFuture(data);
+        processRemoteChildCountFuture();
         if (networkReadFuture == null
                 && (tickCounter == 1L || tickCounter % NETWORK_READ_TICKS == 0L)) {
             // Blank provider = current ONLINE general/main node(s).  Do not make
             // native registry visibility depend on a separate MAIN discovery future.
             networkReadFuture = SupplyBufferService.readGtoWirelessNetworks("");
+        }
+        if (remoteChildCountFuture == null
+                && (tickCounter == 1L || tickCounter % MAIN_REMOTE_CHILD_READ_TICKS == 0L)) {
+            // REMOTE uses the same global presence view as MAIN so every GTO GUI
+            // displays the cluster-wide SOURCE/CHILD totals, not only local mirror nodes.
+            remoteChildCountFuture = SupplyBufferService.readGtoWirelessRemoteChildCounts();
         }
 
         syncNativeEndpoints(server, data);
@@ -310,6 +397,10 @@ public final class GtoNativeWirelessBridgeManager {
         }
         for (NativeEndpoint endpoint : List.copyOf(endpoints.values())) {
             endpoint.tickRemote(data, tickCounter);
+        }
+        sanitizeMirrorNetworks(data);
+        if (tickCounter == 1L || tickCounter % MAIN_SUMMARY_PATCH_TICKS == 0L) {
+            patchRemoteNetworkSummaries();
         }
     }
 
@@ -325,7 +416,10 @@ public final class GtoNativeWirelessBridgeManager {
                 continue;
             }
 
-            for (Object machine : api.outputNodes(network)) {
+            Set<Object> candidateMachines = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            candidateMachines.addAll(api.inputNodes(network));
+            candidateMachines.addAll(api.outputNodes(network));
+            for (Object machine : candidateMachines) {
                 EndpointType type = api.endpointType(machine);
                 if (type != EndpointType.OUTPUT_BUS && type != EndpointType.OUTPUT_HATCH) {
                     continue;
@@ -357,6 +451,34 @@ public final class GtoNativeWirelessBridgeManager {
                 || entry.getValue().owner.getLevel() == null);
     }
 
+    private void sanitizeMirrorNetworks(ClusterWirelessSavedData data) {
+        Map<Object, Object> pool = api.networkPool();
+        if (pool == null || data.nativeMirrorIds().isEmpty()) {
+            return;
+        }
+        boolean changed = false;
+        for (String networkId : data.nativeMirrorIds()) {
+            Object network = pool.get(networkId);
+            if (!api.isWirelessNetwork(network)) {
+                continue;
+            }
+            Set<Object> machines = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            machines.addAll(api.inputNodes(network));
+            machines.addAll(api.outputNodes(network));
+            for (Object machine : machines) {
+                EndpointType type = api.endpointType(machine);
+                if (type == EndpointType.OUTPUT_BUS || type == EndpointType.OUTPUT_HATCH) {
+                    changed |= api.enforceMirrorChild(network, machine);
+                }
+            }
+            api.suppressMirrorRefresh(network);
+        }
+        if (changed) {
+            api.markNativeSavedDataDirty();
+            api.requireWriteToAll();
+        }
+    }
+
     private void processMainDiscoveryFuture() {
         if (mainDiscoveryFuture == null || !mainDiscoveryFuture.isDone()) {
             return;
@@ -381,6 +503,15 @@ public final class GtoNativeWirelessBridgeManager {
         try {
             List<SupplyBufferDatabase.GtoWirelessNetworkSnapshot> snapshots = networkReadFuture.join();
             applyMirrors(data, snapshots);
+            Map<String, SupplyBufferDatabase.GtoWirelessNetworkSnapshot> snapshotMap = new LinkedHashMap<>();
+            if (snapshots != null) {
+                for (SupplyBufferDatabase.GtoWirelessNetworkSnapshot snapshot : snapshots) {
+                    if (snapshot != null && snapshot.networkId() != null && !snapshot.networkId().isBlank()) {
+                        snapshotMap.put(snapshot.networkId(), snapshot);
+                    }
+                }
+            }
+            remoteNetworkSnapshots = Map.copyOf(snapshotMap);
             Set<String> ids = snapshots == null ? Set.of() : snapshots.stream()
                     .filter(java.util.Objects::nonNull)
                     .map(SupplyBufferDatabase.GtoWirelessNetworkSnapshot::networkId)
@@ -398,6 +529,7 @@ public final class GtoNativeWirelessBridgeManager {
             if (!ids.isEmpty()) {
                 refreshAllMachineLists();
                 wirelessMachineListDirty = false;
+                patchRemoteNetworkSummaries();
             }
         } catch (CompletionException exception) {
             logAsync("read native GTO wireless networks", exception);
@@ -755,6 +887,9 @@ public final class GtoNativeWirelessBridgeManager {
         private final Object machine;
         private final EndpointType type;
         private CompletableFuture<SupplyBufferDatabase.RemoteSyncResult> syncFuture;
+        private CompletableFuture<Void> presenceFuture;
+        private String lastPresenceLink;
+        private boolean clusterVisualOnline;
 
         private NativeEndpoint(EndpointKey key, BlockEntity owner, Object machine, EndpointType type) {
             this.key = key;
@@ -778,10 +913,40 @@ public final class GtoNativeWirelessBridgeManager {
             ClusterWirelessSavedData.EndpointState state = data.endpoint(stateId());
             processSyncFuture(data, state);
 
+            processPresenceFuture();
+
             String connected = api.connectedNetworkId(machine);
+            if (connected != null && data.nativeMirrorIds().contains(connected)) {
+                Map<Object, Object> pool = api.networkPool();
+                Object mirror = pool == null ? null : pool.get(connected);
+                if (api.isWirelessNetwork(mirror) && api.enforceMirrorChild(mirror, machine)) {
+                    LOGGER.info("Normalized remote native GTO {} at {} to CHILD in mirrored network {}",
+                            type, key.id(), connected);
+                    api.markNativeSavedDataDirty();
+                    api.requireWriteToAll();
+                }
+            }
             String desiredLink = connected != null && data.nativeMirrorIds().contains(connected)
                     ? LINK_PREFIX + connected
                     : "";
+
+            // A mirrored cross-server network cannot create a real AE2 IGrid connection
+            // inside this REMOTE JVM. GTO therefore keeps MEPartMachine.onlineField=false
+            // even though CointCoreGTO is successfully transporting the buffer to MAIN.
+            // Keep GTO's visual/status flag in sync with the cluster binding only. This
+            // does not fabricate an AE2 grid and does not touch the transport path.
+            boolean shouldShowClusterOnline = !desiredLink.isBlank();
+            if (shouldShowClusterOnline) {
+                api.setOnlineField(machine, true);
+                clusterVisualOnline = true;
+            } else if (clusterVisualOnline) {
+                // We previously overrode the visual flag for a cluster mirror. Release
+                // that override after disconnect/removal so native GTO state takes over.
+                api.setOnlineField(machine, false);
+                clusterVisualOnline = false;
+            }
+
+            publishPresence(state, desiredLink, tick);
 
             if (state.pending().isEmpty() && state.acknowledgements().isEmpty()
                     && !state.activeLinkId().equals(desiredLink)) {
@@ -811,6 +976,82 @@ public final class GtoNativeWirelessBridgeManager {
                         .toList();
                 syncFuture = SupplyBufferService.syncRemote(activeLink, descriptors, state.acknowledgements());
             }
+        }
+
+        private void publishPresence(
+                ClusterWirelessSavedData.EndpointState state,
+                String desiredLink,
+                long tick
+        ) {
+            boolean changed = lastPresenceLink == null || !lastPresenceLink.equals(desiredLink);
+            boolean heartbeatDue = !desiredLink.isBlank()
+                    && (tick == 1L || tick % REMOTE_PRESENCE_TICKS == 0L);
+            if (presenceFuture != null || (!changed && !heartbeatDue)) {
+                return;
+            }
+
+            boolean connected = !desiredLink.isBlank();
+            lastPresenceLink = desiredLink;
+            presenceFuture = SupplyBufferService.touchEndpoint(
+                    stateId(),
+                    desiredLink,
+                    GTO_CHILD_ROLE,
+                    "",
+                    key.dimension().location().toString(),
+                    key.pos().getX() + "," + key.pos().getY() + "," + key.pos().getZ(),
+                    null,
+                    "",
+                    connected,
+                    connected,
+                    state.pending().size(),
+                    0,
+                    List.of()
+            );
+        }
+
+        private void processPresenceFuture() {
+            if (presenceFuture == null || !presenceFuture.isDone()) {
+                return;
+            }
+            try {
+                presenceFuture.join();
+            } catch (CompletionException exception) {
+                logAsync("publish native GTO CHILD presence for " + stateId(), exception);
+            } finally {
+                presenceFuture = null;
+            }
+        }
+
+        private void publishPresenceOffline() {
+            String previous = lastPresenceLink;
+            if (previous == null || previous.isBlank()) {
+                return;
+            }
+            lastPresenceLink = "";
+            CompletableFuture<Void> prior = presenceFuture;
+            CompletableFuture<Void> barrier = prior == null
+                    ? CompletableFuture.completedFuture(null)
+                    : prior.handle((unused, throwable) -> null);
+            presenceFuture = barrier.thenCompose(unused -> SupplyBufferService.touchEndpoint(
+                    stateId(),
+                    "",
+                    GTO_CHILD_ROLE,
+                    "",
+                    key.dimension().location().toString(),
+                    key.pos().getX() + "," + key.pos().getY() + "," + key.pos().getZ(),
+                    null,
+                    "",
+                    false,
+                    false,
+                    0,
+                    0,
+                    List.of()
+            ));
+            presenceFuture.whenComplete((unused, throwable) -> {
+                if (throwable != null) {
+                    logAsync("clear native GTO CHILD presence for " + stateId(), throwable);
+                }
+            });
         }
 
         private void createPendingFromBuffer(
@@ -934,6 +1175,8 @@ public final class GtoNativeWirelessBridgeManager {
         private static final String WIRELESS_NETWORK = "com.gtocore.integration.ae.wireless.WirelessNetwork";
         private static final String WIRELESS_MACHINE = "com.gtocore.integration.ae.wireless.WirelessMachine";
         private static final String NODE_INFO = "com.gtocore.integration.ae.wireless.WirelessNetwork$NodeInfo";
+        private static final String NODE_TYPE = "com.gtocore.integration.ae.wireless.WirelessMachine$NodeType";
+        private static final String NETWORK_SUMMARY = "com.gtocore.common.saved.NetworkSummary";
         private static final String META_MACHINE_BLOCK_ENTITY = "com.gregtechceu.gtceu.api.blockentity.MetaMachineBlockEntity";
         private static final String ME_PART = "com.gtocore.common.machine.multiblock.part.ae.MEPartMachine";
         private static final String ME_WIRELESS_CONNECT = "com.gtocore.integration.ae.MeWirelessConnectMachine";
@@ -946,12 +1189,16 @@ public final class GtoNativeWirelessBridgeManager {
         private Class<?> wirelessNetworkClass;
         private Class<?> wirelessMachineClass;
         private Class<?> nodeInfoClass;
+        private Class<?> nodeTypeClass;
+        private Class<?> networkSummaryClass;
         private Class<?> metaMachineBlockEntityClass;
         private Class<?> mePartClass;
         private Class<?> meWirelessConnectClass;
         private Class<?> outputBusClass;
         private Class<?> outputHatchClass;
         private Constructor<?> wirelessNetworkConstructor;
+        private Constructor<?> networkSummaryConstructor;
+        private Object childNodeType;
         private Method savedDataGet;
         private Method savedDataRequireWriteToAll;
         private Method getNetworkPool;
@@ -969,11 +1216,30 @@ public final class GtoNativeWirelessBridgeManager {
         private Method getNodeInfoTable;
         private Method getNodeInfoPos;
         private Method getNodeInfoLevel;
+        private Method setNodeInfoNodeType;
+        private Method setNeedsRefresh;
         private Method getMainNode;
         private Method getWirelessConnectMainNode;
         private Method getConnectedNetworkId;
+        private Method getNodeType;
+        private Method setNodeType;
+        private Method switchNodeType;
+        private Method getNetworkListCache;
+        private Method getNodeTypeSync;
+        private Method syncedFieldGet;
+        private Method syncedFieldSetAndSyncToClient;
+        private Method intSyncedFieldSetAndSyncToClient;
+        private Method summaryGetId;
+        private Method summaryGetNickname;
+        private Method summaryIsDefault;
+        private Method summaryGetInputCount;
+        private Method summaryGetOutputCount;
+        private Method summaryGetCapacity;
+        private Method summaryGetUnassignedCount;
+        private Method summaryIsConnected;
         private Method refreshNetworkListOnServer;
         private Method leaveNetwork;
+        private Method setOnlineField;
         private Method bufferIterator;
         private Field metaMachineField;
         private Field internalBufferBus;
@@ -997,6 +1263,8 @@ public final class GtoNativeWirelessBridgeManager {
                 wirelessNetworkClass = Class.forName(WIRELESS_NETWORK, false, loader);
                 wirelessMachineClass = Class.forName(WIRELESS_MACHINE, false, loader);
                 nodeInfoClass = Class.forName(NODE_INFO, false, loader);
+                nodeTypeClass = Class.forName(NODE_TYPE, false, loader);
+                networkSummaryClass = Class.forName(NETWORK_SUMMARY, false, loader);
                 metaMachineBlockEntityClass = Class.forName(META_MACHINE_BLOCK_ENTITY, false, loader);
                 mePartClass = Class.forName(ME_PART, false, loader);
                 meWirelessConnectClass = Class.forName(ME_WIRELESS_CONNECT, false, loader);
@@ -1008,6 +1276,10 @@ public final class GtoNativeWirelessBridgeManager {
                 getNetworkPool = savedDataClass.getMethod("getNetworkPool");
                 wirelessNetworkConstructor = wirelessNetworkClass.getConstructor(
                         String.class, UUID.class, String.class, int.class);
+                networkSummaryConstructor = networkSummaryClass.getConstructor(
+                        String.class, String.class, boolean.class, int.class, int.class,
+                        int.class, int.class, boolean.class);
+                childNodeType = nodeTypeClass.getField("CHILD").get(null);
                 getNetworkId = wirelessNetworkClass.getMethod("getId");
                 getNetworkOwner = wirelessNetworkClass.getMethod("getOwner");
                 getNetworkNickname = wirelessNetworkClass.getMethod("getNickname");
@@ -1022,11 +1294,32 @@ public final class GtoNativeWirelessBridgeManager {
                 getNodeInfoTable = wirelessNetworkClass.getMethod("getNodeInfoTable");
                 getNodeInfoPos = nodeInfoClass.getMethod("getPos");
                 getNodeInfoLevel = nodeInfoClass.getMethod("getLevel");
+                setNodeInfoNodeType = nodeInfoClass.getMethod("setNodeType", nodeTypeClass);
+                setNeedsRefresh = wirelessNetworkClass.getMethod("setNeedsRefresh", boolean.class);
                 getMainNode = mePartClass.getDeclaredMethod("getMainNode");
                 getWirelessConnectMainNode = meWirelessConnectClass.getMethod("getMainNode");
                 getConnectedNetworkId = wirelessMachineClass.getMethod("getConnectedNetworkId");
+                getNodeType = wirelessMachineClass.getMethod("getNodeType");
+                setNodeType = wirelessMachineClass.getMethod("setNodeType", nodeTypeClass);
+                switchNodeType = wirelessMachineClass.getMethod("switchNodeType", nodeTypeClass);
+                getNetworkListCache = wirelessMachineClass.getMethod("getNetworkListCache");
+                getNodeTypeSync = wirelessMachineClass.getMethod("getNodeTypeSync");
+                Class<?> syncedFieldClass = getNetworkListCache.getReturnType();
+                syncedFieldGet = syncedFieldClass.getMethod("get");
+                syncedFieldSetAndSyncToClient = syncedFieldClass.getMethod("setAndSyncToClient", Object.class);
+                Class<?> intSyncedFieldClass = getNodeTypeSync.getReturnType();
+                intSyncedFieldSetAndSyncToClient = intSyncedFieldClass.getMethod("setAndSyncToClient", int.class);
+                summaryGetId = networkSummaryClass.getMethod("getId");
+                summaryGetNickname = networkSummaryClass.getMethod("getNickname");
+                summaryIsDefault = networkSummaryClass.getMethod("isDefault");
+                summaryGetInputCount = networkSummaryClass.getMethod("getInputCount");
+                summaryGetOutputCount = networkSummaryClass.getMethod("getOutputCount");
+                summaryGetCapacity = networkSummaryClass.getMethod("getCapacity");
+                summaryGetUnassignedCount = networkSummaryClass.getMethod("getUnassignedCount");
+                summaryIsConnected = networkSummaryClass.getMethod("isConnected");
                 refreshNetworkListOnServer = wirelessMachineClass.getMethod("refreshNetworkListOnServer");
                 leaveNetwork = wirelessMachineClass.getMethod("leaveNetwork");
+                setOnlineField = mePartClass.getMethod("setOnlineField", boolean.class);
 
                 // GTCEu 1.8.0 exposes this as a public final field.  Reading the
                 // exact base-class field is dedicated-server safe and, unlike
@@ -1308,6 +1601,219 @@ public final class GtoNativeWirelessBridgeManager {
             return value == null ? "" : value.toString();
         }
 
+        @SuppressWarnings("unchecked")
+        private boolean enforceMirrorChild(Object network, Object machine) {
+            if (!available() || !isWirelessNetwork(network) || machine == null
+                    || !wirelessMachineClass.isInstance(machine) || childNodeType == null
+                    || getNodeType == null || setNodeType == null) {
+                return false;
+            }
+            boolean changed = false;
+            try {
+                Object current = getNodeType.invoke(machine);
+                if (!childNodeType.equals(current)) {
+                    // Do NOT call WirelessMachine.switchNodeType here. GTO's native
+                    // WirelessNetwork refresh sees a mirror without a physical SOURCE
+                    // and immediately promotes the only CHILD back to SOURCE. Change the
+                    // role and membership atomically, then freeze native AE assignment on
+                    // this synthetic mirror. Cross-JVM transport is handled by CointCoreGTO.
+                    setNodeType.invoke(machine, childNodeType);
+                    changed = true;
+                }
+
+                Object rawInputs = getInputNodes.invoke(network);
+                if (rawInputs instanceof Collection<?> inputs) {
+                    changed |= inputs.remove(machine);
+                }
+                Object rawOutputs = getOutputNodes.invoke(network);
+                if (rawOutputs instanceof Collection<?> outputs) {
+                    Collection<Object> mutableOutputs = (Collection<Object>) outputs;
+                    if (!mutableOutputs.contains(machine)) {
+                        changed |= mutableOutputs.add(machine);
+                    }
+                }
+
+                Object rawTable = getNodeInfoTable.invoke(network);
+                if (rawTable instanceof Map<?, ?> table) {
+                    Object info = table.get(machine);
+                    if (info != null && nodeInfoClass.isInstance(info) && setNodeInfoNodeType != null) {
+                        setNodeInfoNodeType.invoke(info, childNodeType);
+                    }
+                }
+
+                if (getNodeTypeSync != null && intSyncedFieldSetAndSyncToClient != null) {
+                    Object syncField = getNodeTypeSync.invoke(machine);
+                    if (syncField != null) {
+                        intSyncedFieldSetAndSyncToClient.invoke(syncField, ((Enum<?>) childNodeType).ordinal());
+                    }
+                }
+                suppressMirrorRefresh(network);
+            } catch (ReflectiveOperationException | RuntimeException exception) {
+                LOGGER.debug("Could not normalize native GTO mirror node to CHILD: {}", exception.getMessage());
+            }
+            return changed;
+        }
+
+        private void suppressMirrorRefresh(Object network) {
+            if (!available() || !isWirelessNetwork(network) || setNeedsRefresh == null) {
+                return;
+            }
+            try {
+                setNeedsRefresh.invoke(network, false);
+            } catch (ReflectiveOperationException | RuntimeException exception) {
+                LOGGER.debug("Could not suppress native GTO mirror refresh: {}", exception.getMessage());
+            }
+        }
+
+        private void patchNetworkSummaryChildCounts(Object machine, Map<String, Integer> extraChildren) {
+            if (!available() || machine == null || !wirelessMachineClass.isInstance(machine)
+                    || extraChildren == null || getNetworkListCache == null
+                    || syncedFieldGet == null || syncedFieldSetAndSyncToClient == null) {
+                return;
+            }
+            try {
+                Object syncedField = getNetworkListCache.invoke(machine);
+                if (syncedField == null) {
+                    return;
+                }
+                Object raw = syncedFieldGet.invoke(syncedField);
+                if (!(raw instanceof List<?> summaries) || summaries.isEmpty()) {
+                    return;
+                }
+
+                Map<Object, Object> pool = networkPool();
+                if (pool == null) {
+                    return;
+                }
+
+                List<Object> updated = new ArrayList<>(summaries.size());
+                boolean changed = false;
+                for (Object summary : summaries) {
+                    if (summary == null || !networkSummaryClass.isInstance(summary)) {
+                        updated.add(summary);
+                        continue;
+                    }
+
+                    String id = string(summaryGetId.invoke(summary));
+                    Object network = pool.get(id);
+                    if (!isWirelessNetwork(network)) {
+                        updated.add(summary);
+                        continue;
+                    }
+
+                    int localInputs = number(getInputCount.invoke(network));
+                    int localOutputs = number(getOutputCount.invoke(network));
+                    int extra = Math.max(0, extraChildren.getOrDefault(id, 0));
+                    int displayOutputs = (int) Math.min(Integer.MAX_VALUE, (long) localOutputs + extra);
+                    int displayCapacity = number(getTotalCapacity.invoke(network));
+                    int oldInputs = number(summaryGetInputCount.invoke(summary));
+                    int oldOutputs = number(summaryGetOutputCount.invoke(summary));
+                    int oldCapacity = number(summaryGetCapacity.invoke(summary));
+
+                    if (oldInputs == localInputs
+                            && oldOutputs == displayOutputs
+                            && oldCapacity == displayCapacity) {
+                        updated.add(summary);
+                        continue;
+                    }
+
+                    Object replacement = networkSummaryConstructor.newInstance(
+                            id,
+                            string(summaryGetNickname.invoke(summary)),
+                            Boolean.TRUE.equals(summaryIsDefault.invoke(summary)),
+                            localInputs,
+                            displayOutputs,
+                            displayCapacity,
+                            number(summaryGetUnassignedCount.invoke(summary)),
+                            Boolean.TRUE.equals(summaryIsConnected.invoke(summary))
+                    );
+                    updated.add(replacement);
+                    changed = true;
+                }
+
+                if (changed) {
+                    syncedFieldSetAndSyncToClient.invoke(syncedField, List.copyOf(updated));
+                }
+            } catch (ReflectiveOperationException | RuntimeException exception) {
+                LOGGER.debug("Could not patch native GTO network summary CHILD counts: {}", exception.getMessage());
+            }
+        }
+
+        private void patchRemoteMirrorSummaryCounts(
+                Object machine,
+                Map<String, SupplyBufferDatabase.GtoWirelessNetworkSnapshot> snapshots,
+                Map<String, Integer> remoteChildren
+        ) {
+            if (!available() || machine == null || !wirelessMachineClass.isInstance(machine)
+                    || snapshots == null || snapshots.isEmpty() || getNetworkListCache == null
+                    || syncedFieldGet == null || syncedFieldSetAndSyncToClient == null) {
+                return;
+            }
+            try {
+                Object syncedField = getNetworkListCache.invoke(machine);
+                if (syncedField == null) {
+                    return;
+                }
+                Object raw = syncedFieldGet.invoke(syncedField);
+                if (!(raw instanceof List<?> summaries) || summaries.isEmpty()) {
+                    return;
+                }
+
+                List<Object> updated = new ArrayList<>(summaries.size());
+                boolean changed = false;
+                for (Object summary : summaries) {
+                    if (summary == null || !networkSummaryClass.isInstance(summary)) {
+                        updated.add(summary);
+                        continue;
+                    }
+
+                    String id = string(summaryGetId.invoke(summary));
+                    SupplyBufferDatabase.GtoWirelessNetworkSnapshot snapshot = snapshots.get(id);
+                    if (snapshot == null) {
+                        updated.add(summary);
+                        continue;
+                    }
+
+                    int displayInputs = Math.max(0, snapshot.inputCount());
+                    int extra = remoteChildren == null ? 0 : Math.max(0, remoteChildren.getOrDefault(id, 0));
+                    int displayOutputs = (int) Math.min(
+                            Integer.MAX_VALUE,
+                            (long) Math.max(0, snapshot.outputCount()) + extra
+                    );
+                    int displayCapacity = Math.max(0, snapshot.totalCapacity());
+                    int oldInputs = number(summaryGetInputCount.invoke(summary));
+                    int oldOutputs = number(summaryGetOutputCount.invoke(summary));
+                    int oldCapacity = number(summaryGetCapacity.invoke(summary));
+
+                    if (oldInputs == displayInputs
+                            && oldOutputs == displayOutputs
+                            && oldCapacity == displayCapacity) {
+                        updated.add(summary);
+                        continue;
+                    }
+
+                    Object replacement = networkSummaryConstructor.newInstance(
+                            id,
+                            string(summaryGetNickname.invoke(summary)),
+                            Boolean.TRUE.equals(summaryIsDefault.invoke(summary)),
+                            displayInputs,
+                            displayOutputs,
+                            displayCapacity,
+                            number(summaryGetUnassignedCount.invoke(summary)),
+                            Boolean.TRUE.equals(summaryIsConnected.invoke(summary))
+                    );
+                    updated.add(replacement);
+                    changed = true;
+                }
+
+                if (changed) {
+                    syncedFieldSetAndSyncToClient.invoke(syncedField, List.copyOf(updated));
+                }
+            } catch (ReflectiveOperationException | RuntimeException exception) {
+                LOGGER.debug("Could not patch REMOTE native GTO mirror summary counts: {}", exception.getMessage());
+            }
+        }
+
         private void refreshNetworkList(Object machine) {
             if (available() && machine != null && wirelessMachineClass.isInstance(machine)) {
                 invoke(refreshNetworkListOnServer, machine);
@@ -1317,6 +1823,17 @@ public final class GtoNativeWirelessBridgeManager {
         private void leaveNetwork(Object machine) {
             if (available() && machine != null && wirelessMachineClass.isInstance(machine)) {
                 invoke(leaveNetwork, machine);
+            }
+        }
+
+        private void setOnlineField(Object machine, boolean online) {
+            if (!available() || machine == null || !mePartClass.isInstance(machine) || setOnlineField == null) {
+                return;
+            }
+            try {
+                setOnlineField.invoke(machine, online);
+            } catch (ReflectiveOperationException | RuntimeException exception) {
+                LOGGER.debug("Could not update native GTO ME visual online state: {}", exception.getMessage());
             }
         }
 

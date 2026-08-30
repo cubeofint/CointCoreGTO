@@ -245,6 +245,17 @@ public final class SupplyBufferService {
         }, EXECUTOR);
     }
 
+    public static CompletableFuture<java.util.Map<String, Integer>> readGtoWirelessRemoteChildCounts() {
+        return CompletableFuture.supplyAsync(() -> {
+            ClusterConfig config = requireConfig();
+            try {
+                return SupplyBufferDatabase.readGtoWirelessRemoteChildCounts(config);
+            } catch (Exception exception) {
+                throw new SupplyServiceException(exception);
+            }
+        }, EXECUTOR);
+    }
+
     public static CompletableFuture<Long> replaceWirelessCatalog(
             String providerNode,
             Collection<SupplyBufferDatabase.WirelessCatalogEntry> entries

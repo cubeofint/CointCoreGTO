@@ -609,6 +609,43 @@ public final class SupplyBufferDatabase {
         }
     }
 
+    public static Map<String, Integer> readGtoWirelessRemoteChildCounts(
+            ClusterConfig config
+    ) throws SQLException {
+        ensureSchema(config);
+        String sql = """
+                SELECT endpoints.link_id, COUNT(*) AS child_count
+                FROM cluster_supply_endpoints AS endpoints
+                LEFT JOIN cluster_nodes AS nodes ON BINARY nodes.node_id = BINARY endpoints.node_id
+                WHERE endpoints.endpoint_role = 'gto-child'
+                  AND endpoints.link_id LIKE 'gto:%'
+                  AND endpoints.link_online = 1
+                  AND endpoints.last_seen >= TIMESTAMPADD(SECOND, -?, CURRENT_TIMESTAMP(3))
+                  AND nodes.node_id IS NOT NULL
+                  AND nodes.stopped_at IS NULL
+                  AND nodes.last_seen >= TIMESTAMPADD(SECOND, -?, CURRENT_TIMESTAMP(3))
+                GROUP BY endpoints.link_id
+                """;
+
+        Map<String, Integer> result = new LinkedHashMap<>();
+        int timeout = Math.max(5, config.nodeTimeoutSeconds());
+        try (Connection connection = open(config);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, timeout);
+            statement.setInt(2, timeout);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    String linkId = resultSet.getString(1);
+                    if (linkId == null || !linkId.startsWith("gto:") || linkId.length() <= 4) {
+                        continue;
+                    }
+                    result.put(linkId.substring(4), Math.max(0, resultSet.getInt(2)));
+                }
+            }
+        }
+        return Map.copyOf(result);
+    }
+
     public static long replaceWirelessCatalog(
             ClusterConfig config,
             String providerNode,
