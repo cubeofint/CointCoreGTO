@@ -142,12 +142,24 @@ public final class PriceCalcEnergyResolver {
                 return null;
             }
 
-            Object registryObject = invokeNoArg(recipeTypes, "registry");
-            if (!(registryObject instanceof Map<?, ?> registryMap)) {
+            // GTCEu 26.x removed GTRegistry.registry(), but both 1.8.0 and 26.x
+            // expose values(). Prefer the common API and only fall back to the
+            // legacy Map accessor if necessary.
+            Object valuesObject;
+            try {
+                valuesObject = invokeNoArg(recipeTypes, "values");
+            } catch (Throwable noValuesMethod) {
+                Object registryObject = invokeNoArg(recipeTypes, "registry");
+                if (!(registryObject instanceof Map<?, ?> registryMap)) {
+                    return null;
+                }
+                valuesObject = registryMap.values();
+            }
+            if (!(valuesObject instanceof Iterable<?> recipeTypesIterable)) {
                 return null;
             }
 
-            for (Object recipeType : registryMap.values()) {
+            for (Object recipeType : recipeTypesIterable) {
                 if (recipeType == null) {
                     continue;
                 }

@@ -109,13 +109,15 @@ public final class GtoEarlyRecipeBootstrap {
             throw new IllegalStateException("Assembler recipeBuilder template is null");
         }
 
-        Class<?> gtRecipeBuilderClass = Class.forName(
-                "com.gregtechceu.gtceu.data.recipe.builder.GTRecipeBuilder",
-                false,
-                loader
-        );
-
-        Field onSaveField = gtRecipeBuilderClass.getField("onSave");
+        // GTCEu moved GTRecipeBuilder from
+        // com.gregtechceu.gtceu.data.recipe.builder.GTRecipeBuilder (1.8.0) to
+        // com.gregtechceu.gtceu.api.recipe.GTRecipeBuilder (26.x), and onSave became protected.
+        // Resolve the field from the actual runtime builder class instead of hard-coding either API.
+        Field onSaveField = findField(templateBuilder.getClass(), "onSave");
+        if (onSaveField == null) {
+            throw new NoSuchFieldException(templateBuilder.getClass().getName() + ".onSave");
+        }
+        onSaveField.setAccessible(true);
         Object previousOnSaveObject = onSaveField.get(templateBuilder);
 
         final Consumer<Object> previousOnSave;
@@ -162,5 +164,15 @@ public final class GtoEarlyRecipeBootstrap {
 
     public static synchronized boolean isBuildCallbackInstalled() {
         return buildCallbackInstalled;
+    }
+
+    private static Field findField(Class<?> type, String name) {
+        for (Class<?> current = type; current != null && current != Object.class; current = current.getSuperclass()) {
+            try {
+                return current.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
+            }
+        }
+        return null;
     }
 }

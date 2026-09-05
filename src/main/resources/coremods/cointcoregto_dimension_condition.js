@@ -5,7 +5,7 @@ function initializeCoreMod() {
     var MethodInsnNode = Java.type('org.objectweb.asm.tree.MethodInsnNode');
     var InsnNode = Java.type('org.objectweb.asm.tree.InsnNode');
 
-    print('[CointCoreGTO FMLCoremod] initializeCoreMod');
+    print('[CointCoreGTO FMLCoremod] initializeCoreMod DimensionCondition dual-compat');
 
     return {
         'DimensionCondition': {
@@ -28,9 +28,28 @@ function initializeCoreMod() {
                     throw new Error('DimensionCondition.testCondition(...):boolean not found');
                 }
 
+                // GTCEu 1.8.0 / GTOCore 0.5.5:
+                //   testCondition(GTRecipeDefinition, RecipeLogic)
+                //   local 2 = RecipeLogic
+                //
+                // GTCEu 26.x / GTOCore 0.5.6:
+                //   testCondition(IRecipeHandlerHolder, RecipeHandlerUnit, GTRecipeDefinition)
+                //   local 1 = IRecipeHandlerHolder
+                var contextLocal;
+                var apiFlavor;
+                if (found.desc.indexOf('Lcom/gregtechceu/gtceu/api/recipe/handler/IRecipeHandlerHolder;') >= 0) {
+                    contextLocal = 1;
+                    apiFlavor = '0.5.6+/GTCEu26';
+                } else if (found.desc.indexOf('Lcom/gregtechceu/gtceu/api/machine/trait/RecipeLogic;') >= 0) {
+                    contextLocal = 2;
+                    apiFlavor = '0.5.5/GTCEu1.8';
+                } else {
+                    throw new Error('Unsupported DimensionCondition.testCondition descriptor: ' + found.desc);
+                }
+
                 var code = new InsnList();
                 code.add(new VarInsnNode(Opcodes.ALOAD, 0));
-                code.add(new VarInsnNode(Opcodes.ALOAD, 2));
+                code.add(new VarInsnNode(Opcodes.ALOAD, contextLocal));
                 code.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     'Crazer/cubeofinterest/cointcoregto/coremod/DimensionConditionCoremodHook',
@@ -44,9 +63,9 @@ function initializeCoreMod() {
                 if (found.tryCatchBlocks !== null) found.tryCatchBlocks.clear();
                 found.instructions.add(code);
                 found.maxStack = 2;
-                if (found.maxLocals < 3) found.maxLocals = 3;
+                if (found.maxLocals <= contextLocal) found.maxLocals = contextLocal + 1;
 
-                print('[CointCoreGTO FMLCoremod] APPLIED to DimensionCondition.testCondition ' + found.desc);
+                print('[CointCoreGTO FMLCoremod] APPLIED to DimensionCondition.testCondition ' + found.desc + ' [' + apiFlavor + ']');
                 return classNode;
             }
         }

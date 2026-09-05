@@ -1227,8 +1227,13 @@ public final class GtoNativeWirelessBridgeManager {
         private Method getNetworkListCache;
         private Method getNodeTypeSync;
         private Method syncedFieldGet;
-        private Method syncedFieldSetAndSyncToClient;
-        private Method intSyncedFieldSetAndSyncToClient;
+        private Method objectSyncSetAndSyncToClient;
+        private Method objectSyncSet;
+        private Method objectSyncMarkAsChanged;
+        private Method intSyncSetAndSyncToClient;
+        private Method intSyncSet;
+        private Method intSyncMarkAsChanged;
+        private String syncApiFlavor = "unknown";
         private Method summaryGetId;
         private Method summaryGetNickname;
         private Method summaryIsDefault;
@@ -1306,9 +1311,24 @@ public final class GtoNativeWirelessBridgeManager {
                 getNodeTypeSync = wirelessMachineClass.getMethod("getNodeTypeSync");
                 Class<?> syncedFieldClass = getNetworkListCache.getReturnType();
                 syncedFieldGet = syncedFieldClass.getMethod("get");
-                syncedFieldSetAndSyncToClient = syncedFieldClass.getMethod("setAndSyncToClient", Object.class);
+                try {
+                    // GTOCore 0.5.5 / GTOLib 1.0 legacy sync API.
+                    objectSyncSetAndSyncToClient = syncedFieldClass.getMethod("setAndSyncToClient", Object.class);
+                    syncApiFlavor = "0.5.5 legacy ISync";
+                } catch (NoSuchMethodException legacyObjectSyncMissing) {
+                    // GTOCore 0.5.6+ / DataSyncLib: set(value) + markAsChanged().
+                    objectSyncSet = syncedFieldClass.getMethod("set", Object.class);
+                    objectSyncMarkAsChanged = syncedFieldClass.getMethod("markAsChanged");
+                    syncApiFlavor = "0.5.6+ DataSyncLib";
+                }
+
                 Class<?> intSyncedFieldClass = getNodeTypeSync.getReturnType();
-                intSyncedFieldSetAndSyncToClient = intSyncedFieldClass.getMethod("setAndSyncToClient", int.class);
+                try {
+                    intSyncSetAndSyncToClient = intSyncedFieldClass.getMethod("setAndSyncToClient", int.class);
+                } catch (NoSuchMethodException legacyIntSyncMissing) {
+                    intSyncSet = intSyncedFieldClass.getMethod("set", int.class);
+                    intSyncMarkAsChanged = intSyncedFieldClass.getMethod("markAsChanged");
+                }
                 summaryGetId = networkSummaryClass.getMethod("getId");
                 summaryGetNickname = networkSummaryClass.getMethod("getNickname");
                 summaryIsDefault = networkSummaryClass.getMethod("isDefault");
@@ -1341,7 +1361,7 @@ public final class GtoNativeWirelessBridgeManager {
                     }
                 }
                 available = true;
-                LOGGER.info("GTOCore 0.5.x native Wireless ME bridge enabled");
+                LOGGER.info("GTOCore native Wireless ME bridge enabled ({})", syncApiFlavor);
             } catch (Throwable throwable) {
                 available = false;
                 LOGGER.warn("GTO native Wireless ME API is unavailable: {}", throwable.getMessage());
@@ -1641,10 +1661,10 @@ public final class GtoNativeWirelessBridgeManager {
                     }
                 }
 
-                if (getNodeTypeSync != null && intSyncedFieldSetAndSyncToClient != null) {
+                if (getNodeTypeSync != null && canWriteIntSync()) {
                     Object syncField = getNodeTypeSync.invoke(machine);
                     if (syncField != null) {
-                        intSyncedFieldSetAndSyncToClient.invoke(syncField, ((Enum<?>) childNodeType).ordinal());
+                        writeIntSync(syncField, ((Enum<?>) childNodeType).ordinal());
                     }
                 }
                 suppressMirrorRefresh(network);
@@ -1668,7 +1688,7 @@ public final class GtoNativeWirelessBridgeManager {
         private void patchNetworkSummaryChildCounts(Object machine, Map<String, Integer> extraChildren) {
             if (!available() || machine == null || !wirelessMachineClass.isInstance(machine)
                     || extraChildren == null || getNetworkListCache == null
-                    || syncedFieldGet == null || syncedFieldSetAndSyncToClient == null) {
+                    || syncedFieldGet == null || !canWriteObjectSync()) {
                 return;
             }
             try {
@@ -1732,7 +1752,7 @@ public final class GtoNativeWirelessBridgeManager {
                 }
 
                 if (changed) {
-                    syncedFieldSetAndSyncToClient.invoke(syncedField, List.copyOf(updated));
+                    writeObjectSync(syncedField, List.copyOf(updated));
                 }
             } catch (ReflectiveOperationException | RuntimeException exception) {
                 LOGGER.debug("Could not patch native GTO network summary CHILD counts: {}", exception.getMessage());
@@ -1746,7 +1766,7 @@ public final class GtoNativeWirelessBridgeManager {
         ) {
             if (!available() || machine == null || !wirelessMachineClass.isInstance(machine)
                     || snapshots == null || snapshots.isEmpty() || getNetworkListCache == null
-                    || syncedFieldGet == null || syncedFieldSetAndSyncToClient == null) {
+                    || syncedFieldGet == null || !canWriteObjectSync()) {
                 return;
             }
             try {
@@ -1807,11 +1827,45 @@ public final class GtoNativeWirelessBridgeManager {
                 }
 
                 if (changed) {
-                    syncedFieldSetAndSyncToClient.invoke(syncedField, List.copyOf(updated));
+                    writeObjectSync(syncedField, List.copyOf(updated));
                 }
             } catch (ReflectiveOperationException | RuntimeException exception) {
                 LOGGER.debug("Could not patch REMOTE native GTO mirror summary counts: {}", exception.getMessage());
             }
+        }
+
+        private boolean canWriteObjectSync() {
+            return objectSyncSetAndSyncToClient != null
+                    || (objectSyncSet != null && objectSyncMarkAsChanged != null);
+        }
+
+        private boolean canWriteIntSync() {
+            return intSyncSetAndSyncToClient != null
+                    || (intSyncSet != null && intSyncMarkAsChanged != null);
+        }
+
+        private void writeObjectSync(Object syncField, Object value) throws ReflectiveOperationException {
+            if (objectSyncSetAndSyncToClient != null) {
+                objectSyncSetAndSyncToClient.invoke(syncField, value);
+                return;
+            }
+            if (objectSyncSet == null || objectSyncMarkAsChanged == null) {
+                throw new NoSuchMethodException("No supported GTO object sync writer");
+            }
+            objectSyncSet.invoke(syncField, value);
+            objectSyncMarkAsChanged.invoke(syncField);
+        }
+
+        private void writeIntSync(Object syncField, int value) throws ReflectiveOperationException {
+            if (intSyncSetAndSyncToClient != null) {
+                intSyncSetAndSyncToClient.invoke(syncField, value);
+                return;
+            }
+            if (intSyncSet == null || intSyncMarkAsChanged == null) {
+                throw new NoSuchMethodException("No supported GTO int sync writer");
+            }
+            intSyncSet.invoke(syncField, value);
+            intSyncMarkAsChanged.invoke(syncField);
         }
 
         private void refreshNetworkList(Object machine) {

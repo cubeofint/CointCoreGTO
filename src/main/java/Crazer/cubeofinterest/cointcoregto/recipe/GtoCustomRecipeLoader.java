@@ -340,7 +340,7 @@ public final class GtoCustomRecipeLoader {
             invokeExact(builder, "MANAt", new Class<?>[]{long.class}, json.get("manat").getAsLong());
         }
         if (json.has("cwu_per_tick")) {
-            invokeExact(builder, "CWUt", new Class<?>[]{int.class}, json.get("cwu_per_tick").getAsInt());
+            invokeIntOrLong(builder, "CWUt", json.get("cwu_per_tick").getAsLong());
         }
         if (json.has("total_cwu")) {
             invokeExact(builder, "totalCWU", new Class<?>[]{int.class}, json.get("total_cwu").getAsInt());
@@ -711,13 +711,25 @@ public final class GtoCustomRecipeLoader {
             throw new IllegalStateException("GTRegistries.RECIPE_TYPES is null");
         }
 
-        Method registryMethod = findExactMethod(recipeTypesRegistry.getClass(), "registry");
-        Object registryObject = invoke(recipeTypesRegistry, registryMethod);
-        if (!(registryObject instanceof Map<?, ?> registryMap)) {
-            throw new IllegalStateException("GTRegistries.RECIPE_TYPES.registry() is not a Map");
+        // Both GTCEu 1.8.0 and 26.x expose a registry get(K), while 26.x removed
+        // the old registry() -> Map accessor. Prefer get() so the same CointCoreGTO
+        // jar works on both GTOCore 0.5.5 and 0.5.6+.
+        try {
+            Method getMethod = findCompatibleOneArgMethod(
+                    recipeTypesRegistry.getClass(),
+                    "get",
+                    typeId.getClass()
+            );
+            return invoke(recipeTypesRegistry, getMethod, typeId);
+        } catch (NoSuchMethodException noGetMethod) {
+            // Legacy fallback for unexpected older registry implementations.
+            Method registryMethod = findExactMethod(recipeTypesRegistry.getClass(), "registry");
+            Object registryObject = invoke(recipeTypesRegistry, registryMethod);
+            if (!(registryObject instanceof Map<?, ?> registryMap)) {
+                throw new IllegalStateException("GTRegistries.RECIPE_TYPES has neither compatible get() nor Map registry()");
+            }
+            return registryMap.get(typeId);
         }
-
-        return registryMap.get(typeId);
     }
 
     private static Item resolveItem(String idText) {
@@ -760,6 +772,18 @@ public final class GtoCustomRecipeLoader {
             );
         }
         return new FluidStack(fluid, (int) amount);
+    }
+
+    private static void invokeIntOrLong(Object target, String name, long value) throws Exception {
+        // GTCEu 1.8.0 uses CWUt(int); GTCEu 26.x changed it to CWUt(long).
+        if (value >= Integer.MIN_VALUE && value <= Integer.MAX_VALUE) {
+            try {
+                invokeExact(target, name, new Class<?>[]{int.class}, (int) value);
+                return;
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        invokeExact(target, name, new Class<?>[]{long.class}, value);
     }
 
     private static void invokeExact(Object target, String name, Class<?>[] parameterTypes, Object... args) throws Exception {
