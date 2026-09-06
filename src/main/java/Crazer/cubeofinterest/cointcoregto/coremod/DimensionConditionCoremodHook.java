@@ -2,146 +2,58 @@ package Crazer.cubeofinterest.cointcoregto.coremod;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * Runtime hook for the DimensionCondition Forge CoreMod.
- *
- * Supports both:
- * - GTOCore 0.5.5 / GTCEu 1.8.0 (RecipeLogic -> machine -> self())
- * - GTOCore 0.5.6+ / GTCEu 26.x (IRecipeHandlerHolder -> self())
- *
- * Deliberately has no compile-time dependency on GTCEu, GTOCore or Minecraft.
- */
 public final class DimensionConditionCoremodHook {
-    private static volatile Field dimensionField;
-    private static volatile Field machineField;
-    private static volatile Method contextSelfMethod;
-    private static volatile Method machineSelfMethod;
-    private static volatile Method getLevelMethod;
-    private static volatile Method levelDimensionMethod;
-
-    private static final AtomicBoolean aliasLogged = new AtomicBoolean();
-    private static final AtomicBoolean oldApiLogged = new AtomicBoolean();
-    private static final AtomicBoolean newApiLogged = new AtomicBoolean();
-    private static final AtomicBoolean errorLogged = new AtomicBoolean();
-
     private DimensionConditionCoremodHook() {}
 
-    public static boolean testCondition(Object condition, Object context) {
+    public static boolean isPersonalSpaceOverworld(Object condition, Object holder) {
         try {
-            if (condition == null || context == null) return false;
+            if (condition == null || holder == null) return false;
 
-            Field df = dimensionField;
-            if (df == null || !df.getDeclaringClass().isAssignableFrom(condition.getClass())) {
-                df = condition.getClass().getField("dimension");
-                dimensionField = df;
-            }
-            Object expected = df.get(condition);
-            if (expected == null) return false;
+            Object expected = getExpectedDimension(condition);
+            if (expected == null || !String.valueOf(expected).contains("minecraft:overworld")) return false;
 
-            Object metaMachine = resolveMetaMachine(context);
-            if (metaMachine == null) return false;
+            Method selfMethod = holder.getClass().getMethod("self");
+            Object machine = selfMethod.invoke(holder);
+            if (machine == null) return false;
 
-            Method glm = getLevelMethod;
-            if (glm == null || !glm.getDeclaringClass().isAssignableFrom(metaMachine.getClass())) {
-                glm = metaMachine.getClass().getMethod("getLevel");
-                getLevelMethod = glm;
-            }
-            Object level = glm.invoke(metaMachine);
+            Method getLevelMethod = machine.getClass().getMethod("getLevel");
+            Object level = getLevelMethod.invoke(machine);
             if (level == null) return false;
 
-            Method ldm = levelDimensionMethod;
-            if (ldm == null || !ldm.getDeclaringClass().isAssignableFrom(level.getClass())) {
-                try {
-                    ldm = level.getClass().getMethod("m_46472_");
-                } catch (NoSuchMethodException ignored) {
-                    ldm = level.getClass().getMethod("dimension");
-                }
-                levelDimensionMethod = ldm;
-            }
-            Object actual = ldm.invoke(level);
-            if (actual == null) return false;
-
-            // Preserve the original DimensionCondition semantics first: ResourceKey identity equality.
-            if (expected == actual) return true;
-
-            String expectedText = String.valueOf(expected);
-            if (!expectedText.contains("minecraft:overworld")) return false;
-
-            String actualText = String.valueOf(actual);
-            boolean personalSpace = actualText.contains("personalspace:personal_space_dimensions/");
-            if (personalSpace && aliasLogged.compareAndSet(false, true)) {
-                System.err.println(
-                        "[CointCoreGTO FMLCoremod] SUCCESS: PersonalSpace accepted as minecraft:overworld "
-                                + "in DimensionCondition; actual=" + actualText
-                );
-            }
-            return personalSpace;
-        } catch (Throwable t) {
-            if (errorLogged.compareAndSet(false, true)) {
-                System.err.println("[CointCoreGTO FMLCoremod] DimensionCondition hook failed: " + t);
-                t.printStackTrace(System.err);
-            }
+            Object actual = getDimension(level);
+            return actual != null && String.valueOf(actual).contains("personalspace:personal_space_dimensions/");
+        } catch (Throwable ignored) {
             return false;
         }
     }
 
-    private static Object resolveMetaMachine(Object context) throws Exception {
-        // GTOCore 0.5.6+ / GTCEu 26.x: IRecipeHandlerHolder itself is an IMachineFeature.
-        // It exposes self() -> MetaMachine directly.
+    private static Object getExpectedDimension(Object condition) throws Exception {
         try {
-            Method self = contextSelfMethod;
-            if (self == null || !self.getDeclaringClass().isAssignableFrom(context.getClass())) {
-                self = context.getClass().getMethod("self");
-                contextSelfMethod = self;
-            }
-            Object metaMachine = self.invoke(context);
-            if (metaMachine != null) {
-                if (newApiLogged.compareAndSet(false, true)) {
-                    System.err.println("[CointCoreGTO FMLCoremod] DimensionCondition runtime API: GTCEu 26.x holder/self");
+            Field field = condition.getClass().getField("dimension");
+            return field.get(condition);
+        } catch (NoSuchFieldException ignored) {
+            Class<?> current = condition.getClass();
+            while (current != null) {
+                try {
+                    Field field = current.getDeclaredField("dimension");
+                    field.setAccessible(true);
+                    return field.get(condition);
+                } catch (NoSuchFieldException ignoredField) {
+                    current = current.getSuperclass();
                 }
-                return metaMachine;
             }
-        } catch (NoSuchMethodException ignored) {
-            // Expected on GTCEu 1.8.0 RecipeLogic; fall through to the legacy path.
+            throw new NoSuchFieldException("dimension");
         }
-
-        // GTOCore 0.5.5 / GTCEu 1.8.0: RecipeLogic has a public 'machine' field;
-        // that machine feature exposes self() -> MetaMachine.
-        Field mf = machineField;
-        if (mf == null || !mf.getDeclaringClass().isAssignableFrom(context.getClass())) {
-            try {
-                mf = context.getClass().getField("machine");
-            } catch (NoSuchFieldException publicMissing) {
-                mf = findField(context.getClass(), "machine");
-                if (mf == null) throw publicMissing;
-                mf.setAccessible(true);
-            }
-            machineField = mf;
-        }
-        Object machine = mf.get(context);
-        if (machine == null) return null;
-
-        Method sm = machineSelfMethod;
-        if (sm == null || !sm.getDeclaringClass().isAssignableFrom(machine.getClass())) {
-            sm = machine.getClass().getMethod("self");
-            machineSelfMethod = sm;
-        }
-        Object metaMachine = sm.invoke(machine);
-        if (metaMachine != null && oldApiLogged.compareAndSet(false, true)) {
-            System.err.println("[CointCoreGTO FMLCoremod] DimensionCondition runtime API: GTCEu 1.8 RecipeLogic/machine/self");
-        }
-        return metaMachine;
     }
 
-    private static Field findField(Class<?> type, String name) {
-        for (Class<?> current = type; current != null && current != Object.class; current = current.getSuperclass()) {
-            try {
-                return current.getDeclaredField(name);
-            } catch (NoSuchFieldException ignored) {
-            }
+    private static Object getDimension(Object level) throws Exception {
+        try {
+            Method method = level.getClass().getMethod("m_46472_");
+            return method.invoke(level);
+        } catch (NoSuchMethodException ignored) {
+            Method method = level.getClass().getMethod("dimension");
+            return method.invoke(level);
         }
-        return null;
     }
 }

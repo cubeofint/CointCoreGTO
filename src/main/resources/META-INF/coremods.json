@@ -1,3 +1,4 @@
 {
-  "cointcoregto_dimension_condition": "coremods/cointcoregto_dimension_condition.js"
+  "cointcoregto_dimension_condition": "coremods/cointcoregto_dimension_condition.js",
+  "cointcoregto_gto056_huge_bus_ae2": "coremods/cointcoregto_gto056_huge_bus_ae2.js"
 }

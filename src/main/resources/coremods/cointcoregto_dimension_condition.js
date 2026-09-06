@@ -1,11 +1,11 @@
 function initializeCoreMod() {
     var Opcodes = Java.type('org.objectweb.asm.Opcodes');
     var InsnList = Java.type('org.objectweb.asm.tree.InsnList');
+    var InsnNode = Java.type('org.objectweb.asm.tree.InsnNode');
     var VarInsnNode = Java.type('org.objectweb.asm.tree.VarInsnNode');
     var MethodInsnNode = Java.type('org.objectweb.asm.tree.MethodInsnNode');
-    var InsnNode = Java.type('org.objectweb.asm.tree.InsnNode');
-
-    print('[CointCoreGTO FMLCoremod] initializeCoreMod DimensionCondition dual-compat');
+    var JumpInsnNode = Java.type('org.objectweb.asm.tree.JumpInsnNode');
+    var LabelNode = Java.type('org.objectweb.asm.tree.LabelNode');
 
     return {
         'DimensionCondition': {
@@ -15,57 +15,55 @@ function initializeCoreMod() {
             },
             'transformer': function (classNode) {
                 var found = null;
+
                 for (var i = 0; i < classNode.methods.size(); i++) {
-                    var m = classNode.methods.get(i);
-                    if (m.name === 'testCondition' && m.desc.endsWith(')Z')) {
+                    var method = classNode.methods.get(i);
+                    if (method.name === 'testCondition' && method.desc.endsWith(')Z')) {
                         if (found !== null) {
                             throw new Error('Multiple boolean testCondition methods found in DimensionCondition');
                         }
-                        found = m;
+                        found = method;
                     }
                 }
+
                 if (found === null) {
                     throw new Error('DimensionCondition.testCondition(...):boolean not found');
                 }
 
-                // GTCEu 1.8.0 / GTOCore 0.5.5:
-                //   testCondition(GTRecipeDefinition, RecipeLogic)
-                //   local 2 = RecipeLogic
-                //
-                // GTCEu 26.x / GTOCore 0.5.6:
-                //   testCondition(IRecipeHandlerHolder, RecipeHandlerUnit, GTRecipeDefinition)
-                //   local 1 = IRecipeHandlerHolder
-                var contextLocal;
-                var apiFlavor;
-                if (found.desc.indexOf('Lcom/gregtechceu/gtceu/api/recipe/handler/IRecipeHandlerHolder;') >= 0) {
-                    contextLocal = 1;
-                    apiFlavor = '0.5.6+/GTCEu26';
-                } else if (found.desc.indexOf('Lcom/gregtechceu/gtceu/api/machine/trait/RecipeLogic;') >= 0) {
-                    contextLocal = 2;
-                    apiFlavor = '0.5.5/GTCEu1.8';
-                } else {
-                    throw new Error('Unsupported DimensionCondition.testCondition descriptor: ' + found.desc);
+                var returns = [];
+                for (var insn = found.instructions.getFirst(); insn !== null; insn = insn.getNext()) {
+                    if (insn.getOpcode() === Opcodes.IRETURN) {
+                        returns.push(insn);
+                    }
                 }
 
-                var code = new InsnList();
-                code.add(new VarInsnNode(Opcodes.ALOAD, 0));
-                code.add(new VarInsnNode(Opcodes.ALOAD, contextLocal));
-                code.add(new MethodInsnNode(
-                    Opcodes.INVOKESTATIC,
-                    'Crazer/cubeofinterest/cointcoregto/coremod/DimensionConditionCoremodHook',
-                    'testCondition',
-                    '(Ljava/lang/Object;Ljava/lang/Object;)Z',
-                    false
-                ));
-                code.add(new InsnNode(Opcodes.IRETURN));
+                if (returns.length === 0) {
+                    throw new Error('DimensionCondition.testCondition has no IRETURN');
+                }
 
-                found.instructions.clear();
-                if (found.tryCatchBlocks !== null) found.tryCatchBlocks.clear();
-                found.instructions.add(code);
-                found.maxStack = 2;
-                if (found.maxLocals <= contextLocal) found.maxLocals = contextLocal + 1;
+                for (var r = 0; r < returns.length; r++) {
+                    var ret = returns[r];
+                    var keepOriginal = new LabelNode();
+                    var patch = new InsnList();
 
-                print('[CointCoreGTO FMLCoremod] APPLIED to DimensionCondition.testCondition ' + found.desc + ' [' + apiFlavor + ']');
+                    patch.add(new InsnNode(Opcodes.DUP));
+                    patch.add(new JumpInsnNode(Opcodes.IFNE, keepOriginal));
+                    patch.add(new InsnNode(Opcodes.POP));
+                    patch.add(new VarInsnNode(Opcodes.ALOAD, 0));
+                    patch.add(new VarInsnNode(Opcodes.ALOAD, 1));
+                    patch.add(new MethodInsnNode(
+                        Opcodes.INVOKESTATIC,
+                        'Crazer/cubeofinterest/cointcoregto/coremod/DimensionConditionCoremodHook',
+                        'isPersonalSpaceOverworld',
+                        '(Ljava/lang/Object;Ljava/lang/Object;)Z',
+                        false
+                    ));
+                    patch.add(keepOriginal);
+
+                    found.instructions.insertBefore(ret, patch);
+                }
+
+                if (found.maxStack < 2) found.maxStack = 2;
                 return classNode;
             }
         }
