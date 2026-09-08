@@ -153,6 +153,8 @@ dependencies {
     runtimeOnly fg.deobf("local:fastcollection:1.0")
     compileOnly fg.deobf("local:emi:1.1.22+1.20.1+forge")
     runtimeOnly fg.deobf("local:emi:1.1.22+1.20.1+forge")
+    compileOnly fg.deobf(files('libs/gtceu-1.20.1-forge-1.20.1-26.7.3.jar'))
+    compileOnly files('libs/ldlib-forge-1.20.1-1.0.50.jar')
 
     // JDA is visible in dev through implementation.extendsFrom(shade),
     // and packed into release jar through shadowJar + relocations.

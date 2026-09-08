@@ -1,6 +1,7 @@
 package Crazer.cubeofinterest.cointcoregto;
 
 import Crazer.cubeofinterest.cointcoregto.battlepass.network.BattlePassNetwork;
+import Crazer.cubeofinterest.cointcoregto.bosssim.gt.BossSimulationGTAddon;
 import Crazer.cubeofinterest.cointcoregto.compat.radio.CointRadioBlocks;
 import Crazer.cubeofinterest.cointcoregto.compat.radio.CointRadioNetwork;
 import Crazer.cubeofinterest.cointcoregto.exchanger.CointExchangerClient;
@@ -519,6 +520,7 @@ public class CointCoreGTO {
         Crazer.cubeofinterest.cointcoregto.invview.InvViewRegistry.register(modEventBus);
         BattlePassNetwork.register();
         modEventBus.addListener(this::onClientSetup);
+        BossSimulationGTAddon.register(modEventBus);
 
         registerNetwork();
         CointCoreGTOItemShare.registerNetwork();
