@@ -97,7 +97,7 @@ function initializeCoreMod() {
                 return patchRenderMachine(
                     classNode,
                     'MachineRenderer',
-                    '[CointCoreGTO] Boss Simulation Chamber v5.12.32 patched GTCEu MachineRenderer'
+                    '[CointCoreGTO] Boss Simulation Chamber v5.12.34 patched GTCEu MachineRenderer'
                 );
             }
         },
@@ -110,7 +110,7 @@ function initializeCoreMod() {
                 return patchRenderMachine(
                     classNode,
                     'OverlayTieredMachineRenderer',
-                    '[CointCoreGTO] Boss Simulation Chamber v5.12.32 patched GTCEu OverlayTieredMachineRenderer'
+                    '[CointCoreGTO] Boss Simulation Chamber v5.12.34 patched GTCEu OverlayTieredMachineRenderer'
                 );
             }
         },
@@ -162,7 +162,7 @@ function initializeCoreMod() {
                 ));
                 foundMethod.instructions.insert(flattenCall, patch);
 
-                print('[CointCoreGTO] Boss Simulation Chamber v5.12.32 patched GTO PatternPreview hatch map');
+                print('[CointCoreGTO] Boss Simulation Chamber v5.12.34 patched GTO PatternPreview hatch map');
                 return classNode;
             }
         },
@@ -200,7 +200,7 @@ function initializeCoreMod() {
                 previewCall.owner = PREVIEW_OWNER;
                 previewCall.name = 'showPreview';
                 previewCall.itf = false;
-                print('[CointCoreGTO] Boss Simulation Chamber v5.12.32 redirected terminal in-world preview');
+                print('[CointCoreGTO] Boss Simulation Chamber v5.12.34 redirected terminal in-world preview');
                 return classNode;
             }
         }

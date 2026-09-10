@@ -22,7 +22,7 @@ public final class BossSimulationRenderHooks {
             if (controller != null && controller.self() instanceof BossSimulationChamberMachine chamber && chamber.isFormed()) {
                 if (!hideLogPrinted) {
                     hideLogPrinted = true;
-                    System.out.println("[CointCoreGTO] Boss Simulation Chamber v5.12.32 hiding attached GTCEu parts");
+                    System.out.println("[CointCoreGTO] Boss Simulation Chamber v5.12.34 hiding attached GTCEu parts");
                 }
                 return true;
             }

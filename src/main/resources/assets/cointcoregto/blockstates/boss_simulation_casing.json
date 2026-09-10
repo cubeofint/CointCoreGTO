@@ -1,6 +1,0 @@
-{
-  "variants": {
-    "formed=false": { "model": "cointcoregto:block/boss_simulation_casing" },
-    "formed=true":  { "model": "cointcoregto:block/boss_simulation_casing" }
-  }
-}

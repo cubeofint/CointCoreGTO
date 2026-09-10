@@ -49,16 +49,13 @@ public final class BossSimulationChamberRenderer extends WorkableCasingMachineRe
             ModelState rotation) {
 
         if (machine == null || machine.getLevel() instanceof TrackedDummyWorld) {
-            Minecraft minecraft = Minecraft.getInstance();
-            BlockState previewState = BossSimulationBlocks.BOSS_SIMULATION_PREVIEW_CONTROLLER.get().defaultBlockState();
-            BakedModel previewModel = minecraft.getBlockRenderer().getBlockModel(previewState);
-            BakedModel missingModel = minecraft.getModelManager().getMissingModel();
-            if (previewModel != missingModel) {
-                quads.addAll(previewModel.getQuads(previewState, side, random));
-                return;
-            }
+            if (renderControllerProxy(quads, side, random)) return;
             super.renderMachine(quads, definition, machine, frontFacing, side, random, modelFacing, rotation);
             return;
+        }
+
+        if (machine instanceof BossSimulationChamberMachine chamber && !chamber.isFormed()) {
+            if (renderControllerProxy(quads, side, random)) return;
         }
 
         if (machine instanceof BossSimulationChamberMachine chamber && chamber.isFormed()) {
@@ -87,7 +84,7 @@ public final class BossSimulationChamberRenderer extends WorkableCasingMachineRe
                 boolean formedTexturePresent = minecraft.getResourceManager().getResource(FORMED_TEXTURE).isPresent();
 
                 System.err.println(
-                        "[CointCoreGTO] Boss Simulation Chamber v5.12.32 render anchor resolved to missing model. "
+                        "[CointCoreGTO] Boss Simulation Chamber v5.12.35 render anchor resolved to missing model. "
                                 + "facing=" + facing
                                 + ", anchorBlockstatePresent=" + anchorBlockstatePresent
                                 + ", formedJsonPresent=" + formedJsonPresent
@@ -97,6 +94,18 @@ public final class BossSimulationChamberRenderer extends WorkableCasingMachineRe
         }
 
         super.renderMachine(quads, definition, machine, frontFacing, side, random, modelFacing, rotation);
+    }
+
+    private static boolean renderControllerProxy(
+            List<BakedQuad> quads,
+            Direction side,
+            RandomSource random) {
+        Minecraft minecraft = Minecraft.getInstance();
+        BlockState previewState = BossSimulationBlocks.BOSS_SIMULATION_PREVIEW_CONTROLLER.get().defaultBlockState();
+        BakedModel previewModel = minecraft.getBlockRenderer().getBlockModel(previewState);
+        if (previewModel == minecraft.getModelManager().getMissingModel()) return false;
+        quads.addAll(previewModel.getQuads(previewState, side, random));
+        return true;
     }
 
     private static BakedQuad translateQuad(BakedQuad quad, float x, float y, float z) {

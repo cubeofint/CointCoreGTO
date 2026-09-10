@@ -54,7 +54,7 @@ public final class BossSimulationPreviewHooks {
         Direction depth = findDepthDirection(controllerPos, blockMap);
         if (depth == null) {
             System.err.println(
-                    "[CointCoreGTO] Boss Simulation Chamber v5.12.32 GTO fullscreen preview: "
+                    "[CointCoreGTO] Boss Simulation Chamber v5.12.34 GTO fullscreen preview: "
                             + "could not resolve structure depth from controller at " + controllerPos);
             return;
         }
@@ -72,7 +72,7 @@ public final class BossSimulationPreviewHooks {
                 || !blockMap.containsKey(outputPos.asLong())
                 || !blockMap.containsKey(energyPos.asLong())) {
             System.err.println(
-                    "[CointCoreGTO] Boss Simulation Chamber v5.12.32 GTO fullscreen preview: "
+                    "[CointCoreGTO] Boss Simulation Chamber v5.12.34 GTO fullscreen preview: "
                             + "resolved hatch positions are outside block map; controller=" + controllerPos
                             + ", depth=" + depth
                             + ", input=" + inputPos
@@ -94,7 +94,7 @@ public final class BossSimulationPreviewHooks {
         if (!fullscreenPreviewLogPrinted) {
             fullscreenPreviewLogPrinted = true;
             System.err.println(
-                    "[CointCoreGTO] Boss Simulation Chamber v5.12.32 GTO fullscreen PatternPreview patched; "
+                    "[CointCoreGTO] Boss Simulation Chamber v5.12.34 GTO fullscreen PatternPreview patched; "
                             + "input=" + inputPos
                             + ", output=" + outputPos
                             + ", energy=" + energyPos
@@ -191,7 +191,7 @@ public final class BossSimulationPreviewHooks {
 
         if (!terminalPreviewLogPrinted) {
             terminalPreviewLogPrinted = true;
-            System.err.println("[CointCoreGTO] Boss Simulation Chamber v5.12.32 terminal preview intercepted; proxies=3");
+            System.err.println("[CointCoreGTO] Boss Simulation Chamber v5.12.34 terminal preview intercepted; proxies=3");
         }
 
         return result;
