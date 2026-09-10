@@ -9,13 +9,9 @@ import com.gregtechceu.gtceu.api.machine.multiblock.WorkableElectricMultiblockMa
 import com.gregtechceu.gtceu.api.recipe.GTRecipeDefinition;
 import com.gregtechceu.gtceu.api.recipe.handler.ICustomRecipeLogicHolder;
 import com.gregtechceu.gtceu.api.recipe.handler.RecipeHandlerUnit;
-import it.unimi.dsi.fastutil.longs.LongIterator;
 import net.minecraft.ChatFormatting;
-import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
-import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.List;
 
@@ -110,35 +106,8 @@ public final class BossSimulationChamberMachine extends WorkableElectricMultiblo
     }
 
     @Override
-    public void onStructureFormed() {
-        super.onStructureFormed();
-        setCasingVisualState(true);
-    }
-
-    @Override
     public void onStructureInvalid() {
-        setCasingVisualState(false);
         BossSimulationChamberRuntime.onStructureInvalid(this);
         super.onStructureInvalid();
-    }
-
-    private void setCasingVisualState(boolean formed) {
-        Level level = getLevel();
-        if (level == null || level.isClientSide || getMultiblockState() == null) return;
-
-        LongIterator iterator = getMultiblockState().cache.iterator();
-        while (iterator.hasNext()) {
-            BlockPos pos = BlockPos.of(iterator.nextLong());
-            BlockState state = level.getBlockState(pos);
-            if (!state.is(BossSimulationBlocks.BOSS_SIMULATION_CASING.get()) ||
-                    !state.hasProperty(BossSimulationCasingBlock.FORMED) ||
-                    state.getValue(BossSimulationCasingBlock.FORMED) == formed) {
-                continue;
-            }
-            level.setBlock(pos, state.setValue(BossSimulationCasingBlock.FORMED, formed), 2);
-        }
-
-        BlockState controllerState = level.getBlockState(getPos());
-        level.sendBlockUpdated(getPos(), controllerState, controllerState, 2);
     }
 }
