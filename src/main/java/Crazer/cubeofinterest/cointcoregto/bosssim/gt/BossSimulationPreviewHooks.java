@@ -22,11 +22,6 @@ public final class BossSimulationPreviewHooks {
 
     private BossSimulationPreviewHooks() {}
 
-    /**
-     * GTCEu TerminalBehavior path. Keep this because it is also used by the
-     * in-world terminal preview, which is separate from GTO's fullscreen
-     * PatternPreview screen.
-     */
     public static void showPreview(
             BlockPos pos,
             Direction frontFacing,
@@ -44,16 +39,6 @@ public final class BossSimulationPreviewHooks {
         MultiblockInWorldPreviewRenderer.showPreview(pos, frontFacing, upwardsFacing, target, duration);
     }
 
-    /**
-     * GTO 0.5.6 fullscreen PatternPreview path.
-     *
-     * PatternPreview flattens GTOLib's pattern result into a
-     * Long2ReferenceOpenHashMap<BlockInfo> and then builds its dummy world
-     * directly from that map. GTOLib chooses the casing fallback for our
-     * ability predicates, so patching shapeInfo/TerminalBehavior cannot affect
-     * this screen. This hook runs immediately after GTO creates that flat map
-     * and before it creates any block entities / fills the dummy world.
-     */
     public static void patchGtoFullscreenPreview(
             BlockPos controllerPos,
             Long2ReferenceOpenHashMap<BlockInfo> blockMap) {
@@ -66,12 +51,6 @@ public final class BossSimulationPreviewHooks {
         if (controllerInfo == null || controllerInfo.getBlockState() == null) return;
         if (controllerInfo.getBlockState().getBlock() != definition.get()) return;
 
-        /*
-         * The controller is centered on one 3x3 wall. Exactly one horizontal
-         * direction from it contains both +1 and +2 structure positions. That
-         * is the depth direction, and deriving it from geometry makes this
-         * independent of whatever canonical facing GTOLib picked for preview.
-         */
         Direction depth = findDepthDirection(controllerPos, blockMap);
         if (depth == null) {
             System.err.println(

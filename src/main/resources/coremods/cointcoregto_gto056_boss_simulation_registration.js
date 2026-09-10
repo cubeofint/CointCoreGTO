@@ -134,14 +134,6 @@ function initializeCoreMod() {
                     throw new Error('Required method not found: com.gtocore.client.gui.PatternPreview#initializePattern');
                 }
 
-                /*
-                 * GTO 0.5.6 bytecode:
-                 *   local 7 = controller BlockPos
-                 *   local 8 = flattened Long2ReferenceOpenHashMap<BlockInfo>
-                 * The map is complete immediately after patternMap.forEach(...).
-                 * Patch it before GTO calls BlockInfo#getBlockEntity and before
-                 * it copies entries into PatternPreview.LEVEL.
-                 */
                 var flattenCall = null;
                 for (var insn = foundMethod.instructions.getFirst(); insn !== null; insn = insn.getNext()) {
                     if (insn.getOpcode() === Opcodes.INVOKEVIRTUAL
