@@ -87,7 +87,7 @@ public final class BossSimulationChamberRenderer extends WorkableCasingMachineRe
                 boolean formedTexturePresent = minecraft.getResourceManager().getResource(FORMED_TEXTURE).isPresent();
 
                 System.err.println(
-                        "[CointCoreGTO] Boss Simulation Chamber v5.12.27 render anchor resolved to missing model. "
+                        "[CointCoreGTO] Boss Simulation Chamber v5.12.32 render anchor resolved to missing model. "
                                 + "facing=" + facing
                                 + ", anchorBlockstatePresent=" + anchorBlockstatePresent
                                 + ", formedJsonPresent=" + formedJsonPresent

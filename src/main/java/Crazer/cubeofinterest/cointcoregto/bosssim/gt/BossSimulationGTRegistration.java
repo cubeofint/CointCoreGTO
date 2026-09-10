@@ -75,7 +75,7 @@ public final class BossSimulationGTRegistration {
                 .renderer(BossSimulationChamberRenderer::new)
                 .register();
 
-        System.out.println("[CointCoreGTO] Boss Simulation Chamber v5.12.27 registered during GTO GTOMachines.init; in-world preview machine entities enabled");
+        System.out.println("[CointCoreGTO] Boss Simulation Chamber v5.12.32 registered during GTO GTOMachines.init; GTO fullscreen + terminal preview patches enabled");
     }
 
     public static MultiblockMachineDefinition getBossSimulationChamber() {

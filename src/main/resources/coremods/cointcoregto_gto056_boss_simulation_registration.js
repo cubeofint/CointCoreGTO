@@ -97,7 +97,7 @@ function initializeCoreMod() {
                 return patchRenderMachine(
                     classNode,
                     'MachineRenderer',
-                    '[CointCoreGTO] Boss Simulation Chamber v5.12.27 patched GTCEu MachineRenderer'
+                    '[CointCoreGTO] Boss Simulation Chamber v5.12.32 patched GTCEu MachineRenderer'
                 );
             }
         },
@@ -110,67 +110,105 @@ function initializeCoreMod() {
                 return patchRenderMachine(
                     classNode,
                     'OverlayTieredMachineRenderer',
-                    '[CointCoreGTO] Boss Simulation Chamber v5.12.27 patched GTCEu OverlayTieredMachineRenderer'
+                    '[CointCoreGTO] Boss Simulation Chamber v5.12.32 patched GTCEu OverlayTieredMachineRenderer'
                 );
             }
         },
-        'CointCoreGTO_GTCEU2673_BossSimulation_InWorldPreviewRenderStates': {
+        'CointCoreGTO_GTO056_BossSimulation_FullscreenPatternPreviewHatches': {
             'target': {
                 'type': 'CLASS',
-                'name': 'com.gregtechceu.gtceu.client.renderer.MultiblockInWorldPreviewRenderer'
+                'name': 'com.gtocore.client.gui.PatternPreview'
             },
             'transformer': function (classNode) {
-                var found = null;
-                var desc = '(Lcom/lowdragmc/lowdraglib/utils/TrackedDummyWorld;Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/block/BlockRenderDispatcher;Lnet/minecraft/client/renderer/RenderType;Lcom/lowdragmc/lowdraglib/client/scene/WorldSceneRenderer$VertexConsumerWrapper;Ljava/util/Map;)V';
+                var foundMethod = null;
+                var methodDesc = '(Lcom/gtolib/api/machine/MultiblockDefinition;Lcom/gtolib/api/machine/MultiblockDefinition$Pattern;IZ)Lcom/gtocore/client/gui/PatternPreview$MBPattern;';
+
                 for (var i = 0; i < classNode.methods.size(); i++) {
                     var method = classNode.methods.get(i);
-                    if (method.name === 'renderBlocks' && method.desc === desc) {
-                        if (found !== null) {
-                            throw new Error('Multiple MultiblockInWorldPreviewRenderer#renderBlocks methods found');
-                        }
-                        found = method;
+                    if (method.name === 'initializePattern' && method.desc === methodDesc) {
+                        if (foundMethod !== null) throw new Error('Multiple PatternPreview#initializePattern methods found');
+                        foundMethod = method;
                     }
                 }
-                if (found === null) {
-                    throw new Error('Required method not found: MultiblockInWorldPreviewRenderer#renderBlocks');
+                if (foundMethod === null) {
+                    throw new Error('Required method not found: com.gtocore.client.gui.PatternPreview#initializePattern');
                 }
 
-                var stateStore = null;
-                for (var insn = found.instructions.getFirst(); insn !== null; insn = insn.getNext()) {
-                    if (insn.getOpcode() === Opcodes.INVOKEVIRTUAL &&
-                        insn.owner === 'com/lowdragmc/lowdraglib/utils/BlockInfo' &&
-                        insn.name === 'getBlockState' &&
-                        insn.desc === '()Lnet/minecraft/world/level/block/state/BlockState;') {
-                        if (stateStore !== null) {
-                            throw new Error('Multiple BlockInfo#getBlockState calls found in renderBlocks');
+                /*
+                 * GTO 0.5.6 bytecode:
+                 *   local 7 = controller BlockPos
+                 *   local 8 = flattened Long2ReferenceOpenHashMap<BlockInfo>
+                 * The map is complete immediately after patternMap.forEach(...).
+                 * Patch it before GTO calls BlockInfo#getBlockEntity and before
+                 * it copies entries into PatternPreview.LEVEL.
+                 */
+                var flattenCall = null;
+                for (var insn = foundMethod.instructions.getFirst(); insn !== null; insn = insn.getNext()) {
+                    if (insn.getOpcode() === Opcodes.INVOKEVIRTUAL
+                            && insn.owner === 'it/unimi/dsi/fastutil/objects/Reference2ReferenceOpenHashMap'
+                            && insn.name === 'forEach'
+                            && insn.desc === '(Ljava/util/function/BiConsumer;)V') {
+                        if (flattenCall !== null) {
+                            throw new Error('Multiple PatternPreview initializePattern flatten forEach calls found');
                         }
-                        var next = insn.getNext();
-                        while (next !== null && next.getOpcode() < 0) {
-                            next = next.getNext();
-                        }
-                        if (next === null || next.getOpcode() !== Opcodes.ASTORE) {
-                            throw new Error('BlockState ASTORE not found after BlockInfo#getBlockState');
-                        }
-                        stateStore = next;
+                        flattenCall = insn;
                     }
                 }
-                if (stateStore === null) {
-                    throw new Error('BlockInfo#getBlockState call not found in renderBlocks');
+                if (flattenCall === null) {
+                    throw new Error('PatternPreview initializePattern flatten forEach call not found');
                 }
 
                 var patch = new InsnList();
-                patch.add(new VarInsnNode(Opcodes.ALOAD, stateStore.var));
-                patch.add(new VarInsnNode(Opcodes.ALOAD, 5));
+                patch.add(new VarInsnNode(Opcodes.ALOAD, 7));
+                patch.add(new VarInsnNode(Opcodes.ALOAD, 8));
                 patch.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     PREVIEW_OWNER,
-                    'resolveRenderState',
-                    '(Lnet/minecraft/world/level/block/state/BlockState;Ljava/util/Map;)Lnet/minecraft/world/level/block/state/BlockState;',
+                    'patchGtoFullscreenPreview',
+                    '(Lnet/minecraft/core/BlockPos;Lit/unimi/dsi/fastutil/longs/Long2ReferenceOpenHashMap;)V',
                     false
                 ));
-                patch.add(new VarInsnNode(Opcodes.ASTORE, stateStore.var));
-                found.instructions.insert(stateStore, patch);
-                print('[CointCoreGTO] Boss Simulation Chamber v5.12.27 patched GTCEu in-world preview render states');
+                foundMethod.instructions.insert(flattenCall, patch);
+
+                print('[CointCoreGTO] Boss Simulation Chamber v5.12.32 patched GTO PatternPreview hatch map');
+                return classNode;
+            }
+        },
+        'CointCoreGTO_GTCEU2673_BossSimulation_TerminalPreviewRedirect': {
+            'target': {
+                'type': 'CLASS',
+                'name': 'com.gregtechceu.gtceu.common.item.TerminalBehavior'
+            },
+            'transformer': function (classNode) {
+                var foundMethod = null;
+                var methodDesc = '(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;';
+                var previewDesc = '(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;Lnet/minecraft/core/Direction;Lcom/gregtechceu/gtceu/api/pattern/MultiblockShapeInfo;I)V';
+
+                for (var i = 0; i < classNode.methods.size(); i++) {
+                    var method = classNode.methods.get(i);
+                    if (method.name === 'onItemUseFirst' && method.desc === methodDesc) {
+                        if (foundMethod !== null) throw new Error('Multiple TerminalBehavior#onItemUseFirst methods found');
+                        foundMethod = method;
+                    }
+                }
+                if (foundMethod === null) throw new Error('Required method not found: TerminalBehavior#onItemUseFirst');
+
+                var previewCall = null;
+                for (var insn = foundMethod.instructions.getFirst(); insn !== null; insn = insn.getNext()) {
+                    if (insn.getOpcode() === Opcodes.INVOKESTATIC
+                            && insn.owner === 'com/gregtechceu/gtceu/client/renderer/MultiblockInWorldPreviewRenderer'
+                            && insn.name === 'showPreview'
+                            && insn.desc === previewDesc) {
+                        if (previewCall !== null) throw new Error('Multiple terminal showPreview calls found');
+                        previewCall = insn;
+                    }
+                }
+                if (previewCall === null) throw new Error('TerminalBehavior showPreview call not found');
+
+                previewCall.owner = PREVIEW_OWNER;
+                previewCall.name = 'showPreview';
+                previewCall.itf = false;
+                print('[CointCoreGTO] Boss Simulation Chamber v5.12.32 redirected terminal in-world preview');
                 return classNode;
             }
         }
