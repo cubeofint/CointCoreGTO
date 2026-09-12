@@ -23,6 +23,7 @@ public final class BossSimulationBlocks {
                             .strength(5.0F, 6.0F)
                             .requiresCorrectToolForDrops()
                             .lightLevel(state -> state.getValue(BossSimulationCasingBlock.FORMED) ? 12 : 0)
+                            .noOcclusion()
             )
     );
 

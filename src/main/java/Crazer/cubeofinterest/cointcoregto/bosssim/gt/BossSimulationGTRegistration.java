@@ -45,7 +45,9 @@ public final class BossSimulationGTRegistration {
                 .rotationState(RotationState.NON_Y_AXIS)
                 .recipeType(GTRecipeTypes.DUMMY_RECIPES)
                 .appearanceBlock(BossSimulationBlocks.BOSS_SIMULATION_CASING)
-                .blockProp(properties -> properties.lightLevel(state -> 12))
+                .blockProp(properties -> properties
+                        .lightLevel(state -> 12)
+                        .noOcclusion())
                 .pattern(definition -> FactoryBlockPattern.start()
                         .aisle("COC", "CCC")
                         .aisle("ICE", "CCC")
